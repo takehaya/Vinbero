@@ -136,3 +136,27 @@ func (m *ResourceManager) GetVrfByName(name string) (ManagedVrf, bool) {
 	}
 	return ManagedVrf{}, false
 }
+
+// VrfObjects returns a copy of the VRF objects' record. It is nil on a file
+// written before they were recorded.
+func (m *ResourceManager) VrfObjects() *ManagedVrfObjects {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.state.VrfObjects == nil {
+		return nil
+	}
+	return m.state.VrfObjects.clone()
+}
+
+// SaveVrfObjects records the VRF objects and writes the state file. On a
+// persist failure the record stays in memory and the next persist writes it.
+func (m *ResourceManager) SaveVrfObjects(objs ManagedVrfObjects) error {
+	c := objs.clone()
+	m.mu.Lock()
+	m.state.VrfObjects = c
+	m.mu.Unlock()
+	if err := m.persist(); err != nil {
+		return fmt.Errorf("persist state after updating VRF objects: %w", err)
+	}
+	return nil
+}

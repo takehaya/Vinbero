@@ -2,7 +2,8 @@
 # examples/device-attach/test.sh
 # Attach and detach a device at runtime (DeviceService), check that it is
 # attached again after a daemon restart, that vanished interfaces are
-# dropped, and that bridge members added at runtime survive a restart.
+# dropped, that bridge members added at runtime survive a restart, and that
+# VRF ids and runtime ACs do too.
 
 set -e
 
@@ -83,6 +84,27 @@ has_xdp() {
 
 state_has_device() {
     jq -e --arg n "$1" '.devices[]? | select(.name == $n)' "$STATE_FILE"
+}
+
+vrf_id_of() {
+    vbctl --json vrf show | jq -r --arg n "$1" '.vrfs[] | select(.name == $n) | .vrf_id // 0'
+}
+
+vrf_acs() {
+    vbctl --json vrf show | jq -c --arg n "$1" '[.vrfs[] | select(.name == $n) | .acs[]?.interface_name]'
+}
+
+state_has_ac() {
+    jq -e --arg v "$1" --arg i "$2" \
+        '.vrf_objects.entries[]? | select(.name == $v) | .runtime_acs[]? | select(.interface == $i)' "$STATE_FILE"
+}
+
+# The classification must be in place before the first device is attached.
+classified_before_attach() {
+    local classified attached
+    classified=$(grep -n "VRF ingress classification programmed" "$VINBERO_LOG" | head -1 | cut -d: -f1)
+    attached=$(grep -n "Attached device" "$VINBERO_LOG" | head -1 | cut -d: -f1)
+    [ -n "$classified" ] && [ -n "$attached" ] && [ "$classified" -lt "$attached" ]
 }
 
 master_of() {
@@ -203,6 +225,46 @@ check "member remove $m0" vbctl vrf bridge-member-remove --vrf l2dva --interface
 check "$m0 released" test -z "$(master_of "$m0")"
 check "bridge detach" vbctl vrf bridge-detach --vrf l2dva
 r3 ip link del "$m0" 2>/dev/null || true
+
+echo ""
+echo "=========================================="
+echo "VRF ids and runtime ACs across a restart"
+echo "=========================================="
+
+ra0="${TOPO_NS_PREFIX}ra0"
+ra1="${TOPO_NS_PREFIX}ra1"
+r3 ip link add "$ra0" type dummy
+r3 ip link add "$ra1" type dummy
+check "AC add $ra0" vbctl vrf ac-add --vrf racsa --interface "$ra0"
+check "AC add $ra1 in a second VRF" vbctl vrf ac-add --vrf racsb --interface "$ra1"
+ida=$(vrf_id_of racsa)
+idb=$(vrf_id_of racsb)
+check "VRF ids allocated" test "$ida" -gt 0 -a "$idb" -gt "$ida"
+check "AC recorded in the state file" state_has_ac racsa "$ra0"
+stop_daemon
+start_daemon
+check "vrf_id of racsa kept" test "$(vrf_id_of racsa)" = "$ida"
+check "vrf_id of racsb kept" test "$(vrf_id_of racsb)" = "$idb"
+check "runtime AC restored" test "$(vrf_acs racsa)" = "[\"$ra0\"]"
+check "ingress classified before the first attach" classified_before_attach
+stop_daemon
+# While the daemon is down the interface behind one AC disappears.
+r3 ip link del "$ra0"
+start_daemon
+check "daemon starts with a vanished runtime AC" kill -0 "$VINBERO_PID"
+check "vanished AC reported" grep -q "Skipping AC whose interface is gone" "$VINBERO_LOG"
+check "vanished AC stays recorded" test "$(vrf_acs racsa)" = "[\"$ra0\"]"
+check "AC remove of the vanished interface" vbctl vrf ac-remove --vrf racsa --interface "$ra0"
+check_not "removed AC gone from the state file" state_has_ac racsa "$ra0"
+check "AC remove $ra1" vbctl vrf ac-remove --vrf racsb --interface "$ra1"
+check "VRF delete" vbctl vrf delete --name racsb
+stop_daemon
+start_daemon
+check "AC add after deleting a VRF" vbctl vrf ac-add --vrf racsc --interface "$ra1"
+idc=$(vrf_id_of racsc)
+check "deleted VRF's id not used again" test "$idc" -gt "$idb"
+check "AC remove in the new VRF" vbctl vrf ac-remove --vrf racsc --interface "$ra1"
+r3 ip link del "$ra1" 2>/dev/null || true
 
 stop_daemon
 

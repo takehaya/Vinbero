@@ -38,12 +38,12 @@ func resolver(names map[string]uint32) func(string) (uint32, error) {
 // global VRF is id 0 (not a stored VRF).
 func TestManager_EnsureAndID(t *testing.T) {
 	m := NewManager()
-	a := m.Ensure("a")
-	b := m.Ensure("b")
+	a := mustEnsure(t, m, "a")
+	b := mustEnsure(t, m, "b")
 	if a.ID == GlobalVRFID || b.ID == GlobalVRFID || a.ID == b.ID {
 		t.Fatalf("ids a=%d b=%d, want distinct non-zero", a.ID, b.ID)
 	}
-	if a2 := m.Ensure("a"); a2.ID != a.ID {
+	if a2 := mustEnsure(t, m, "a"); a2.ID != a.ID {
 		t.Errorf("Ensure(a) id = %d, want stable %d", a2.ID, a.ID)
 	}
 	if id, ok := m.IDForName("a"); !ok || id != a.ID {
@@ -57,17 +57,20 @@ func TestManager_EnsureAndID(t *testing.T) {
 	}
 }
 
-// Delete recycles the id for the next Ensure.
-func TestManager_DeleteRecyclesID(t *testing.T) {
+// A deleted VRF's id is not handed out again.
+func TestManager_DeleteDoesNotReuseID(t *testing.T) {
 	m := NewManager()
-	a := m.Ensure("a")
+	a := mustEnsure(t, m, "a")
 	m.Delete("a")
 	if _, ok := m.IDForName("a"); ok {
 		t.Error("IDForName(a) after delete: want absent")
 	}
-	c := m.Ensure("c")
-	if c.ID != a.ID {
-		t.Errorf("recycled id = %d, want %d", c.ID, a.ID)
+	if c := mustEnsure(t, m, "c"); c.ID <= a.ID {
+		t.Errorf("id after delete = %d, want above %d", c.ID, a.ID)
+	}
+	// Recreating the same name is a new VRF too.
+	if again := mustEnsure(t, m, "a"); again.ID == a.ID {
+		t.Errorf("recreated VRF reused id %d", a.ID)
 	}
 }
 
@@ -142,7 +145,7 @@ func TestManager_ReturnedACsAreCopies(t *testing.T) {
 	m := NewManager()
 	_, _ = m.AddAC("v", AC{"eth1", 100})
 
-	got := m.Ensure("v")
+	got := mustEnsure(t, m, "v")
 	if len(got.ACs) != 1 {
 		t.Fatalf("Ensure ACs = %+v, want one", got.ACs)
 	}
@@ -272,7 +275,7 @@ func TestManager_SetDevice(t *testing.T) {
 	}
 }
 
-// Delete drops the whole object including the facet and recycles the id.
+// Delete drops the whole object including the facet, and the id stays retired.
 func TestManager_Delete_DropsDeviceFacet(t *testing.T) {
 	m := NewManager()
 	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"vrf-a": 9}}
@@ -284,14 +287,14 @@ func TestManager_Delete_DropsDeviceFacet(t *testing.T) {
 	if _, ok := m.Get("vrf-a"); ok {
 		t.Error("Get after Delete: want absent")
 	}
-	if next := m.Ensure("vrf-b"); next.ID != v.ID {
-		t.Errorf("id not recycled: got %d, want %d", next.ID, v.ID)
+	if next := mustEnsure(t, m, "vrf-b"); next.ID == v.ID {
+		t.Errorf("id %d reused after Delete", v.ID)
 	}
 }
 
 // The reserved global VRF name maps ACs to vrf_id 0 (the underlay): under
 // default-deny those ACs get an explicit {ifindex, vlan} -> 0 entry so they
-// pass, while a tenant VRF keeps a non-zero id. The id 0 is never recycled.
+// pass, while a tenant VRF keeps a non-zero id. The id 0 is never handed out.
 func TestManager_GlobalVRFAC(t *testing.T) {
 	m := NewManager()
 	if added, err := m.AddAC(GlobalVRFName, AC{"eth3", 0}); err != nil || !added {
@@ -315,10 +318,10 @@ func TestManager_GlobalVRFAC(t *testing.T) {
 	if v, ok := fp.mapping[bpf.IngressACKey{Ifindex: 13, VlanId: 0}]; !ok || v != GlobalVRFID {
 		t.Errorf("global AC eth3 -> (%d, %v), want explicit 0 entry", v, ok)
 	}
-	// The global id must not be recycled to a tenant on delete.
+	// The global id must not go to a tenant after a delete.
 	m.Delete(GlobalVRFName)
-	if next := m.Ensure("tenant2"); next.ID == GlobalVRFID {
-		t.Errorf("global id 0 was recycled to tenant2")
+	if next := mustEnsure(t, m, "tenant2"); next.ID == GlobalVRFID {
+		t.Errorf("global id 0 was handed to tenant2")
 	}
 }
 
@@ -410,7 +413,7 @@ func TestManager_Reconcile_UnresolvableIsFatal(t *testing.T) {
 // front door on its own; default-deny does.
 func TestManager_EnabledRules(t *testing.T) {
 	m := NewManager()
-	m.Ensure("mup1") // id, no AC
+	mustEnsure(t, m, "mup1") // id, no AC
 	fp := &fakeProg{}
 	if err := m.Reconcile(resolver(nil), fp); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -526,7 +529,7 @@ func TestManager_BridgeMembers(t *testing.T) {
 			t.Errorf("AddBridgeMember(%q, %q): want error", bad.vrf, bad.member)
 		}
 	}
-	m.Ensure("no-bridge")
+	mustEnsure(t, m, "no-bridge")
 	if _, err := m.AddBridgeMember("no-bridge", "veth3", ops); err == nil {
 		t.Error("VRF without a bridge facet: want error")
 	}
@@ -643,4 +646,13 @@ func TestManager_BridgeFacetState(t *testing.T) {
 	if _, ok := m.IDForName("evi-100"); !ok {
 		t.Error("identity gone after RemoveBridge")
 	}
+}
+
+func mustEnsure(t *testing.T, m *Manager, name string) VRF {
+	t.Helper()
+	v, err := m.Ensure(name)
+	if err != nil {
+		t.Fatalf("Ensure(%q): %v", name, err)
+	}
+	return v
 }

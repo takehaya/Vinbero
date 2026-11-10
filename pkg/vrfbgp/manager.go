@@ -405,7 +405,13 @@ func (m *Manager) Bind(b Binding) error {
 	if b.VRFName == "" {
 		return ErrEmptyVRFName
 	}
-	m.vrf.Ensure(b.VRFName) // VRF identity is independent of the binding's lifetime
+	// VRF identity is independent of the binding's lifetime.
+	if _, err := m.vrf.Ensure(b.VRFName); err != nil {
+		return err
+	}
+	// Bindings are not saved, so the state file must not fail one. An id that
+	// could not be saved stays pending for the next successful save.
+	m.vrf.TrySave()
 	b = b.Normalize()
 	m.mu.Lock()
 	prev := m.bindings[b.VRFName]

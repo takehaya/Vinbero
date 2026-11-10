@@ -3,6 +3,7 @@ package netresource
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -145,5 +146,95 @@ func TestReconcile_EmptyStateSkipsPersist(t *testing.T) {
 	m.ensureBridgeInState("br-x", 1, nil, 9, "")
 	if err := m.persist(); err == nil {
 		t.Fatal("persist into an unwritable state dir must fail")
+	}
+}
+
+// VRF identities and runtime ACs round-trip through the file, next to the
+// other records.
+func TestVrfObjects_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	m, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ManagedVrfObjects{NextVrfID: 9, Entries: []ManagedVrfObject{
+		{Name: "global", VrfID: 0, RuntimeACs: []ManagedAC{{Interface: "eth0", VLAN: 0}}},
+		{Name: "tenant-a", VrfID: 3, RuntimeACs: []ManagedAC{{Interface: "vb1", VLAN: 0}, {Interface: "vb2", VLAN: 100}}},
+		{Name: "tenant-b", VrfID: 8, Config: true},
+	}}
+	if err := m.SaveVrfObjects(want); err != nil {
+		t.Fatalf("SaveVrfObjects: %v", err)
+	}
+	m2, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := m2.VrfObjects(); got == nil || !reflect.DeepEqual(*got, want) {
+		t.Errorf("after reload = %+v\nwant %+v", got, want)
+	}
+	// No VRF at all is still a record: an empty list, not a missing one.
+	if err := m2.SaveVrfObjects(ManagedVrfObjects{NextVrfID: 10}); err != nil {
+		t.Fatal(err)
+	}
+	m3, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("reload of an empty record: %v", err)
+	}
+	if got := m3.VrfObjects(); got == nil || got.NextVrfID != 10 || len(got.Entries) != 0 {
+		t.Errorf("empty record after reload = %+v", got)
+	}
+}
+
+// A file from before VRF objects were recorded still loads, with the records
+// it does have intact, and reads as no saved identities.
+func TestVrfObjects_OlderFileWithoutTheFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{"vrfs":[{"name":"vrf1","table_id":100,"members":["eth1"],"enable_l3mdev_rule":true,"ifindex":5}],` +
+		`"bridges":[{"name":"br1","bd_id":10,"members":null,"ifindex":6}],` +
+		`"devices":[{"name":"vb1","mode":"generic"}]}`
+	if err := os.WriteFile(path, []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("older state refused: %v", err)
+	}
+	if got := m.VrfObjects(); got != nil {
+		t.Errorf("VrfObjects of an older file = %+v, want nil", got)
+	}
+	if err := m.SaveVrfObjects(ManagedVrfObjects{NextVrfID: 2, Entries: []ManagedVrfObject{{Name: "vrf1", VrfID: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m2.ListVrfs()) != 1 || len(m2.ListBridges()) != 1 || len(m2.ListDevices()) != 1 {
+		t.Errorf("older records lost: vrfs=%v bridges=%v devices=%v", m2.ListVrfs(), m2.ListBridges(), m2.ListDevices())
+	}
+	if got := m2.VrfObjects(); got == nil || got.NextVrfID != 2 {
+		t.Errorf("VrfObjects = %+v, want next 2", got)
+	}
+}
+
+// A record that lost its watermark or its entries is refused: either would
+// let the id of a deleted VRF be handed out again.
+func TestVrfObjects_PartialRecordIsRefused(t *testing.T) {
+	for name, objs := range map[string]string{
+		"no watermark":   `{"entries":[{"name":"a","vrf_id":1}]}`,
+		"zero watermark": `{"next_vrf_id":0,"entries":[]}`,
+		"no entries":     `{"next_vrf_id":3}`,
+		"null entries":   `{"next_vrf_id":3,"entries":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(`{"vrfs":[],"bridges":[],"vrf_objects":`+objs+`}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := NewResourceManager(path, zap.NewNop())
+			if err == nil || !strings.Contains(err.Error(), "vrf_objects") {
+				t.Fatalf("NewResourceManager = %v, want a vrf_objects error", err)
+			}
+		})
 	}
 }

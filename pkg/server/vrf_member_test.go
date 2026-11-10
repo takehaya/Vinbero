@@ -53,7 +53,7 @@ func TestVrfServer_BridgeMembers(t *testing.T) {
 		t.Errorf("member changes touched EVPN: %d enables, %d disables", hook.enableCnt-enables, hook.disableCnt)
 	}
 
-	s.mgr.Ensure("no-bridge")
+	mustEnsure(t, s.mgr, "no-bridge")
 	for _, tc := range []struct {
 		vrf, member string
 		code        connect.Code

@@ -14,6 +14,7 @@ package vrf
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"sync"
@@ -96,20 +97,42 @@ type VRF struct {
 	Bridge *Bridge
 }
 
-// Manager owns the VRF objects, the id allocator (free list; 0 reserved for the
+// Manager owns the VRF objects, the id allocator (monotonic; 0 reserved for the
 // global VRF), the global policy, and the ingress_vrf_map programming.
 type Manager struct {
-	mu      sync.RWMutex
-	byName  map[string]*VRF
-	byID    map[uint32]string
-	freeIDs []uint32
-	nextID  uint32
-	policy  Policy
+	mu     sync.RWMutex
+	byName map[string]*VRF
+	byID   map[uint32]string
+	nextID uint32
+	policy Policy
 	// runtimeACs are the ACs added over the API that have resolved at least
 	// once (MarkRuntimeAC). Unlike config-declared ACs, one whose interface
-	// disappears is skipped by Reconcile.
+	// disappears is skipped by Reconcile, and they are what Save persists.
 	runtimeACs map[runtimeACKey]struct{}
 	logger     *zap.Logger
+	// store receives the persistent state on Save; nil until SetStore. dirty
+	// says the state changed since the last successful Save, guarded by mu.
+	// saveMu spans the snapshot and the write so an older snapshot cannot
+	// overwrite a newer one.
+	store  StateStore
+	dirty  bool
+	saveMu sync.Mutex
+	// unsavedDeletes are the VRFs deleted since the last successful Save, so
+	// a retried delete can tell "already deleted, not yet saved" from an
+	// unknown name. Guarded by mu.
+	unsavedDeletes map[string]struct{}
+	// configOrigin are the VRFs the boot-time load created (the config, or a
+	// device or bridge record) rather than the API. FinishRestore drops one
+	// the config no longer declares once nothing holds it. Guarded by mu.
+	configOrigin map[string]struct{}
+	// restored are the names Restore loaded; FinishRestore clears it and
+	// sets restoreDone. Guarded by mu.
+	restored    map[string]struct{}
+	restoreDone bool
+	// goneMu guards goneACs, the runtime ACs Reconcile has already warned
+	// about, so a stale AC is reported once rather than on every reconcile.
+	goneMu  sync.Mutex
+	goneACs map[runtimeACKey]struct{}
 }
 
 type runtimeACKey struct {
@@ -126,6 +149,10 @@ func NewManager() *Manager {
 
 		runtimeACs: make(map[runtimeACKey]struct{}),
 		logger:     zap.NewNop(),
+
+		unsavedDeletes: make(map[string]struct{}),
+		configOrigin:   make(map[string]struct{}),
+		goneACs:        make(map[runtimeACKey]struct{}),
 	}
 }
 
@@ -135,21 +162,35 @@ func (m *Manager) SetLogger(logger *zap.Logger) {
 	m.logger = logger
 }
 
-// allocIDLocked returns a recycled or fresh vrf_id (>= 1). Deleted ids are
-// recycled via the free list, so nextID only advances for genuinely-new VRFs.
-// Wraparound of the uint32 counter is not guarded: reaching it needs ~4 billion
-// concurrently-live VRFs (deletes recycle), which exhausts the byName map's
-// memory — and the data-plane ingress_vrf_map (4096 entries) — long before the
-// counter could overflow.
-func (m *Manager) allocIDLocked() uint32 {
-	if n := len(m.freeIDs); n > 0 {
-		id := m.freeIDs[n-1]
-		m.freeIDs = m.freeIDs[:n-1]
-		return id
+// MaxNextID is the highest allocator watermark (next_vrf_id). Ids are handed
+// out below it, so the counter never wraps onto the global VRF's id 0, and
+// Restore refuses a saved watermark above it.
+const MaxNextID uint32 = math.MaxUint32 - 1
+
+// ErrIDsExhausted: every vrf_id below MaxNextID has been handed out.
+var ErrIDsExhausted = errors.New("vrf: no vrf_id left to allocate")
+
+// allocIDLocked returns a fresh vrf_id (>= 1). An id is never handed out twice,
+// not even after its VRF is deleted: state keyed by a vrf_id can outlive the
+// VRF, and a reused id would point that state at another tenant. Once the
+// watermark reaches MaxNextID it refuses rather than wrapping.
+func (m *Manager) allocIDLocked() (uint32, error) {
+	if m.nextID >= MaxNextID {
+		return 0, ErrIDsExhausted
 	}
 	id := m.nextID
 	m.nextID++
-	return id
+	return id, nil
+}
+
+// allocatableLocked reports why name could not get a VRF, nil when it already
+// has one or an id is left. Callers check it before a netlink call that would
+// otherwise create a device no VRF can carry.
+func (m *Manager) allocatableLocked(name string) error {
+	if _, ok := m.byName[name]; ok || name == GlobalVRFName || m.nextID < MaxNextID {
+		return nil
+	}
+	return fmt.Errorf("vrf %q: %w", name, ErrIDsExhausted)
 }
 
 // clone returns a copy of v that shares no mutable backing storage with the
@@ -175,26 +216,35 @@ func (v *VRF) clone() VRF {
 // Ensure returns the VRF for name, creating it (allocating an id) if absent.
 // Facets (a BGP binding, MUP uplink) call this so a referenced VRF always has
 // a stable id even before any AC is configured. The returned VRF's ACs are a
-// copy (see clone).
-func (m *Manager) Ensure(name string) VRF {
+// copy (see clone). It fails only when a new VRF finds no id left.
+func (m *Manager) Ensure(name string) (VRF, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.ensureLocked(name).clone()
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return VRF{}, err
+	}
+	return v.clone(), nil
 }
 
-func (m *Manager) ensureLocked(name string) *VRF {
+func (m *Manager) ensureLocked(name string) (*VRF, error) {
 	if v, ok := m.byName[name]; ok {
-		return v
+		return v, nil
 	}
 	// The reserved global VRF keeps id 0; everything else allocates 1..N.
 	id := GlobalVRFID
 	if name != GlobalVRFName {
-		id = m.allocIDLocked()
+		var err error
+		if id, err = m.allocIDLocked(); err != nil {
+			return nil, fmt.Errorf("vrf %q: %w", name, err)
+		}
 	}
 	v := &VRF{Name: name, ID: id}
 	m.byName[name] = v
 	m.byID[v.ID] = name
-	return v
+	delete(m.unsavedDeletes, name)
+	m.dirty = true
+	return v, nil
 }
 
 // IDForName returns the vrf_id assigned to name. ok=false when no VRF by that
@@ -262,7 +312,10 @@ func (m *Manager) AddAC(name string, ac AC) (added bool, err error) {
 				name, ac.Interface, ac.VLAN, other.Name)
 		}
 	}
-	v := m.ensureLocked(name)
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return false, err
+	}
 	for _, e := range v.ACs {
 		if e == ac {
 			return false, nil // idempotent: already present, nothing added
@@ -293,7 +346,13 @@ func (m *Manager) RemoveAC(name string, ac AC) (removed bool) {
 		}
 	}
 	v.ACs = out
-	delete(m.runtimeACs, runtimeACKey{name, ac})
+	if _, ok := m.runtimeACs[runtimeACKey{name, ac}]; ok {
+		delete(m.runtimeACs, runtimeACKey{name, ac})
+		m.dirty = true
+	}
+	m.goneMu.Lock()
+	delete(m.goneACs, runtimeACKey{name, ac})
+	m.goneMu.Unlock()
 	return removed
 }
 
@@ -304,6 +363,7 @@ func (m *Manager) MarkRuntimeAC(name string, ac AC) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.runtimeACs[runtimeACKey{name, ac}] = struct{}{}
+	m.dirty = true
 }
 
 // IsRuntimeAC reports whether MarkRuntimeAC recorded the AC.
@@ -314,8 +374,7 @@ func (m *Manager) IsRuntimeAC(name string, ac AC) bool {
 	return ok
 }
 
-// Delete removes a VRF and recycles its id. A no-op when absent. The reserved
-// global VRF's id (0) is never recycled — it must never be handed to a tenant.
+// Delete removes a VRF. A no-op when absent. Its id is not used again.
 func (m *Manager) Delete(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -328,9 +387,258 @@ func (m *Manager) Delete(name string) {
 	for _, ac := range v.ACs {
 		delete(m.runtimeACs, runtimeACKey{name, ac})
 	}
-	if v.ID != GlobalVRFID {
-		m.freeIDs = append(m.freeIDs, v.ID)
+	delete(m.configOrigin, name)
+	m.unsavedDeletes[name] = struct{}{}
+	m.dirty = true
+}
+
+// UnsavedDelete reports whether name was deleted and the deletion has not been
+// saved yet. A retried delete uses it to save instead of reporting an unknown
+// VRF.
+func (m *Manager) UnsavedDelete(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.unsavedDeletes[name]
+	return ok
+}
+
+// PersistedVRF is what survives a restart of one VRF object: its identity and
+// the ACs added over the API. The other facets have their own records.
+type PersistedVRF struct {
+	Name       string
+	ID         uint32
+	RuntimeACs []AC
+	// Config: the boot-time load created the VRF, not the API (see
+	// FinishRestore).
+	Config bool
+}
+
+// State is the persistent part of the Manager.
+type State struct {
+	NextID uint32
+	VRFs   []PersistedVRF
+}
+
+// StateStore keeps the Manager's State across restarts.
+// *netresource.ResourceManager satisfies it; tests use a fake.
+type StateStore interface {
+	SaveVRFState(State) error
+}
+
+// SetStore sets where Save writes. Set it after the boot-time load, so a
+// deployment with an unwritable state directory still starts.
+func (m *Manager) SetStore(store StateStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store = store
+}
+
+// Save writes the state if it changed since the last successful Save. Without
+// a store it does nothing. A failed Save leaves the state in memory and dirty,
+// so the next Save writes all of it.
+func (m *Manager) Save() error {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+	m.mu.Lock()
+	store := m.store
+	if store == nil {
+		// No file, so no deletion is missing from one.
+		clear(m.unsavedDeletes)
 	}
+	if store == nil || !m.dirty {
+		m.mu.Unlock()
+		return nil
+	}
+	state := m.stateLocked()
+	deleted := make([]string, 0, len(m.unsavedDeletes))
+	for name := range m.unsavedDeletes {
+		deleted = append(deleted, name)
+	}
+	m.dirty = false
+	m.mu.Unlock()
+
+	if err := store.SaveVRFState(state); err != nil {
+		m.mu.Lock()
+		m.dirty = true
+		m.mu.Unlock()
+		return fmt.Errorf("save vrf state: %w", err)
+	}
+	m.mu.Lock()
+	for _, name := range deleted {
+		delete(m.unsavedDeletes, name)
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// TrySave is Save for a caller whose own result does not depend on the state
+// file. A failure is logged; the state stays dirty and the next successful
+// Save writes it.
+func (m *Manager) TrySave() {
+	if err := m.Save(); err != nil {
+		m.logger.Warn("VRF state not saved; the next successful save writes it, a restart before that loses the change", zap.Error(err))
+	}
+}
+
+// stateLocked snapshots the persistent state, sorted so equal states encode
+// the same way.
+func (m *Manager) stateLocked() State {
+	s := State{NextID: m.nextID, VRFs: make([]PersistedVRF, 0, len(m.byName))}
+	for _, v := range m.byName {
+		_, config := m.configOrigin[v.Name]
+		p := PersistedVRF{Name: v.Name, ID: v.ID, Config: config}
+		for _, ac := range v.ACs {
+			if _, ok := m.runtimeACs[runtimeACKey{v.Name, ac}]; ok {
+				p.RuntimeACs = append(p.RuntimeACs, ac)
+			}
+		}
+		sortACs(p.RuntimeACs)
+		s.VRFs = append(s.VRFs, p)
+	}
+	sort.Slice(s.VRFs, func(i, j int) bool { return s.VRFs[i].Name < s.VRFs[j].Name })
+	return s
+}
+
+// Restore loads a saved state into an empty Manager. It runs before anything
+// can allocate an id. A state that breaks the Manager's invariants is refused
+// rather than repaired: guessing would put an AC or an id in the wrong tenant.
+// That includes a saved id at or above NextID, which the allocator would hand
+// out again. The zero State (nothing saved yet) is valid.
+func (m *Manager) Restore(s State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.byName) != 0 || m.restoreDone {
+		return errors.New("vrf: Restore needs an empty manager")
+	}
+	names := make(map[string]struct{}, len(s.VRFs))
+	ids := make(map[uint32]string, len(s.VRFs))
+	owners := make(map[AC]string)
+	for _, p := range s.VRFs {
+		if p.Name == "" {
+			return errors.New("vrf: saved state has a VRF without a name")
+		}
+		if (p.Name == GlobalVRFName) != (p.ID == GlobalVRFID) {
+			return fmt.Errorf("vrf %q: saved id %d: id %d belongs to the %q VRF only", p.Name, p.ID, GlobalVRFID, GlobalVRFName)
+		}
+		if _, dup := names[p.Name]; dup {
+			return fmt.Errorf("vrf %q: saved twice", p.Name)
+		}
+		names[p.Name] = struct{}{}
+		if other, dup := ids[p.ID]; dup {
+			return fmt.Errorf("vrf %q: saved id %d is also held by vrf %q", p.Name, p.ID, other)
+		}
+		ids[p.ID] = p.Name
+		for _, ac := range p.RuntimeACs {
+			if ac.Interface == "" || ac.VLAN > 4095 {
+				return fmt.Errorf("vrf %q: saved ac {interface %q, vlan %d} is invalid", p.Name, ac.Interface, ac.VLAN)
+			}
+			if other, dup := owners[ac]; dup {
+				return fmt.Errorf("vrf %q: saved ac {interface %q, vlan %d} is also held by vrf %q", p.Name, ac.Interface, ac.VLAN, other)
+			}
+			owners[ac] = p.Name
+		}
+	}
+	if s.NextID > MaxNextID {
+		return fmt.Errorf("vrf: saved next_vrf_id %d is above the highest watermark %d", s.NextID, MaxNextID)
+	}
+	for _, p := range s.VRFs {
+		if p.ID >= s.NextID {
+			return fmt.Errorf("vrf %q: saved id %d is not below next_vrf_id %d, so it could be handed out again", p.Name, p.ID, s.NextID)
+		}
+	}
+	m.restored = make(map[string]struct{}, len(s.VRFs))
+	for _, p := range s.VRFs {
+		m.byName[p.Name] = &VRF{Name: p.Name, ID: p.ID, ACs: slices.Clone(p.RuntimeACs)}
+		m.byID[p.ID] = p.Name
+		for _, ac := range p.RuntimeACs {
+			m.runtimeACs[runtimeACKey{p.Name, ac}] = struct{}{}
+		}
+		if p.Config {
+			m.configOrigin[p.Name] = struct{}{}
+		}
+		m.restored[p.Name] = struct{}{}
+	}
+	m.nextID = max(s.NextID, 1)
+	return nil
+}
+
+// FinishRestore ends the boot-time load. declared are the VRF names the
+// config declares (vrfs.entries and bgp.vrf_bindings). Every VRF the load
+// created, and every declared one, is marked as config-origin. A restored
+// config-origin VRF that is no longer declared and holds no AC, device or
+// bridge is dropped and its id stays retired: nothing refers to it any more,
+// and keeping it would bring it back on every boot. A VRF created over the API
+// stays until it is deleted. It returns the dropped names. Only the first call
+// does anything.
+func (m *Manager) FinishRestore(declared []string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restoreDone {
+		return nil
+	}
+	decl := make(map[string]struct{}, len(declared))
+	for _, name := range declared {
+		decl[name] = struct{}{}
+	}
+	var dropped []string
+	for name, v := range m.byName {
+		_, wasRestored := m.restored[name]
+		_, isConfig := m.configOrigin[name]
+		_, isDeclared := decl[name]
+		if wasRestored && isConfig && !isDeclared && len(v.ACs) == 0 && v.Device == nil && v.Bridge == nil {
+			delete(m.byName, name)
+			delete(m.byID, v.ID)
+			delete(m.configOrigin, name)
+			m.dirty = true
+			dropped = append(dropped, name)
+			continue
+		}
+		if !isConfig && (!wasRestored || isDeclared) {
+			m.configOrigin[name] = struct{}{}
+			m.dirty = true
+		}
+	}
+	m.restored = nil
+	m.restoreDone = true
+	sort.Strings(dropped)
+	return dropped
+}
+
+// RestoreDone reports whether FinishRestore ran: the VRF objects, with every
+// facet the boot-time load gives them, are in place.
+func (m *Manager) RestoreDone() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.restoreDone
+}
+
+// ReleaseRuntimeAC drops the runtime record of ac under whichever VRF holds
+// it, and reports that VRF. The config uses it to take an AC over: from then
+// on the AC is config-declared, so an interface that does not resolve is an
+// error again, and it can move to the VRF the config names.
+func (m *Manager) ReleaseRuntimeAC(ac AC) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key := range m.runtimeACs {
+		if key.ac != ac {
+			continue
+		}
+		delete(m.runtimeACs, key)
+		v := m.byName[key.vrf]
+		v.ACs = slices.DeleteFunc(v.ACs, func(a AC) bool { return a == ac })
+		m.dirty = true
+		return key.vrf, true
+	}
+	return "", false
+}
+
+func sortACs(acs []AC) {
+	sort.Slice(acs, func(i, j int) bool {
+		if acs[i].Interface != acs[j].Interface {
+			return acs[i].Interface < acs[j].Interface
+		}
+		return acs[i].VLAN < acs[j].VLAN
+	})
 }
 
 // DeviceOps is the kernel mechanics + persistence surface the device facet is
@@ -366,7 +674,10 @@ func (m *Manager) SetDevice(name string, d Device) (VRF, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := m.ensureLocked(name)
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return VRF{}, err
+	}
 	dd := d
 	dd.Members = append([]string(nil), d.Members...)
 	v.Device = &dd
@@ -386,6 +697,12 @@ func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error
 	}
 	if d.TableID == 0 {
 		return VRF{}, fmt.Errorf("vrf %q: device table_id is required", name)
+	}
+	m.mu.RLock()
+	err := m.allocatableLocked(name)
+	m.mu.RUnlock()
+	if err != nil {
+		return VRF{}, err
 	}
 	ifindex, err := ops.CreateVrf(name, d.TableID, d.Members, d.EnableL3mdevRule)
 	if err != nil {
@@ -476,7 +793,10 @@ func (m *Manager) SetBridge(name string, b Bridge) (VRF, error) {
 	if err := m.bridgeConflictLocked(name, b); err != nil {
 		return VRF{}, err
 	}
-	v := m.ensureLocked(name)
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return VRF{}, err
+	}
 	bb := b
 	bb.Members = append([]string(nil), b.Members...)
 	bb.ConfigMembers = append([]string(nil), b.ConfigMembers...)
@@ -497,6 +817,9 @@ func (m *Manager) AttachBridge(name string, b Bridge, ops BridgeOps) (VRF, error
 	}
 	m.mu.RLock()
 	err := m.bridgeConflictLocked(name, b)
+	if err == nil {
+		err = m.allocatableLocked(name)
+	}
 	m.mu.RUnlock()
 	if err != nil {
 		return VRF{}, err
@@ -615,12 +938,7 @@ func (m *Manager) List() []VRF {
 	out := make([]VRF, 0, len(m.byName))
 	for _, v := range m.byName {
 		c := v.clone()
-		sort.Slice(c.ACs, func(i, j int) bool {
-			if c.ACs[i].Interface != c.ACs[j].Interface {
-				return c.ACs[i].Interface < c.ACs[j].Interface
-			}
-			return c.ACs[i].VLAN < c.ACs[j].VLAN
-		})
+		sortACs(c.ACs)
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -707,13 +1025,16 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 		for _, ac := range s.acs {
 			idx, err := resolve(ac.Interface)
 			if errors.Is(err, ErrInterfaceGone) && s.runtime[ac] {
-				m.logger.Warn("Skipping AC whose interface is gone until its owner removes it",
-					zap.String("vrf", s.name), zap.String("interface", ac.Interface), zap.Uint16("vlan", ac.VLAN))
+				if m.noteGone(runtimeACKey{s.name, ac}, true) {
+					m.logger.Warn("Skipping AC whose interface is gone until it is removed (vbctl vrf ac-remove)",
+						zap.String("vrf", s.name), zap.String("interface", ac.Interface), zap.Uint16("vlan", ac.VLAN))
+				}
 				continue
 			}
 			if err != nil {
 				return fmt.Errorf("vrf %q: resolve %q: %w", s.name, ac.Interface, err)
 			}
+			m.noteGone(runtimeACKey{s.name, ac}, false)
 			// AddAC blocks the same {interface, vlan} across VRFs, but two
 			// distinct interface names can still resolve to one ifindex; surface
 			// that as a fatal config error rather than letting classification
@@ -731,6 +1052,20 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 		return err
 	}
 	return prog.SetIngressPolicy(enabled, pol.DefaultDeny, pol.DenyAction)
+}
+
+// noteGone records whether a runtime AC's interface is gone and reports
+// whether that is news, so Reconcile warns once per disappearance.
+func (m *Manager) noteGone(key runtimeACKey, gone bool) bool {
+	m.goneMu.Lock()
+	defer m.goneMu.Unlock()
+	_, known := m.goneACs[key]
+	if gone {
+		m.goneACs[key] = struct{}{}
+	} else {
+		delete(m.goneACs, key)
+	}
+	return gone && !known
 }
 
 // ResolveByName is the production interface-name resolver (net.InterfaceByName).
