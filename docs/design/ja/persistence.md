@@ -58,7 +58,13 @@ VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は�
 }
 ```
 
-`vrf_objects` が無い state も読めます。その場合は起動時に id を割り当て、次の保存から記録します。`vrf_objects` があるのに `next_vrf_id` (1 以上) か `entries` が欠けている state と、`next_vrf_id` 以上の `vrf_id` を持つ entry がある state は、起動を拒否します。どちらも削除済みの VRF の id を別の VRF に渡すおそれがあるためです。起動時の順序と、interface が消えた AC の扱いは [vrf.md](vrf.md#永続化と-boot) を参照してください。
+`vrf_objects` が無い state も読めます。その場合は起動時に id を割り当て、次の保存から記録します。次の state は起動を拒否します。いずれも削除済みの VRF の id や予約済みの id 0 を別の VRF に渡すおそれがあるためです。
+
+- `vrf_objects` があるのに `next_vrf_id` (1 以上) か `entries` が欠けている
+- `next_vrf_id` が上限の 4294967294 を超えている
+- `next_vrf_id` 以上の `vrf_id` を持つ entry がある
+
+起動時の順序と、interface が消えた AC の扱いは [vrf.md](vrf.md#永続化と-boot) を参照してください。
 
 state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください (例外は上記の修復手順と、bridge record の owning VRF 付け替え)。
 
