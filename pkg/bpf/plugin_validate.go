@@ -445,6 +445,108 @@ type roViolation struct {
 	fatal bool
 }
 
+// subprogMapEntries applies the existing register transfer rules until every
+// direct call site agrees on the same starting map names for R1..R5.
+func subprogMapEntries(ins asm.Instructions, subprogs map[string]struct{}) map[string][11]string {
+	entries := make(map[string][11]string)
+	for {
+		var lastMap [11]string
+		nextEntries := make(map[string][11]string)
+		mergeEntry := func(name string, callArgs [11]string) {
+			args, seen := nextEntries[name]
+			for r := 1; r <= 5; r++ {
+				if !seen {
+					args[r] = callArgs[r]
+				} else if args[r] != callArgs[r] {
+					args[r] = ""
+				}
+			}
+			nextEntries[name] = args
+		}
+		for i, in := range ins {
+			if i > 0 {
+				if sym := in.Symbol(); sym != "" {
+					if _, ok := subprogs[sym]; ok {
+						lastMap = entries[sym]
+					}
+				}
+			}
+			if in.IsLoadOfFunctionPointer() {
+				mergeEntry(in.Reference(), [11]string{})
+			}
+
+			if cls := in.OpCode.Class(); cls == asm.StClass || cls == asm.StXClass {
+				if cls == asm.StXClass && in.OpCode.Mode() == asm.AtomicMode &&
+					in.OpCode.AtomicOp() == loadAcqAtomicOp {
+					dst := int(in.Dst)
+					if dst >= 0 && dst < len(lastMap) {
+						lastMap[dst] = ""
+					}
+				}
+				continue
+			}
+
+			if in.OpCode.JumpOp() == asm.Call {
+				if in.IsFunctionCall() {
+					mergeEntry(in.Reference(), lastMap)
+				}
+				r1Map := lastMap[1]
+				for r := 1; r <= 5; r++ {
+					lastMap[r] = ""
+				}
+				switch asm.BuiltinFunc(in.Constant) {
+				case asm.FnMapLookupElem, asm.FnMapLookupPercpuElem:
+					lastMap[0] = r1Map
+				default:
+					lastMap[0] = ""
+				}
+				continue
+			}
+
+			op := in.OpCode
+			if (op.Class() == asm.ALU64Class || op.Class() == asm.ALUClass) &&
+				op.ALUOp() == asm.Mov && op.Source() == asm.RegSource {
+				src := int(in.Src)
+				dst := int(in.Dst)
+				if dst >= 0 && dst < len(lastMap) && src >= 0 && src < len(lastMap) {
+					lastMap[dst] = lastMap[src]
+					continue
+				}
+			}
+
+			cls := in.OpCode.Class()
+			if cls != asm.LdClass && cls != asm.LdXClass &&
+				cls != asm.ALUClass && cls != asm.ALU64Class {
+				continue
+			}
+			dst := int(in.Dst)
+			if dst < 0 || dst >= len(lastMap) {
+				continue
+			}
+			if in.IsLoadFromMap() {
+				lastMap[dst] = in.Reference()
+			} else if (cls != asm.ALUClass && cls != asm.ALU64Class) ||
+				(in.OpCode.ALUOp() != asm.Add && in.OpCode.ALUOp() != asm.Sub) {
+				lastMap[dst] = ""
+			}
+		}
+
+		same := len(entries) == len(nextEntries)
+		if same {
+			for name, args := range entries {
+				if nextArgs, ok := nextEntries[name]; !ok || nextArgs != args {
+					same = false
+					break
+				}
+			}
+		}
+		if same {
+			return entries
+		}
+		entries = nextEntries
+	}
+}
+
 // checkROWrites scans the program -- the entry body and every subprogram --
 // for stores whose target is a vinbero shared RO map, or whose target cannot
 // be statically resolved. The check is a no-op when roMaps is empty, for
@@ -454,18 +556,17 @@ type roViolation struct {
 // destination pointer was loaded from, following LoadMapPtr, register MOVs,
 // map-lookup returns, and constant/register pointer arithmetic (p += off
 // still points into the same map's value, so laundering a write through an
-// offset does not erase the map identity). The register table is reset at
-// each subprogram boundary, where the callee's registers start fresh.
+// offset does not erase the map identity). At each subprogram boundary,
+// R1..R5 start with the map names agreed on by every direct call site. Nested
+// calls are propagated to a fixed point.
 //
 // A resolved write to an RO map is flagged anywhere it occurs, so an
 // integrity-map write hidden in a noinline helper is caught, not only one in
 // the entry body. An unresolved store is flagged fail-closed in the entry
 // body (it cannot be proven to miss an integrity map) but not inside a
-// subprogram, where a helper legitimately stores through a map pointer passed
-// as an argument (the epilogue's slot_stats_inc is exactly this) that the
-// intra-procedural tracker cannot resolve. The residual this leaves -- a
-// write whose map pointer is passed as a call argument and stored in the
-// callee -- needs inter-procedural argument propagation and is a known limit.
+// subprogram when its argument remains unresolved. The only added rejection
+// is an RO shared-map write through a directly passed, resolved pointer;
+// everything else accepted by this check remains accepted.
 //
 // Historically this scanned only the entry body: the epilogue body appended
 // after it stores to slot_stats_* through a map pointer passed as an argument,
@@ -477,20 +578,20 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	if len(roMaps) == 0 {
 		return nil
 	}
-	// One forward pass: track the most recent LoadMapPtr-sourced map name
+	// One forward pass tracks the most recent LoadMapPtr-sourced map name
 	// per destination register. Anything else that writes a register
-	// invalidates the entry. This avoids a quadratic reverse-scan per
-	// store on adversarial inputs.
+	// invalidates the entry.
 	const numRegs = 11 // R0..R10
 	var lastMap [numRegs]string
 	var violations []roViolation
 	ins := spec.Instructions
 	subprogs := knownSubprogNames(ins)
+	entries := subprogMapEntries(ins, subprogs)
 	mainBody := true
 	for i, in := range ins {
-		// At the start of a real subprogram (one something actually calls),
-		// the callee's registers start fresh: reset the tracker rather than
-		// carrying stale identities across the boundary, and stop treating
+		// At the start of a real subprogram (one something references), seed
+		// the tracker from its direct call sites, or leave it empty for a
+		// callback-only body. Stop treating
 		// unresolved stores as fatal (a helper legitimately stores through a
 		// map-pointer argument). Do not stop the scan -- a resolved
 		// integrity-map write in a helper must still be caught. A bare
@@ -499,9 +600,7 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		if i > 0 {
 			if sym := in.Symbol(); sym != "" {
 				if _, ok := subprogs[sym]; ok {
-					for r := range lastMap {
-						lastMap[r] = ""
-					}
+					lastMap = entries[sym]
 					mainBody = false
 				}
 			}
