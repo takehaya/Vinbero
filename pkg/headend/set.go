@@ -29,6 +29,53 @@ type MapOps interface {
 	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
 }
 
+// VRFMapOps is the part of the headend surface that names a VRF other than
+// the global one: entries keyed by {vrf_id, prefix}, and listings of every
+// VRF. *bpf.MapOperations satisfies it. A backend without it holds the
+// global VRF only, and a declared entry in another VRF is refused with
+// ErrGlobalVRFOnly rather than written to the global VRF.
+type VRFMapOps interface {
+	ListHeadendV4IDs() (map[bpf.HeadendID]*bpf.HeadendEntry, error)
+	ListHeadendV6IDs() (map[bpf.HeadendID]*bpf.HeadendEntry, error)
+	ListHeadendV4OwnerIDs() (map[bpf.HeadendID]bpf.OwnerTag, error)
+	ListHeadendV6OwnerIDs() (map[bpf.HeadendID]bpf.OwnerTag, error)
+	GetHeadendV4OwnerIn(vrfID uint32, triggerPrefix string) (bpf.OwnerTag, bool, error)
+	GetHeadendV6OwnerIn(vrfID uint32, triggerPrefix string) (bpf.OwnerTag, bool, error)
+	CreateHeadendV4In(vrfID uint32, triggerPrefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
+	CreateHeadendV6In(vrfID uint32, triggerPrefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
+	DeleteHeadendV4In(vrfID uint32, triggerPrefix string, requester bpf.OwnerTag) error
+	DeleteHeadendV6In(vrfID uint32, triggerPrefix string, requester bpf.OwnerTag) error
+}
+
+// ErrGlobalVRFOnly is an entry outside the global VRF for a backend that
+// does not implement VRFMapOps.
+var ErrGlobalVRFOnly = errors.New("headend backend holds global VRF entries only")
+
+// ID names one headend entry: its VRF and its trigger prefix.
+type ID = bpf.HeadendID
+
+// leaseKey is the lease of one entry. A global entry is leased under its
+// prefix, so the key space is the same as before entries had a VRF; an
+// entry of another VRF under "vrf <id> <prefix>", which no prefix spells.
+func leaseKey(id ID) string { return id.String() }
+
+func leaseKeys(ids []ID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = leaseKey(id)
+	}
+	return out
+}
+
+func sortIDs(ids []ID) {
+	sort.Slice(ids, func(i, j int) bool {
+		if ids[i].VRF != ids[j].VRF {
+			return ids[i].VRF < ids[j].VRF
+		}
+		return ids[i].Prefix < ids[j].Prefix
+	})
+}
+
 // Family selects which headend map a desired set applies to.
 type Family uint8
 
@@ -55,12 +102,17 @@ func (af Family) leaseKind() ownership.LeaseKind {
 	return ownership.LeaseHeadendV4
 }
 
-// Desired is one entry of a declared set: the trigger prefix and
-// the encap entry it should map to.
+// Desired is one entry of a declared set: the VRF and trigger prefix,
+// and the encap entry it should map to. VRF is a vrf_id; the zero value
+// is the global VRF.
 type Desired struct {
+	VRF           uint32
 	TriggerPrefix string
 	Entry         *bpf.HeadendEntry
 }
+
+// ID is the entry the declaration names.
+func (d Desired) ID() ID { return ID{VRF: d.VRF, Prefix: d.TriggerPrefix} }
 
 // Result reports what a reconcile did. It is returned even when the
 // apply fails partway, so a caller can log how far it got.
@@ -99,11 +151,12 @@ func ApplySet(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, af Famil
 }
 
 type familySet struct {
-	af          Family
-	desired     []Desired
-	byPrefix    map[string]*bpf.HeadendEntry
-	keys, taken []string
-	current     map[string]struct{}
+	af      Family
+	desired []Desired
+	byID    map[ID]*bpf.HeadendEntry
+	keys    []ID
+	taken   []string
+	current map[ID]struct{}
 }
 
 // applySets reserves every declared key before pruning either family. A
@@ -124,28 +177,34 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 			return res, fmt.Errorf("invalid headend family %d", x.af)
 		}
 		present[x.af] = true
-		x.byPrefix = make(map[string]*bpf.HeadendEntry, len(x.desired))
+		x.byID = make(map[ID]*bpf.HeadendEntry, len(x.desired))
 		for _, d := range x.desired {
-			key, err := canonicalPrefix(x.af, d.TriggerPrefix)
+			prefix, err := canonicalPrefix(x.af, d.TriggerPrefix)
 			if err != nil {
 				return res, err
 			}
 			if d.Entry == nil {
 				return res, fmt.Errorf("apply %s set: nil entry for %q", x.af, d.TriggerPrefix)
 			}
-			if _, dup := x.byPrefix[key]; dup {
+			key := ID{VRF: d.VRF, Prefix: prefix}
+			if key.VRF != bpf.HeadendGlobalVRF {
+				if _, ok := ops.(VRFMapOps); !ok {
+					return res, fmt.Errorf("apply %s set: %s: %w", x.af, key, ErrGlobalVRFOnly)
+				}
+			}
+			if _, dup := x.byID[key]; dup {
 				return res, fmt.Errorf("apply %s set: %q declared twice", x.af, key)
 			}
-			x.byPrefix[key] = d.Entry
+			x.byID[key] = d.Entry
 			x.keys = append(x.keys, key)
 		}
-		sort.Strings(x.keys)
+		sortIDs(x.keys)
 		total += len(x.keys)
 	}
 	if quota >= 0 {
 		for _, af := range []Family{AFv4, AFv6} {
 			if !present[af] {
-				held, err := ownedPrefixes(ops, owner, af)
+				held, err := ownedIDs(ops, owner, af)
 				if err != nil {
 					return res, err
 				}
@@ -159,18 +218,18 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 	// Persisted owners survive restart, and direct operator writes do not
 	// take leases. Check both before reserving or deleting any working key.
 	for _, x := range sets {
-		for _, prefix := range x.keys {
+		for _, key := range x.keys {
 			if leases != nil {
-				if holder, held := leases.HolderOf(x.af.leaseKind(), prefix); held && holder != owner {
-					return res, &ownership.LeaseError{Kind: x.af.leaseKind(), Key: prefix, Holder: holder}
+				if holder, held := leases.HolderOf(x.af.leaseKind(), leaseKey(key)); held && holder != owner {
+					return res, &ownership.LeaseError{Kind: x.af.leaseKind(), Key: leaseKey(key), Holder: holder}
 				}
 			}
-			holder, found, err := getOwner(ops, x.af, prefix)
+			holder, found, err := getOwner(ops, x.af, key)
 			if err != nil {
-				return res, fmt.Errorf("read %s owner of %q: %w", x.af, prefix, err)
+				return res, fmt.Errorf("read %s owner of %q: %w", x.af, key, err)
 			}
 			if found && holder != owner {
-				return res, ownerConflict(x.af, prefix, holder, owner)
+				return res, ownerConflict(x.af, key, holder, owner)
 			}
 		}
 	}
@@ -182,7 +241,7 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 	for i := range sets {
 		if leases != nil {
 			var err error
-			sets[i].taken, err = leases.AcquireAll(sets[i].af.leaseKind(), sets[i].keys, owner)
+			sets[i].taken, err = leases.AcquireAll(sets[i].af.leaseKind(), leaseKeys(sets[i].keys), owner)
 			if err != nil {
 				rollback()
 				return res, err
@@ -191,29 +250,29 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 	}
 	for i := range sets {
 		var err error
-		sets[i].current, err = ownedPrefixes(ops, owner, sets[i].af)
+		sets[i].current, err = ownedIDs(ops, owner, sets[i].af)
 		if err != nil {
 			rollback()
 			return res, err
 		}
 	}
 	for _, x := range sets {
-		var stale []string
-		for prefix := range x.current {
-			if _, keep := x.byPrefix[prefix]; !keep {
-				stale = append(stale, prefix)
+		var stale []ID
+		for key := range x.current {
+			if _, keep := x.byID[key]; !keep {
+				stale = append(stale, key)
 			}
 		}
-		sort.Strings(stale)
-		for _, prefix := range stale {
-			if err := deleteHeadend(ops, x.af, prefix, owner); err != nil {
+		sortIDs(stale)
+		for _, key := range stale {
+			if err := deleteHeadend(ops, x.af, key, owner); err != nil {
 				for _, pending := range sets {
 					releaseUnwritten(leases, pending.af, pending.keys, pending.current, owner)
 				}
-				return res, fmt.Errorf("apply %s set: prune %q: %w", x.af, prefix, err)
+				return res, fmt.Errorf("apply %s set: prune %q: %w", x.af, key, err)
 			}
 			if leases != nil {
-				leases.Release(x.af.leaseKind(), prefix, owner)
+				leases.Release(x.af.leaseKind(), leaseKey(key), owner)
 			}
 			res.Pruned++
 		}
@@ -227,15 +286,15 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 		}
 	}
 	for i, x := range sets {
-		for j, prefix := range x.keys {
-			if err := createHeadend(ops, x.af, prefix, x.byPrefix[prefix], owner); err != nil {
+		for j, key := range x.keys {
+			if err := createHeadend(ops, x.af, key, x.byID[key], owner); err != nil {
 				releaseUnwritten(leases, x.af, x.keys[j:], x.current, owner)
 				for _, pending := range sets[i+1:] {
 					releaseUnwritten(leases, pending.af, pending.keys, pending.current, owner)
 				}
-				return res, fmt.Errorf("apply %s set: write %q: %w", x.af, prefix, err)
+				return res, fmt.Errorf("apply %s set: write %q: %w", x.af, key, err)
 			}
-			if _, existed := x.current[prefix]; existed {
+			if _, existed := x.current[key]; existed {
 				res.Updated++
 			} else {
 				res.Created++
@@ -246,8 +305,9 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 }
 
 // PruneOwner removes every headend entry an owner holds in one
-// family. It is the flush an unregistering plugin runs, and equivalent to
-// applying an empty set except that it does not take leases first.
+// family, in every VRF. It is the flush an unregistering plugin runs, and
+// equivalent to applying an empty set except that it does not take leases
+// first.
 func PruneOwner(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, af Family) (int, error) {
 	if owner == "" {
 		return 0, bpf.ErrEmptyOwner
@@ -258,22 +318,22 @@ func PruneOwner(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, af Fam
 	if af != AFv4 && af != AFv6 {
 		return 0, fmt.Errorf("invalid headend family %d", af)
 	}
-	current, err := ownedPrefixes(ops, owner, af)
+	current, err := ownedIDs(ops, owner, af)
 	if err != nil {
 		return 0, err
 	}
-	prefixes := make([]string, 0, len(current))
-	for prefix := range current {
-		prefixes = append(prefixes, prefix)
+	keys := make([]ID, 0, len(current))
+	for key := range current {
+		keys = append(keys, key)
 	}
-	sort.Strings(prefixes)
+	sortIDs(keys)
 	var pruned int
-	for _, prefix := range prefixes {
-		if err := deleteHeadend(ops, af, prefix, owner); err != nil {
-			return pruned, fmt.Errorf("prune %s owner %q: %q: %w", af, owner, prefix, err)
+	for _, key := range keys {
+		if err := deleteHeadend(ops, af, key, owner); err != nil {
+			return pruned, fmt.Errorf("prune %s owner %q: %q: %w", af, owner, key, err)
 		}
 		if leases != nil {
-			leases.Release(af.leaseKind(), prefix, owner)
+			leases.Release(af.leaseKind(), leaseKey(key), owner)
 		}
 		pruned++
 	}
@@ -281,10 +341,9 @@ func PruneOwner(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, af Fam
 	return pruned + n, err
 }
 
-// pruneUnlisted removes what owner holds under keys the prefix-keyed
-// inventory cannot name: native maps key the entries by {vrf_id, prefix}
-// and the inventory covers the global VRF only. An owner pruned or
-// re-applied this way leaves nothing behind in another VRF.
+// pruneUnlisted removes what owner holds under keys no inventory can name:
+// a malformed key in a native map. An owner pruned or re-applied this way
+// leaves nothing behind.
 func pruneUnlisted(ops MapOps, af Family, owner bpf.OwnerTag) (int, error) {
 	unlisted, ok := ops.(interface {
 		PruneUnlistedHeadendV4(bpf.OwnerTag) (int, error)
@@ -300,7 +359,7 @@ func pruneUnlisted(ops MapOps, af Family, owner bpf.OwnerTag) (int, error) {
 }
 
 // releaseAll frees the leases on keys that were never written, so a lease
-// never outlives the entry it was taken for.
+// never outlives the entry it was taken for. keys are lease keys.
 func releaseAll(leases *ownership.Leases, af Family, keys []string, owner bpf.OwnerTag) {
 	if leases == nil {
 		return
@@ -314,7 +373,7 @@ func releaseAll(leases *ownership.Leases, af Family, keys []string, owner bpf.Ow
 // entry for, leaving alone the ones it already holds from an earlier
 // apply. A lease dropped for a key whose entry is still installed would
 // let another owner take a key it cannot actually write.
-func releaseUnwritten(leases *ownership.Leases, af Family, keys []string, current map[string]struct{}, owner bpf.OwnerTag) {
+func releaseUnwritten(leases *ownership.Leases, af Family, keys []ID, current map[ID]struct{}, owner bpf.OwnerTag) {
 	if leases == nil {
 		return
 	}
@@ -322,12 +381,12 @@ func releaseUnwritten(leases *ownership.Leases, af Family, keys []string, curren
 		if _, live := current[key]; live {
 			continue
 		}
-		leases.Release(af.leaseKind(), key, owner)
+		leases.Release(af.leaseKind(), leaseKey(key), owner)
 	}
 }
 
-// OwnedEntries returns what one owner holds in a family, in the
-// form a declaration has.
+// OwnedEntries returns what one owner holds in a family, every VRF, in
+// the form a declaration has.
 //
 // It is what lets the host re-state an owner's own entries as a desired
 // set: narrowing a plugin's scope means applying the subset that is still
@@ -342,6 +401,49 @@ func OwnedEntries(ops MapOps, owner bpf.OwnerTag, af Family) ([]Desired, error) 
 	if af != AFv4 && af != AFv6 {
 		return nil, fmt.Errorf("invalid headend family %d", af)
 	}
+	entries, err := listEntries(ops, af)
+	if err != nil {
+		return nil, err
+	}
+	owned, err := ownedIDs(ops, owner, af)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]ID, 0, len(owned))
+	for key := range owned {
+		keys = append(keys, key)
+	}
+	sortIDs(keys)
+	out := make([]Desired, 0, len(keys))
+	for _, key := range keys {
+		entry, ok := entries[key]
+		if !ok || entry == nil {
+			continue
+		}
+		copied := *entry
+		out = append(out, Desired{VRF: key.VRF, TriggerPrefix: key.Prefix, Entry: &copied})
+	}
+	return out, nil
+}
+
+// listEntries reads one family's entries: every VRF from a VRFMapOps
+// backend, the global VRF from any other.
+func listEntries(ops MapOps, af Family) (map[ID]*bpf.HeadendEntry, error) {
+	if v, ok := ops.(VRFMapOps); ok {
+		var (
+			entries map[ID]*bpf.HeadendEntry
+			err     error
+		)
+		if af == AFv6 {
+			entries, err = v.ListHeadendV6IDs()
+		} else {
+			entries, err = v.ListHeadendV4IDs()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list %s: %w", af, err)
+		}
+		return entries, nil
+	}
 	var (
 		entries map[string]*bpf.HeadendEntry
 		err     error
@@ -354,34 +456,41 @@ func OwnedEntries(ops MapOps, owner bpf.OwnerTag, af Family) ([]Desired, error) 
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", af, err)
 	}
-	owned, err := ownedPrefixes(ops, owner, af)
-	if err != nil {
-		return nil, err
-	}
-	prefixes := make([]string, 0, len(owned))
-	for prefix := range owned {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Strings(prefixes)
-	out := make([]Desired, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		entry, ok := entries[prefix]
-		if !ok || entry == nil {
-			continue
-		}
-		copied := *entry
-		out = append(out, Desired{TriggerPrefix: prefix, Entry: &copied})
+	out := make(map[ID]*bpf.HeadendEntry, len(entries))
+	for prefix, e := range entries {
+		out[ID{Prefix: prefix}] = e
 	}
 	return out, nil
 }
 
-// ownedPrefixes returns the trigger prefixes reserved by owner in one family.
-// Entries with no recorded owner are left alone: claiming them here would let
-// a plugin prune state it never wrote.
-func ownedPrefixes(ops MapOps, owner bpf.OwnerTag, af Family) (map[string]struct{}, error) {
+// ownedIDs returns the entries reserved by owner in one family. Entries
+// with no recorded owner are left alone: claiming them here would let a
+// plugin prune state it never wrote.
+func ownedIDs(ops MapOps, owner bpf.OwnerTag, af Family) (map[ID]struct{}, error) {
 	// Native maps enumerate ownership independently of live entries so failed
-	// owner deletions remain discoverable after restart. Older backends can
-	// only discover ownership while the main entry still exists.
+	// owner deletions remain discoverable after restart, in every VRF. Older
+	// backends can only discover ownership while the main entry still exists.
+	if v, ok := ops.(VRFMapOps); ok {
+		var (
+			owners map[ID]bpf.OwnerTag
+			err    error
+		)
+		if af == AFv6 {
+			owners, err = v.ListHeadendV6OwnerIDs()
+		} else {
+			owners, err = v.ListHeadendV4OwnerIDs()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list %s owners: %w", af, err)
+		}
+		out := make(map[ID]struct{})
+		for key, holder := range owners {
+			if holder == owner {
+				out[key] = struct{}{}
+			}
+		}
+		return out, nil
+	}
 	if inventory, ok := ops.(interface {
 		ListHeadendV4Owners() (map[string]bpf.OwnerTag, error)
 		ListHeadendV6Owners() (map[string]bpf.OwnerTag, error)
@@ -396,59 +505,90 @@ func ownedPrefixes(ops MapOps, owner bpf.OwnerTag, af Family) (map[string]struct
 		if err != nil {
 			return nil, fmt.Errorf("list %s owners: %w", af, err)
 		}
-		out := make(map[string]struct{})
-		for key, holder := range owners {
+		out := make(map[ID]struct{})
+		for prefix, holder := range owners {
 			if holder == owner {
-				out[key] = struct{}{}
+				out[ID{Prefix: prefix}] = struct{}{}
 			}
 		}
 		return out, nil
 	}
-	var (
-		entries map[string]*bpf.HeadendEntry
-		err     error
-	)
-	if af == AFv6 {
-		entries, err = ops.ListHeadendV6()
-	} else {
-		entries, err = ops.ListHeadendV4()
-	}
+	entries, err := listEntries(ops, af)
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w", af, err)
+		return nil, err
 	}
-	out := make(map[string]struct{})
-	for prefix := range entries {
-		var (
-			got bpf.OwnerTag
-			ok  bool
-		)
-		if af == AFv6 {
-			got, ok, err = ops.GetHeadendV6Owner(prefix)
-		} else {
-			got, ok, err = ops.GetHeadendV4Owner(prefix)
-		}
+	out := make(map[ID]struct{})
+	for key := range entries {
+		got, ok, err := getOwner(ops, af, key)
 		if err != nil {
-			return nil, fmt.Errorf("read %s owner of %q: %w", af, prefix, err)
+			return nil, fmt.Errorf("read %s owner of %q: %w", af, key, err)
 		}
 		if ok && got == owner {
-			out[prefix] = struct{}{}
+			out[key] = struct{}{}
 		}
 	}
 	return out, nil
 }
 
-// createHeadend writes one entry in the family's map.
-func createHeadend(ops MapOps, af Family, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
-	if af == AFv6 {
-		return ops.CreateHeadendV6(prefix, entry, owner)
+// vrfOps returns the per-VRF surface for an entry outside the global VRF.
+func vrfOps(ops MapOps, key ID) (VRFMapOps, error) {
+	v, ok := ops.(VRFMapOps)
+	if !ok {
+		return nil, fmt.Errorf("%s: %w", key, ErrGlobalVRFOnly)
 	}
-	return ops.CreateHeadendV4(prefix, entry, owner)
+	return v, nil
+}
+
+// getOwner reads the owner recorded for one entry.
+func getOwner(ops MapOps, af Family, key ID) (bpf.OwnerTag, bool, error) {
+	if key.VRF == bpf.HeadendGlobalVRF {
+		if af == AFv6 {
+			return ops.GetHeadendV6Owner(key.Prefix)
+		}
+		return ops.GetHeadendV4Owner(key.Prefix)
+	}
+	v, err := vrfOps(ops, key)
+	if err != nil {
+		return "", false, err
+	}
+	if af == AFv6 {
+		return v.GetHeadendV6OwnerIn(key.VRF, key.Prefix)
+	}
+	return v.GetHeadendV4OwnerIn(key.VRF, key.Prefix)
+}
+
+// createHeadend writes one entry in the family's map.
+func createHeadend(ops MapOps, af Family, key ID, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	if key.VRF == bpf.HeadendGlobalVRF {
+		if af == AFv6 {
+			return ops.CreateHeadendV6(key.Prefix, entry, owner)
+		}
+		return ops.CreateHeadendV4(key.Prefix, entry, owner)
+	}
+	v, err := vrfOps(ops, key)
+	if err != nil {
+		return err
+	}
+	if af == AFv6 {
+		return v.CreateHeadendV6In(key.VRF, key.Prefix, entry, owner)
+	}
+	return v.CreateHeadendV4In(key.VRF, key.Prefix, entry, owner)
 }
 
 // deleteHeadend removes one entry from the family's map.
-func deleteHeadend(ops MapOps, af Family, prefix string, owner bpf.OwnerTag) error {
-	if af == AFv6 {
-		return ops.DeleteHeadendV6(prefix, owner)
+func deleteHeadend(ops MapOps, af Family, key ID, owner bpf.OwnerTag) error {
+	if key.VRF == bpf.HeadendGlobalVRF {
+		if af == AFv6 {
+			return ops.DeleteHeadendV6(key.Prefix, owner)
+		}
+		return ops.DeleteHeadendV4(key.Prefix, owner)
 	}
-	return ops.DeleteHeadendV4(prefix, owner)
+	v, err := vrfOps(ops, key)
+	if err != nil {
+		return err
+	}
+	if af == AFv6 {
+		return v.DeleteHeadendV6In(key.VRF, key.Prefix, owner)
+	}
+	return v.DeleteHeadendV4In(key.VRF, key.Prefix, owner)
 }
