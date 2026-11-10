@@ -142,9 +142,9 @@ start_mode() {
 # the transit router's two ports (a namespace with no XDP program).
 round() {
     local tag="$1" pcap1="$TMP/${tag}_up1.pcap" pcap2="$TMP/${tag}_up2.pcap" pid1 pid2
-    bum_capture_start "$ns_rt" becmp-d1 "$pcap1"
+    capture_start "$ns_rt" becmp-d1 "$pcap1"
     pid1=$CAPTURE_PID
-    bum_capture_start "$ns_rt" becmp-d2 "$pcap2"
+    capture_start "$ns_rt" becmp-d2 "$pcap2"
     pid2=$CAPTURE_PID
     sleep 0.3
     bum_marker_send "$ns_ce" "$SEND_IF" "$tag"

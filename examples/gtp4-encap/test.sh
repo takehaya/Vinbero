@@ -82,12 +82,15 @@ ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 sid create \
 
 print_success "All entries registered"
 
-# Pre-resolve NDP between routers (required for bpf_fib_lookup)
+# Resolve the underlay next hops. The captures below sit on router2's link
+# from router1, so router1's entry for fc00:12::2 is the one the tests
+# depend on: with it resolved, H.M.GTP4.D redirects the SRv6 packet straight
+# out of XDP, which is the path under test. The other two complete the
+# underlay in both directions.
 print_info "Resolving NDP entries..."
-ip netns exec "$ns_router1" ping6 -c 1 -W 1 fc00:12::2 > /dev/null 2>&1 || true
-ip netns exec "$ns_router2" ping6 -c 1 -W 1 fc00:23::3 > /dev/null 2>&1 || true
-ip netns exec "$ns_router3" ping6 -c 1 -W 1 fc00:23::2 > /dev/null 2>&1 || true
-sleep 1
+resolve_neigh "$ns_router1" fc00:12::2
+resolve_neigh "$ns_router2" fc00:23::1
+resolve_neigh "$ns_router3" fc00:23::2
 
 # Phase 3: GTP-U packet test with scapy
 echo ""
@@ -103,74 +106,57 @@ if ! python3 -c "from scapy.all import IP" 2>/dev/null; then
     exit 0
 fi
 
-# Test 1: GTP-U with QFI (5G). Capture on router2's link toward router1 and
-# filter to the End.M.GTP4.E SID locator (fc00:3::/56) so we only count
-# SRv6-encapsulated packets, not stray NDP/ICMPv6 on the same link. CAPTURED is
-# initialised outside the -f guard so a missing pcap fails instead of silently
-# skipping. timeout caps tcpdump so a capture miss surfaces in ~8s.
-print_info "Test 1: GTP-U with QFI=9 (5G mode)"
-rm -f /tmp/gtp4_test1.pcap
-ip netns exec "$ns_router2" \
-    timeout 8 tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp4_test1.pcap \
-    'ip6 and dst net fc00:3::/56' 2>/dev/null &
-TCPDUMP_PID=$!
-PIDS="$TCPDUMP_PID $PIDS"
-sleep 1
+# gtp_test <n> <title> <teid> <qfi> <count>: host1 sends <count> GTP-U packets
+# to the H.M.GTP4.D trigger, and every one of them must cross router1 ->
+# router2 as SRv6 toward the End.M.GTP4.E SID. The capture filters on that
+# SID's /56 locator so stray NDP/ICMPv6 on the link is not counted. It is
+# listening before the first packet leaves and router1's next hop is
+# resolved, so nothing on the path may lose a packet: fewer than <count> is
+# a failure.
+gtp_test() {
+    local n="$1" title="$2" teid="$3" qfi="$4" count="$5"
+    local pcap="/tmp/gtp4_test$1.pcap" got
+    print_info "Test $n: $title"
+    capture_start "$ns_router2" "${TOPO_NS_PREFIX}rt2rt1" "$pcap" -c "$count" \
+        'ip6 and dst net fc00:3::/56'
+    PIDS="$CAPTURE_PID $PIDS"
+    ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
+        --outer-dst 172.0.2.100 --teid "$teid" --qfi "$qfi" --count "$count"
+    capture_stop "$CAPTURE_PID"
+    PIDS="${PIDS/$CAPTURE_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
+    got=$(capture_count "$pcap")
+    if [ "$got" -eq "$count" ]; then
+        print_success "Test $n PASS: $got of $count SRv6 packets toward End.M.GTP4.E captured"
+        tcpdump -r "$pcap" -n 2>/dev/null | head -3
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "Test $n FAIL: $got of $count SRv6 packets toward End.M.GTP4.E captured"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    rm -f "$pcap" "$pcap.log"
+}
 
-ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
-    --outer-dst 172.0.2.100 --teid 0x12345678 --qfi 9 --count 3
-
-wait $TCPDUMP_PID 2>/dev/null || true
-PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
-
-CAPTURED=0
-[ -f /tmp/gtp4_test1.pcap ] && CAPTURED=$(tcpdump -r /tmp/gtp4_test1.pcap 2>/dev/null | wc -l)
-if [ "$CAPTURED" -gt 0 ]; then
-    print_success "Test 1 PASS: $CAPTURED SRv6 packets toward End.M.GTP4.E captured (H.M.GTP4.D works)"
-    tcpdump -r /tmp/gtp4_test1.pcap -n 2>/dev/null | head -3
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-else
-    print_error "Test 1 FAIL: no SRv6 packets toward the End.M.GTP4.E SID captured"
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-fi
-rm -f /tmp/gtp4_test1.pcap
-
-# Test 2: GTP-U without QFI (4G/LTE mode)
+gtp_test 1 "GTP-U with QFI=9 (5G mode)" 0x12345678 9 3
 echo ""
-print_info "Test 2: GTP-U without QFI (4G/LTE mode)"
-rm -f /tmp/gtp4_test2.pcap
-ip netns exec "$ns_router2" \
-    timeout 8 tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 1 -w /tmp/gtp4_test2.pcap \
-    'ip6 and dst net fc00:3::/56' 2>/dev/null &
-TCPDUMP_PID=$!
-PIDS="$TCPDUMP_PID $PIDS"
-sleep 1
+gtp_test 2 "GTP-U without QFI (4G/LTE mode)" 0xCAFEBABE 0 3
 
-ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
-    --outer-dst 172.0.2.100 --teid 0xCAFEBABE --qfi 0 --count 1
-
-wait $TCPDUMP_PID 2>/dev/null || true
-PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
-
-CAPTURED=0
-[ -f /tmp/gtp4_test2.pcap ] && CAPTURED=$(tcpdump -r /tmp/gtp4_test2.pcap 2>/dev/null | wc -l)
-if [ "$CAPTURED" -gt 0 ]; then
-    print_success "Test 2 PASS: $CAPTURED SRv6 packets toward End.M.GTP4.E captured (4G compat works)"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-else
-    print_error "Test 2 FAIL: no SRv6 packets toward the End.M.GTP4.E SID captured"
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-fi
-rm -f /tmp/gtp4_test2.pcap
-
-# Test 3: Non-GTP-U traffic should pass through
+# Test 3: plain IPv4 to the trigger prefix. 172.0.2.1 lies in the H.M.GTP4.D
+# trigger 172.0.2.0/24, but an ICMP echo is not GTP-U, so router1's XDP must
+# hand it to the kernel untouched (XDP_PASS). router1 has no IPv4 route to
+# 172.0.2.0/24, which is reachable only through the GTP-U/SRv6 conversion,
+# so its kernel answers Destination Net Unreachable. That answer is the pass
+# condition: an echo reply cannot come back in this topology, and no answer
+# at all means XDP dropped or encapsulated the echo.
 echo ""
-print_info "Test 3: Non-GTP-U IPv4 (should XDP_PASS)"
-if ip netns exec "$ns_host1" ping -c 1 -W 2 172.0.2.1 > /dev/null 2>&1; then
-    print_success "Test 3 PASS: Plain IPv4 passes through"
+print_info "Test 3: Non-GTP-U IPv4 to the trigger prefix (should XDP_PASS)"
+PING_OUT=$(ip netns exec "$ns_host1" ping -c 1 -W 2 172.0.2.1 2>&1 || true)
+if echo "$PING_OUT" | grep -q "From 172.0.1.2 .*Net Unreachable"; then
+    print_success "Test 3 PASS: router1's kernel answered the plain echo (Net Unreachable)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    print_info "Test 3 SKIP: Plain IPv4 ping failed (expected in some setups)"
+    print_error "Test 3 FAIL: no Net Unreachable from router1 for the plain echo"
+    echo "$PING_OUT"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 echo ""

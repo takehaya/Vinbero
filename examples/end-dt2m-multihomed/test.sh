@@ -193,7 +193,7 @@ print_info "Counting the SRv6 copies of one host1 broadcast on P..."
 TAG="vbbum-mh-1"
 pids=()
 for ifc in mh-ppe1 mh-ppe2 mh-ppe3; do
-    bum_capture_start "$NS_P" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap"
+    capture_start "$NS_P" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap"
     pids+=("$CAPTURE_PID")
 done
 sleep 1
@@ -265,7 +265,7 @@ assert_nonzero "PE1 NON_DF_DROP > 0 (PE2 is DF)" "${pe1_nondf:-0}"
 TAG="vbbum-mh-df"
 pids=()
 for ifc in mh-h1pe1 mh-h1pe2; do
-    bum_capture_start "$NS_H1" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap" -Q in
+    capture_start "$NS_H1" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap" -Q in
     pids+=("$CAPTURE_PID")
 done
 sleep 1
