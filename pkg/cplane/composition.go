@@ -113,10 +113,18 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 				return out, err
 			}
 		}
-		if err = p.guard.checkHeadend(af, trigger, e.Mode); err != nil {
+		if err = p.guard.checkHeadendIn(af, h.Entry.Vrf, trigger, e.Mode); err != nil {
 			return out, err
 		}
 		d := HeadendDesired{TriggerPrefix: trigger, Entry: e}
+		if !isGlobalVRFName(h.Entry.Vrf) {
+			if p.vrfs == nil {
+				return out, errNoVRFDirectory
+			}
+			if d.VRF, err = p.vrfs.LookupID(h.Entry.Vrf); err != nil {
+				return out, fmt.Errorf("headend entry for %q: %w", trigger, err)
+			}
+		}
 		if af == AFv4 {
 			out.v4 = append(out.v4, d)
 		} else {
@@ -216,18 +224,19 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 		out.peers = append(out.peers, d)
 	}
 	// Validate conflicting desired keys before mutating any live state.
-	keys := map[string]bpf.HeadendEntry{}
+	keys := map[bpf.HeadendID]bpf.HeadendEntry{}
 	for _, set := range [][]HeadendDesired{out.v4, out.v6} {
 		for _, h := range set {
-			if old, ok := keys[h.TriggerPrefix]; ok && old != *h.Entry {
+			if old, ok := keys[h.ID()]; ok && old != *h.Entry {
 				return out, fmt.Errorf("ambiguous headend trigger")
 			}
-			keys[h.TriggerPrefix] = *h.Entry
+			keys[h.ID()] = *h.Entry
 		}
 	}
 	us := map[string]bpf.HeadendEntry{}
 	for _, u := range out.uplinks {
-		if _, ok := keys[u.endpoint+"/32"]; ok {
+		// The uplink's gate is a global VRF entry.
+		if _, ok := keys[bpf.HeadendID{Prefix: u.endpoint + "/32"}]; ok {
 			return out, fmt.Errorf("headend trigger conflicts with MUP gate")
 		}
 		if old, ok := us[u.key()]; ok && old != u.entry {
@@ -318,6 +327,14 @@ func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]b
 	for _, u := range d.uplinks {
 		_, _ = fmt.Fprintf(hasher, "/instance=%d", u.instance)
 	}
+	// The VRF ids are derived from the declared names, as the instances are.
+	for _, set := range [][]HeadendDesired{d.v4, d.v6} {
+		for _, h := range set {
+			if h.VRF != 0 {
+				_, _ = fmt.Fprintf(hasher, "/vrf=%s=%d", h.TriggerPrefix, h.VRF)
+			}
+		}
+	}
 	derived, err := json.Marshal(d.routes)
 	if err != nil {
 		return hash, err
@@ -327,10 +344,27 @@ func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]b
 	return hash, nil
 }
 
+// compositionNamesVRF reports whether a composition declares a headend
+// entry outside the global VRF.
+func compositionNamesVRF(m *v1.PluginApplyChunk) bool {
+	for _, h := range m.GetForwardingHeadends() {
+		if !isGlobalVRFName(h.GetEntry().GetVrf()) {
+			return true
+		}
+	}
+	return false
+}
+
 // applyComposition orders dependents before their forwarding changes. Failure
 // retains ownership and the latest desired set for a bounded retry.
 func (p *PluginOps) applyComposition(txn *applyTxn) error {
 	m := txn.composition
+	// A headend entry in a named VRF is written under the id resolved here,
+	// so the VRF is held against deletion until the apply is done.
+	if compositionNamesVRF(m) && p.vrfs != nil {
+		release := p.vrfs.HoldIDs()
+		defer release()
+	}
 	d, err := p.normalizeComposition(m)
 	if err != nil {
 		return err

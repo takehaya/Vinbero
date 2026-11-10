@@ -441,6 +441,20 @@ func TestABIVersionMismatchIsRejected(t *testing.T) {
 	}
 }
 
+// Every ABI version from MinABIVersion to ABIVersion is admitted: version 2
+// only adds the VRF of a headend entry, so a version 1 module still runs.
+func TestABIVersionsInRangeAreAdmitted(t *testing.T) {
+	for _, name := range []string{"abi1", "abi2"} {
+		t.Run(name, func(t *testing.T) {
+			inst, err := instantiate(t, name, Config{})
+			if err != nil {
+				t.Fatalf("module refused: %v", err)
+			}
+			_ = inst.Close(context.Background())
+		})
+	}
+}
+
 // The WebAssembly start section runs during instantiation, before the host
 // has called anything. WithStartFunctions() does not cover it, so without
 // a budget on instantiation itself a module that loops there hangs the

@@ -262,6 +262,10 @@ message PluginHeadendEntry {
   // uses the ordinary H.Encaps; a plugin pairing with its own data-plane
   // half sets the slot its eBPF program occupies (16-31).
   uint32 mode = 4;
+  // Vrf is the VRF the entry belongs to. Empty or "global" is the global
+  // VRF; any other name must be an existing VRF that the plugin's scope
+  // grants (the VRF list advertisements and decap VRFs use).
+  string vrf = 5;
 }
 
 // PluginAdvertisedRoute is one route the plugin wants originated.

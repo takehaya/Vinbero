@@ -14,6 +14,7 @@ func TestCompositionHeadendsMatchHostProtobufAcrossChunks(t *testing.T) {
 		{},
 		{TriggerPrefix: "2001:db8:1234:5678::/64", Segments: []string{"2001:db8:aaaa:bbbb:cccc:dddd:eeee:ffff", "", "2001:db8::2"}, SrcAddr: "2001:db8::3", Mode: ^uint32(0)},
 		{TriggerPrefix: "10.0.0.1/32", Segments: []string{"fd00::1"}, SrcAddr: "fd00::2", Mode: 2},
+		{TriggerPrefix: "10.0.0.1/32", Segments: []string{"fd00::1"}, VRF: "vpn-a"},
 	}
 	host := &recordingHost{}
 	client := &cplane.Client{Host: host, MaxChunkBytes: 256}
@@ -22,7 +23,7 @@ func TestCompositionHeadendsMatchHostProtobufAcrossChunks(t *testing.T) {
 	for _, entry := range entries {
 		context := strings.Repeat("m", 130)
 		set.Headends = append(set.Headends, cplane.ForwardingHeadend{Context: context, Entry: entry})
-		want.ForwardingHeadends = append(want.ForwardingHeadends, &v1.PluginForwardingHeadend{Context: context, Entry: &v1.PluginHeadendEntry{TriggerPrefix: entry.TriggerPrefix, Segments: entry.Segments, SrcAddr: entry.SrcAddr, Mode: entry.Mode}})
+		want.ForwardingHeadends = append(want.ForwardingHeadends, &v1.PluginForwardingHeadend{Context: context, Entry: &v1.PluginHeadendEntry{TriggerPrefix: entry.TriggerPrefix, Segments: entry.Segments, SrcAddr: entry.SrcAddr, Mode: entry.Mode, Vrf: entry.VRF}})
 	}
 	if err := client.ApplyComposition(set); err != nil {
 		t.Fatal(err)

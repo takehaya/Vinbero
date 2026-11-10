@@ -129,6 +129,7 @@ func encodeHeadendBody(entry HeadendEntry) []byte {
 	}
 	body.String(3, entry.SrcAddr)
 	body.Uint(4, uint64(entry.Mode))
+	body.String(5, entry.VRF)
 	return body
 }
 

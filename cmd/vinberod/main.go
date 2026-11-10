@@ -495,6 +495,9 @@ func run(cliCtx *cli.Context) error {
 				return "", 0, false
 			},
 			ForwardingMaps: vin.GetMapOperations(),
+			// Headend declarations name VRFs; *vrf.Manager resolves them
+			// without creating one and holds them against deletion.
+			VRFs: vrfBgpMgr.VRF(),
 			ResolveMUPInstance: func(name string) (uint32, error) {
 				if name == "" {
 					return 0, nil

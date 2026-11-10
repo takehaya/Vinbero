@@ -11,6 +11,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/locator"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -32,7 +33,9 @@ type Scope struct {
 	// also bound the IPv6 unicast prefixes the plugin may advertise: what
 	// it legitimately originates there is its own SID space.
 	Locators []string
-	// VRFs are the VRFs VPN routes may be originated into.
+	// VRFs are the VRFs VPN routes may be originated into, local SIDs may
+	// decap into, and headend entries may be installed in. The global VRF
+	// needs no grant for a headend entry.
 	VRFs []string
 	// HeadendPrefixes bound the trigger prefixes headend entries may be
 	// installed for. A declared prefix must be contained in one of them.
@@ -275,12 +278,33 @@ func (s Scope) CheckHeadend(af AddressFamily, trigger string, mode uint8) error 
 	return nil
 }
 
+// CheckHeadendIn is CheckHeadend for an entry in the VRF named vrfName.
+// The global VRF ("" or "global") needs no grant, as an entry with no VRF
+// never did. Any other VRF must be in the scope's VRF list, the list that
+// bounds advertisements and decap VRFs; the prefix and slot checks apply
+// in every VRF.
+func (s Scope) CheckHeadendIn(af AddressFamily, vrfName, trigger string, mode uint8) error {
+	if !isGlobalVRFName(vrfName) && !s.allowsVRF(vrfName) {
+		return fmt.Errorf("headend entry for %q in VRF %q: the VRF is outside this plugin's scope (%s)",
+			trigger, vrfName, describe(s.VRFs, "no VRFs"))
+	}
+	return s.CheckHeadend(af, trigger, mode)
+}
+
+// isGlobalVRFName reports a headend VRF name that means the global VRF.
+func isGlobalVRFName(name string) bool { return name == "" || name == vrf.GlobalVRFName }
+
 // checkHeadend is CheckHeadend with the no-scope case spelled out.
 func (g *Guard) checkHeadend(af AddressFamily, trigger string, mode uint8) error {
+	return g.checkHeadendIn(af, "", trigger, mode)
+}
+
+// checkHeadendIn is CheckHeadendIn with the no-scope case spelled out.
+func (g *Guard) checkHeadendIn(af AddressFamily, vrfName, trigger string, mode uint8) error {
 	if g == nil {
 		return fmt.Errorf("headend entry for %q: this plugin has no scope, so it may not install headend entries", trigger)
 	}
-	return g.scope.CheckHeadend(af, trigger, mode)
+	return g.scope.CheckHeadendIn(af, vrfName, trigger, mode)
 }
 
 // isPluginHeadendSlot reports whether a mode falls in the range reserved

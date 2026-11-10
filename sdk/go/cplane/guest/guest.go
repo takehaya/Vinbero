@@ -30,8 +30,10 @@ func Register(h Handlers) {
 	handlers, registered = h, true
 }
 
+// abiVersion is the ABI this SDK speaks: 2 carries a headend entry's VRF.
+//
 //go:wasmexport vinbero_abi_version
-func abiVersion() uint32 { return 1 }
+func abiVersion() uint32 { return 2 }
 
 //go:wasmexport alloc
 func alloc(size uint32) uint32 {

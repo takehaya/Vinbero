@@ -141,6 +141,7 @@ type Manager struct {
 	retryForwardingCleanup func()
 	services               *compositionMaps
 	resolveMUPInstance     func(string) (uint32, error)
+	vrfs                   VRFDirectory
 	source                 EventSource
 	snapshots              SnapshotSource
 	claims                 BehaviorClaims
@@ -253,6 +254,9 @@ type ManagerConfig struct {
 	Source EventSource
 	// Claims records behavior claims. May be nil when there is no demux.
 	Claims BehaviorClaims
+	// VRFs resolves the VRF a headend declaration names. Nil refuses every
+	// VRF but the global one.
+	VRFs VRFDirectory
 	// Headend is the map surface plugin declarations reconcile into.
 	Headend HeadendMapOps
 	// HeadendReconciler is the shared host writer. Supply it instead of Headend
@@ -341,6 +345,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		allowNative:        cfg.AllowNative,
 		resolveInputTarget: cfg.ResolveInputTarget, retryForwardingCleanup: cfg.RetryForwardingCleanup,
 		services: services, resolveMUPInstance: cfg.ResolveMUPInstance,
+		vrfs:        cfg.VRFs,
 		advertise:   newNamedAdvertiseSet(cfg, leases),
 		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions, cfg.EndtVRFGrants, cfg.ResolveVRF),
 		source:      cfg.Source,
@@ -1103,6 +1108,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner:    bpf.OwnerPluginBundle(reg.Name),
 		Services: m.services, Policy: policy, ResolveMUPInstance: m.resolveMUPInstance,
+		VRFs:              m.vrfs,
 		HeadendReconciler: m.headend,
 		Leases:            m.leases,
 		EncapSource:       m.encapSource,

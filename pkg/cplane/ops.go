@@ -26,6 +26,7 @@ type PluginOps struct {
 	services                         *compositionMaps
 	policy                           *inputPolicy
 	resolveMUPInstance               func(string) (uint32, error)
+	vrfs                             VRFDirectory
 	desiredRevision, appliedRevision uint64
 	outputFailure                    string
 	compositionHash                  [32]byte
@@ -125,8 +126,20 @@ type applyTxn struct {
 	// memory rather than only on the number of things in it.
 	bytes   int
 	entries []HeadendDesired
-	routes  []AdvertisedRoute
-	sids    []LocalSID
+	// vrfs are the VRF names the headend entries declare, by index. They
+	// are resolved to ids when the set is applied, as locators are.
+	vrfs   []string
+	routes []AdvertisedRoute
+	sids   []LocalSID
+}
+
+// vrfName is the VRF the i-th headend entry declares; "" (the global VRF)
+// when the declaration named none.
+func (t *applyTxn) vrfName(i int) string {
+	if i < len(t.vrfs) {
+		return t.vrfs[i]
+	}
+	return ""
 }
 
 // PluginOpsConfig builds a PluginOps.
@@ -134,7 +147,10 @@ type PluginOpsConfig struct {
 	Services           *compositionMaps
 	Policy             *inputPolicy
 	ResolveMUPInstance func(string) (uint32, error)
-	StrictInputs       bool
+	// VRFs resolves the VRF a headend declaration names. Nil refuses every
+	// VRF but the global one.
+	VRFs         VRFDirectory
+	StrictInputs bool
 	// Owner is the tag every write by this plugin carries.
 	Owner bpf.OwnerTag
 	// Headend is the map surface the plugin's declarations reconcile into.
@@ -233,6 +249,7 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 	return &PluginOps{
 		owner:    cfg.Owner,
 		services: cfg.Services, policy: cfg.Policy, resolveMUPInstance: cfg.ResolveMUPInstance,
+		vrfs:           cfg.VRFs,
 		strictInputs:   cfg.StrictInputs,
 		inputReplaying: cfg.StrictInputs,
 		applyMu:        applyMu,
@@ -390,6 +407,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	// of a chunk the host said it had refused.
 	var (
 		entries []HeadendDesired
+		vrfs    []string
 		routes  []AdvertisedRoute
 		sids    []LocalSID
 	)
@@ -416,6 +434,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 				return fmt.Errorf("apply put: %w", err)
 			}
 			entries = append(entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
+			vrfs = append(vrfs, e.GetVrf())
 		}
 	}
 	for _, r := range msg.GetAdvertisedRoutes() {
@@ -434,6 +453,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	}
 	txn.bytes += size
 	txn.entries = append(txn.entries, entries...)
+	txn.vrfs = append(txn.vrfs, vrfs...)
 	txn.routes = append(txn.routes, routes...)
 	txn.sids = append(txn.sids, sids...)
 	return nil
@@ -755,7 +775,12 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 		af = AFv6
 	}
-	res, err := p.headend.ApplySet(p.owner, af, txn.entries, p.quotas.MaxHeadendEntries)
+	entries, release, err := resolveHeadendVRFs(p.vrfs, txn.entries, txn.vrfs)
+	if err != nil {
+		return fmt.Errorf("apply commit: %w", err)
+	}
+	res, err := p.headend.ApplySet(p.owner, af, entries, p.quotas.MaxHeadendEntries)
+	release()
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)
 	}
@@ -820,7 +845,7 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 		if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 			af = AFv6
 		}
-		for _, e := range txn.entries {
+		for i, e := range txn.entries {
 			if e.Entry == nil {
 				// A nil entry is unreachable on the apply path -- decode
 				// never returns one and ApplyHeadendSet refuses it -- but an
@@ -828,7 +853,7 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 				// "could not check, so it passes". Refuse it.
 				return fmt.Errorf("apply commit: headend entry with no encap for %q", e.TriggerPrefix)
 			}
-			if err := p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode); err != nil {
+			if err := p.guard.checkHeadendIn(af, txn.vrfName(i), e.TriggerPrefix, e.Entry.Mode); err != nil {
 				return fmt.Errorf("apply commit: %w", err)
 			}
 		}
@@ -918,7 +943,7 @@ func ValidateChunkInScope(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk, sco
 		if err != nil {
 			return err
 		}
-		if err := scope.CheckHeadend(af, trigger, entry.Mode); err != nil {
+		if err := scope.CheckHeadendIn(af, e.GetVrf(), trigger, entry.Mode); err != nil {
 			return err
 		}
 	}
@@ -1197,7 +1222,10 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			if e.Entry == nil {
 				continue
 			}
-			if p.caps.Has(wasm.CapHeadend) && p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
+			// An entry of a VRF that no longer has a name is outside every
+			// scope.
+			name, named := headendVRFName(p.vrfs, e.VRF)
+			if named && p.caps.Has(wasm.CapHeadend) && p.guard.checkHeadendIn(af, name, e.TriggerPrefix, e.Entry.Mode) == nil {
 				keep = append(keep, e)
 			}
 		}

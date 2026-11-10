@@ -46,7 +46,16 @@ package wasm
 // This is the same lesson the data-plane SDK learned when its ABI grew a
 // field and older plugin objects kept loading: a version that is only
 // documented is a version nobody checks.
-const ABIVersion = 1
+//
+// Version 2 adds the VRF of a headend entry (PluginHeadendEntry.vrf). The
+// host functions are the same as in version 1, so a version 1 module is
+// still admitted (MinABIVersion); a version 2 module is refused by a host
+// that only knows version 1, which would otherwise ignore the VRF and
+// write the entry into the global VRF.
+const ABIVersion = 2
+
+// MinABIVersion is the oldest ABI version this host admits.
+const MinABIVersion = 1
 
 // InputFeatureBGPPath is a read-only input capability, not a write grant.
 const InputFeatureBGPPath uint64 = 1

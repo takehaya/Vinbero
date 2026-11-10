@@ -116,11 +116,16 @@ const (
 	CompositionSet Kind = 5
 )
 
+// HeadendEntry is one headend declaration. VRF names the VRF the entry
+// belongs to: empty (or "global") is the global VRF, any other name must be
+// an existing VRF the plugin's scope grants. It needs a host with ABI
+// version 2 or later.
 type HeadendEntry struct {
 	TriggerPrefix string
 	Segments      []string
 	SrcAddr       string
 	Mode          uint32
+	VRF           string
 }
 
 // AdvertisedRoute names a VRF; the host derives RD and RT from its binding.

@@ -148,6 +148,10 @@ func TestTypedDeclarationsMatchHostProtobuf(t *testing.T) {
 			return c.ApplyHeadendV6([]cplane.HeadendEntry{{TriggerPrefix: "2001:db8::/64", Segments: []string{"fc00::1"}}})
 		},
 			&v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{TriggerPrefix: "2001:db8::/64", Segments: []string{"fc00::1"}}}}},
+		{"headend in a VRF", cplane.HeadendV4, func(c *cplane.Client) error {
+			return c.ApplyHeadendV4([]cplane.HeadendEntry{{TriggerPrefix: "10.0.0.0/24", Segments: []string{"fc00::1"}, VRF: "vpn-a"}})
+		},
+			&v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{TriggerPrefix: "10.0.0.0/24", Segments: []string{"fc00::1"}, Vrf: "vpn-a"}}}},
 		{"advertise", cplane.Advertise, func(c *cplane.Client) error {
 			return c.ApplyAdvertise([]cplane.AdvertisedRoute{{Family: "vpnv4", Prefix: "10.0.0.0/24", SRv6SID: "fc00::1", EndpointBehavior: 0xfe01, NextHop: "2001:db8::1", VRF: "vpn-a"}})
 		},

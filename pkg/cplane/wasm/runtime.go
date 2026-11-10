@@ -380,9 +380,9 @@ func (i *Instance) checkABIVersion(ctx context.Context) error {
 	if len(res) == 0 {
 		return fmt.Errorf("%w: %s returned nothing", ErrAdmission, ExportABIVersion)
 	}
-	if got := int32(res[0]); got != ABIVersion {
-		return fmt.Errorf("%w: module declares ABI version %d, this daemon implements %d",
-			ErrAdmission, got, ABIVersion)
+	if got := int32(res[0]); got < MinABIVersion || got > ABIVersion {
+		return fmt.Errorf("%w: module declares ABI version %d, this daemon implements %d to %d",
+			ErrAdmission, got, MinABIVersion, ABIVersion)
 	}
 	return nil
 }
