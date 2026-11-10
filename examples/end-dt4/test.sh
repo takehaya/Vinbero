@@ -286,6 +286,46 @@ eventually_ping "host2 -> host1 after the next hop moved to fc00:23::3"
 check "router3 keeps the new next hop (fc00:23::3) as a managed neighbour" \
   sh -c "ip netns exec '$ns_router3' ip -6 neigh show fc00:23::3 dev '$uplink' | grep -Eq 'managed|extern_learn'"
 
+echo ""
+
+# Phase 5: a kernel without BPF_FIB_LOOKUP_TBID
+echo "=========================================="
+echo "Phase 5: without BPF_FIB_LOOKUP_TBID"
+echo "=========================================="
+
+# internal.bpf.fib_lookup_tbid "off" makes vinberod behave as on a kernel
+# whose bpf_fib_lookup lacks the flag: tenant encapsulations take the
+# ingress lookup, so the VRF tables must stay open. The restart gives back
+# the unreachable defaults Phase 4 added.
+print_info "Restarting Vinbero with internal.bpf.fib_lookup_tbid off..."
+kill $VINBERO_PID 2>/dev/null || true
+wait $VINBERO_PID 2>/dev/null || true
+notbid_config=/tmp/vinbero_end_dt4_notbid.yaml
+notbid_log=/tmp/vinbero_end_dt4_notbid.log
+sed '/^  bpf:$/a\    fib_lookup_tbid: "off"' "$VINBERO_CONFIG" > "$notbid_config"
+start_vinbero "$ns_router3" "$notbid_config" "$notbid_log"
+VINBERO_PID=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router3" "127.0.0.1:8082" 10
+check "vinberod says the VRF tables stay open" grep -q "fib_lookup_tbid is off" "$notbid_log"
+for af in 4 6; do
+    check_not "vrf100's table has no IPv$af unreachable default any more" \
+      sh -c "ip netns exec '$ns_router3' ip -$af route show table 100 | grep -q '^unreachable default'"
+done
+
+# The maps start empty: the SID and the headend entry come back over the API.
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 sid create \
+  --trigger-prefix fc00:3::3/128 --action END_DT4 --vrf-name vrf100 > /dev/null
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
+  --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::1 > /dev/null
+eventually_ping "host2 -> host1 (H.Encaps from the vrf100 AC, ingress lookup through the open table)"
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into vrf100)"
+
+ip netns exec "$ns_host2" ip route replace 172.0.1.1/32 encap seg6 mode encap segs fc00:1::1 dev "$h2if"
+test_ping_with_counter "$ns_host2" 172.0.1.1 \
+  "host2 -> remote SID with the table open (falls through to the main table)"
+ip netns exec "$ns_host2" ip route del 172.0.1.1/32
+rm -f "$notbid_config"
+
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true
 wait $VINBERO_PID 2>/dev/null || true

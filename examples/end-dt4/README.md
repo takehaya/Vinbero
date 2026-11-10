@@ -74,6 +74,14 @@ phase of `test.sh` shows the difference once Vinbero manages the VRF:
   of router2, whose entry does not exist yet, and the pings get through
   again
 
+The fifth phase restarts vinberod with `internal.bpf.fib_lookup_tbid: "off"`,
+which makes it behave as on a kernel whose `bpf_fib_lookup` lacks
+`BPF_FIB_LOOKUP_TBID`: every encapsulation takes the ingress lookup, so the
+VRF tables stay open. The restart gives back the unreachable defaults of
+table 100, host2 to host1 is encapsulated again (its outer header reaches
+the main table through the open table), and host2's packets to the remote
+SID get through the kernel again.
+
 ## Quick start
 
 ```bash

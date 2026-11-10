@@ -67,7 +67,7 @@ MAC学習により、2回目以降のユニキャストは不要なPEに送ら�
 }
 ```
 
-eth0 の VLAN 100 に入ってきたフレームを BD 100 として扱います。VRF device に enslave された interface はポートにできず、`HeadendL2Create` はエラーになります (encap と BUM のコピーの外側を、その interface で VRF table から引いてしまうため。[vrf.md](vrf.md#encap-の外側の経路))。
+eth0 の VLAN 100 に入ってきたフレームを BD 100 として扱います。Vinbero が管理し unreachable default で閉じた VRF の port はポートにできず、`HeadendL2Create` はエラーになります (encap と BUM のコピーの外側を、その interface で VRF table から引いて止まってしまうため。[vrf.md](vrf.md#encap-の外側の経路))。
 
 - `bd_id: 100` を指定すると、MAC学習とFDB判定が有効になります。
 - `bd_id` を省略すると0となり、全フレームを直接encapします。

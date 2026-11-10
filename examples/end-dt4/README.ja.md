@@ -44,6 +44,8 @@ XDPがテナントの口からkernelへ渡したパケットは、kernelのVRF t
 - host1からhost2への通信（vrf100へのEnd.DT4）は変わらず届きます
 - router3は、カプセル化の外側のnext hop（静的経路で届くrouter2）をmanagedのneighbourとして保ちます。テストはそのneighbourのエントリーを消し、host2のpingだけを送ります。ほかの通信が無くても、pingは再び届きます。続いて経路をrouter2の別のアドレス（まだエントリーが無いもの）に移し、pingが再び届くことを確かめます
 
+5番目のフェーズでは、vinberodを `internal.bpf.fib_lookup_tbid: "off"` で起動し直します。`bpf_fib_lookup` が `BPF_FIB_LOOKUP_TBID` を受け付けないkernelと同じ動きになり、すべてのカプセル化が入口で経路を引くので、VRFのtableは閉じません。再起動でtable 100のunreachable defaultが外れ、host2からhost1へのカプセル化は開いたtableを通ってmain tableで外側の経路を引いて再び届き、host2から別のPEのSIDへのパケットもkernel経由で再び届きます。
+
 ## クイックスタート
 
 ```bash
