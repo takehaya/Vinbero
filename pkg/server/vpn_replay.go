@@ -227,15 +227,21 @@ func (r *vpnReplayer) run() {
 		}
 		r.attempts++
 		if r.attempts > r.maxRetries {
+			// The worker stops in the same locked section that gives up, so
+			// a request made after it finds no series running: one caused
+			// by a failure is held to the cool-down, any other starts a new
+			// worker. Nothing else is pending: a request made since this
+			// attempt started would have changed the series.
 			r.attempts = 0
 			r.gaveUpAt = r.now()
 			// Failure-caused requests merged in since are given up with it.
 			r.retryTracked = false
+			r.running = false
 			r.mu.Unlock()
 			r.logger.Error("giving up retrying failed writes until the next replay request",
 				zap.Int("retries", r.maxRetries), zap.Int("still_failing", failing),
 				zap.Any("families", again), zap.Bool("tracked", againTracked), zap.Error(err))
-			continue
+			return
 		}
 		for _, fam := range again {
 			r.retry[fam] = struct{}{}
