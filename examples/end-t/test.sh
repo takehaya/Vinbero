@@ -76,8 +76,8 @@ sleep 1
 
 # Pre-resolve NDP (required for bpf_fib_lookup)
 print_info "Pre-resolving NDP..."
-ip netns exec "$ns_router2" ip vrf exec vrf100 ping6 -c 1 -W 1 fc00:23::1 > /dev/null 2>&1 || true
-ip netns exec "$ns_router2" ip vrf exec vrf100 ping6 -c 1 -W 1 fc00:12::1 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router2" fc00:23::1 vrf100
+resolve_neigh "$ns_router2" fc00:12::1 vrf100
 
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP End.T VRF)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero XDP End.T VRF)"

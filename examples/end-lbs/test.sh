@@ -51,7 +51,7 @@ ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8097 \
 print_success "SID function registered"
 
 sleep 1
-ip netns exec "$ns_router2" ping6 -c 1 -W 1 fc00:23::1 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router2" fc00:23::1
 
 # Block A is blackholed past r2, so this ping is only delivered when the
 # argument was re-homed onto block B (a plain uN shift would produce a

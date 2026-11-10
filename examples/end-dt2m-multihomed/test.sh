@@ -143,10 +143,10 @@ print_info "Sending pings to trigger ARP broadcast from host1..."
 # miss); split-horizon should make this count zero.
 LOOPBACK_PCAP=$(mktemp --suffix=.pcap)
 trap 'rm -f "$LOOPBACK_PCAP"' RETURN 2>/dev/null || true
-ip netns exec "$NS_H1" tcpdump -i mh-h1pe2 -Q in -p -nn -w "$LOOPBACK_PCAP" \
-    "ether src $HOST1_MAC and arp" > /dev/null 2>&1 &
-TCPDUMP_PID=$!
-sleep 0.3
+# Zero is only meaningful if tcpdump was listening for the whole window, so
+# wait for it before sending.
+capture_start "$NS_H1" mh-h1pe2 "$LOOPBACK_PCAP" -Q in "ether src $HOST1_MAC and arp"
+TCPDUMP_PID=$CAPTURE_PID
 ip netns exec "$NS_H1" ping -c 3 -W 1 -I mh-h1-v100 172.16.100.2 > /dev/null 2>&1 || true
 kill "$TCPDUMP_PID" 2>/dev/null || true
 wait "$TCPDUMP_PID" 2>/dev/null || true
@@ -156,7 +156,7 @@ pe2_tx=$(stats_counter vbctl_pe2 SPLIT_HORIZON_TX)
 assert_nonzero "PE1 STATS_SPLIT_HORIZON_TX > 0" "${pe1_tx:-0}"
 assert_nonzero "PE2 STATS_SPLIT_HORIZON_TX > 0" "${pe2_tx:-0}"
 
-loopback_count=$(ip netns exec "$NS_H1" tcpdump -nn -r "$LOOPBACK_PCAP" 2>/dev/null | wc -l)
+loopback_count=$(capture_count "$LOOPBACK_PCAP")
 if [ "$loopback_count" -eq 0 ]; then
     print_success "pcap: 0 self-source ARP frames returned to host1 via PE2 (no loopback)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -164,7 +164,7 @@ else
     print_error "pcap: $loopback_count loopback ARP frames returned to host1 (split-horizon miss)"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
-rm -f "$LOOPBACK_PCAP"
+rm -f "$LOOPBACK_PCAP" "$LOOPBACK_PCAP.log"
 
 print_info "Reachability: host1 -> host2 (unicast overlay)"
 if ip netns exec "$NS_H1" ping -c 3 -W 2 -I mh-h1-v100 172.16.100.2 > /dev/null 2>&1; then

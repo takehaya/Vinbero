@@ -52,7 +52,7 @@ print_success "SID function registered"
 sleep 1
 
 # Pre-resolve ARP for the post-decap IPv4 hop.
-ip netns exec "$ns_router3" ping -c 1 -W 1 172.0.2.1 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router3" 172.0.2.1
 
 # The forward packet arrives at r3 as a bare uN SID with no SRH and an
 # IPIP payload. Delivery proves the USD branch decapped and forwarded the
