@@ -26,14 +26,20 @@ type ResourceManager struct {
 	// closeGuard finds an L2 headend circuit a table's unreachable default
 	// would cut off (SetTableCloseGuard); nil finds none.
 	closeGuard TableCloseGuard
-	// heldMu guards running and heldOpen.
+	// configDevices are the config's VRF devices (SetConfigVrfDevices).
+	configDevices []ConfigVrfDevice
+	// heldMu guards running, wantOpen, heldOpen and openFailed.
 	heldMu sync.Mutex
 	// running is set by FinishBoot: from then on a close the guard objects
 	// to is refused instead of the table being held open.
 	running bool
-	// heldOpen are the tables the boot left open for an L2 headend circuit,
-	// with that circuit; they stay open until the next start.
-	heldOpen map[uint32]L2CircuitOnTable
+	// wantOpen are the tables the boot found an L2 headend circuit on, with
+	// that circuit; heldOpen those of them without an unreachable default
+	// left, which stay open until the next start; openFailed those whose
+	// failure to open was logged.
+	wantOpen   map[uint32]L2CircuitOnTable
+	heldOpen   map[uint32]L2CircuitOnTable
+	openFailed map[uint32]bool
 }
 
 func NewResourceManager(statePath string, logger *zap.Logger) (*ResourceManager, error) {
@@ -100,24 +106,28 @@ func (m *ResourceManager) Reconcile() error {
 				return fix("vrf "+m.state.VRFs[i].Name, err)
 			}
 		}
-		// Tables an L2 headend circuit holds open are found before any route
-		// is added, so none of them is closed even for a moment.
+		// Each table is checked for L2 headend circuits once, over every
+		// port that will be on it, before any VRF on it is processed, and
+		// the routes a table that stays open has are removed first.
+		checked := map[uint32]bool{}
 		for i := range m.state.VRFs {
-			v := &m.state.VRFs[i]
-			if v.OptedOut() {
+			v := m.state.VRFs[i]
+			if checked[v.TableID] {
 				continue
 			}
-			if _, err := m.tableMayClose(v.Name, v.TableID, v.Members); err != nil {
+			checked[v.TableID] = true
+			if _, err := m.checkTable(m.state.VRFs, v.Name, v.TableID, nil, v.OptedOut()); err != nil {
 				return fix("vrf "+v.Name, err)
 			}
 		}
+		m.openHeldTablesLocked()
 		for i := range m.state.VRFs {
 			v := &m.state.VRFs[i]
 			link, err := netlink.LinkByName(v.Name)
 			if err != nil {
 				m.logger.Info("Reconcile: recreating VRF",
 					zap.String("name", v.Name), zap.Uint32("table_id", v.TableID))
-				ifindex, added, err := m.createVrfNetlink(v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.OptedOut())
+				ifindex, added, err := m.createVrfNetlink(m.state.VRFs, v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.OptedOut())
 				if err != nil {
 					return fix("vrf "+v.Name, err)
 				}
@@ -125,7 +135,7 @@ func (m *ResourceManager) Reconcile() error {
 				v.addUnreachableFamilies(added)
 				continue
 			}
-			ifindex, added, err := m.adoptVrfDevice(link, v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.OptedOut())
+			ifindex, added, err := m.adoptVrfDevice(m.state.VRFs, link, v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.OptedOut())
 			if err != nil {
 				return fix("vrf "+v.Name, err)
 			}

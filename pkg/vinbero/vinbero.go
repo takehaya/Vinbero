@@ -238,6 +238,18 @@ func configNoUnreachableDefault(cfg *config.Config) map[string]bool {
 	return out
 }
 
+// configVrfDevices returns the config's VRF devices: their members count
+// for their table's L2 circuit check from the start of the boot.
+func configVrfDevices(cfg *config.Config) []netresource.ConfigVrfDevice {
+	var out []netresource.ConfigVrfDevice
+	for _, e := range cfg.VRFs.Entries {
+		if e.TableID != 0 {
+			out = append(out, netresource.ConfigVrfDevice{Name: e.Name, TableID: e.TableID, Members: e.Members})
+		}
+	}
+	return out
+}
+
 // InitResourceManager initializes the resource manager and reconciles state.
 func (v *Vinbero) InitResourceManager() error {
 	statePath := v.cfg.Setting.StatePath
@@ -260,6 +272,7 @@ func (v *Vinbero) InitResourceManager() error {
 	// No unreachable default cuts off an L2 headend circuit: the boot holds
 	// such a table open, and after it the create is refused.
 	resMgr.SetTableCloseGuard(v.tableCloseGuard)
+	resMgr.SetConfigVrfDevices(configVrfDevices(v.cfg))
 
 	// Fail-closed: a state entry that cannot be materialized aborts the boot
 	// (the error carries a repair hint). Continuing with a phantom entry

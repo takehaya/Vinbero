@@ -26,8 +26,9 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 	if err := m.checkUnreachableDefault(name, noUnreachableDefault); err != nil {
 		return 0, err
 	}
+	records := m.ListVrfs()
 	if existing, err := netlink.LinkByName(name); err == nil {
-		ifindex, added, err := m.adoptVrfDevice(existing, name, tableID, members, enableL3mdevRule, noUnreachableDefault)
+		ifindex, added, err := m.adoptVrfDevice(records, existing, name, tableID, members, enableL3mdevRule, noUnreachableDefault)
 		if err != nil {
 			return 0, err
 		}
@@ -39,7 +40,7 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 		return ifindex, nil
 	}
 
-	ifindex, added, err := m.createVrfNetlink(name, tableID, members, enableL3mdevRule, noUnreachableDefault)
+	ifindex, added, err := m.createVrfNetlink(records, name, tableID, members, enableL3mdevRule, noUnreachableDefault)
 	if err != nil {
 		return 0, err
 	}
@@ -70,8 +71,8 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 // enslaved, so no member's traffic falls through to main in between; a
 // failure after that removes the routes this call added. It returns the
 // families whose route this call added. Reconcile adopts state entries
-// through the same path.
-func (m *ResourceManager) adoptVrfDevice(link netlink.Link, name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, []string, error) {
+// through the same path. records are the tracked VRFs (checkTable).
+func (m *ResourceManager) adoptVrfDevice(records []ManagedVrf, link netlink.Link, name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, []string, error) {
 	vrfLink, ok := link.(*netlink.Vrf)
 	if !ok {
 		return 0, nil, fmt.Errorf("link %s exists but is %s, not a VRF device", name, link.Type())
@@ -79,10 +80,13 @@ func (m *ResourceManager) adoptVrfDevice(link netlink.Link, name string, tableID
 	if vrfLink.Table != tableID {
 		return 0, nil, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
 	}
+	mayClose, err := m.checkTable(records, name, tableID, members, noUnreachableDefault)
+	if err != nil {
+		return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
+	}
 	var added []string
-	if !noUnreachableDefault {
-		var err error
-		if added, err = m.ensureUnreachableDefault(name, tableID, members); err != nil {
+	if !noUnreachableDefault && mayClose {
+		if added, err = m.ensureUnreachableDefault(tableID); err != nil {
 			return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
 		}
 	}
@@ -220,8 +224,13 @@ func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members 
 // adopt, it adds the unreachable default before enslaving any member. A
 // failure after the device exists removes the routes this call added and the
 // device itself, so a failed create leaves nothing behind. It returns the
-// families whose route it added.
-func (m *ResourceManager) createVrfNetlink(name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, []string, error) {
+// families whose route it added. records are the tracked VRFs
+// (checkTable, which runs before the device is made).
+func (m *ResourceManager) createVrfNetlink(records []ManagedVrf, name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, []string, error) {
+	mayClose, err := m.checkTable(records, name, tableID, members, noUnreachableDefault)
+	if err != nil {
+		return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
+	}
 	vrf := &netlink.Vrf{
 		LinkAttrs: netlink.LinkAttrs{Name: name},
 		Table:     tableID,
@@ -247,8 +256,8 @@ func (m *ResourceManager) createVrfNetlink(name string, tableID uint32, members 
 		return fail(fmt.Errorf("find created VRF %s: %w", name, err))
 	}
 
-	if !noUnreachableDefault {
-		if added, err = m.ensureUnreachableDefault(name, tableID, members); err != nil {
+	if !noUnreachableDefault && mayClose {
+		if added, err = m.ensureUnreachableDefault(tableID); err != nil {
 			return fail(fmt.Errorf("VRF %s: %w", name, err))
 		}
 	}

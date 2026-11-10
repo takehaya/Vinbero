@@ -7,12 +7,13 @@ import (
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sys/unix"
 )
 
 // circuitGuard is a TableCloseGuard that finds an L2 headend circuit on
 // the given tables.
 func circuitGuard(tables ...uint32) TableCloseGuard {
-	return func(name string, table uint32, _ []string) (*L2CircuitOnTable, error) {
+	return func(table uint32, _ map[string]string) (*L2CircuitOnTable, error) {
 		for _, t := range tables {
 			if t == table {
 				return &L2CircuitOnTable{Port: "eth6", VLAN: 0, VRF: "vrf-a"}, nil
@@ -97,4 +98,124 @@ func TestTableHeldOpenForL2Circuit(t *testing.T) {
 		t.Fatalf("CreateVrf on a table without a circuit: %v", err)
 	}
 	wantUnreachable(t, 800, 1)
+}
+
+// memberGuard is a TableCloseGuard that finds an L2 headend circuit on the
+// given ports when they are among the members it is asked about.
+func memberGuard(ports ...string) TableCloseGuard {
+	return func(_ uint32, members map[string]string) (*L2CircuitOnTable, error) {
+		for _, p := range ports {
+			if vrf, ok := members[p]; ok {
+				return &L2CircuitOnTable{Port: p, VRF: vrf}, nil
+			}
+		}
+		return nil, nil
+	}
+}
+
+// A table is checked once, over every port that will be on it, before any
+// VRF on it is processed: the member an opted-out VRF records but does not
+// hold right now, and the member the config gives a VRF the state does not
+// track yet, hold the table open whichever VRF on it comes first. A port
+// enslaved into a VRF on a closed table is checked as a close is.
+func TestTableCheckedOverEveryMember(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+	for _, name := range []string{"kvh6", "kvh7", "kvh8"} {
+		addDummy(t, name)
+	}
+	createVrfOrSkip(t, m, "vrf-a", 600, false)
+	if _, err := m.CreateVrf("vrf-b", 600, []string{"kvh6"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	kvh6, err := netlink.LinkByName("kvh6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.LinkSetNoMaster(kvh6); err != nil {
+		t.Fatal(err)
+	}
+	createVrfOrSkip(t, m, "vrf-c", 610, false)
+	wantUnreachable(t, 600, 1)
+	wantUnreachable(t, 610, 1)
+
+	m2, err := NewResourceManager(m.statePath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.SetTableCloseGuard(memberGuard("kvh6", "kvh7", "kvh8"))
+	m2.SetConfigVrfDevices([]ConfigVrfDevice{{Name: "vrf-d", TableID: 610, Members: []string{"kvh7"}}})
+	if err := m2.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 600, 0)
+	wantUnreachable(t, 610, 0)
+	held := m2.TablesHeldOpen()
+	if !strings.Contains(held[600], "{kvh6, vlan 0}") || !strings.Contains(held[610], "{kvh7, vlan 0}") {
+		t.Errorf("TablesHeldOpen = %v, want 600 for kvh6 and 610 for kvh7", held)
+	}
+
+	m2.FinishBoot()
+	createVrfOrSkip(t, m2, "vrf-e", 620, false)
+	_, err = m2.CreateVrf("vrf-f", 620, []string{"kvh8"}, false, true)
+	if err == nil || !strings.Contains(err.Error(), "{kvh8, vlan 0}") {
+		t.Errorf("an opted-out create enslaving kvh8 on closed table 620 = %v, want the refusal", err)
+	}
+	if l, err := netlink.LinkByName("kvh8"); err != nil || l.Attrs().MasterIndex != 0 {
+		t.Errorf("kvh8 was enslaved (%v)", err)
+	}
+}
+
+// A table counts as held open only once its unreachable defaults are gone.
+// When the removal of the one Vinbero added fails, the table stays closed:
+// it is not in TablesHeldOpen, one error is logged, the record keeps the
+// route, and the next start removes it and holds the table open.
+func TestTableHeldOpenRemovalFails(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+	createVrfOrSkip(t, m, "vrf-h", 630, false)
+	wantUnreachable(t, 630, 1)
+
+	routeDel = func(r *netlink.Route) error {
+		if r.Dst.IP.To4() == nil {
+			return unix.EPERM
+		}
+		return netlink.RouteDel(r)
+	}
+	t.Cleanup(func() { routeDel = netlink.RouteDel })
+	core, logs := observer.New(zap.WarnLevel)
+	m2, err := NewResourceManager(m.statePath, zap.New(core))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.SetTableCloseGuard(circuitGuard(630))
+	if err := m2.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if n := unreachableCount(t, 630); n[netlink.FAMILY_V4] != 0 || n[netlink.FAMILY_V6] != 1 {
+		t.Fatalf("table 630: %v, want only the IPv6 default left", n)
+	}
+	if c, held := m2.TablesHeldOpen()[630]; held {
+		t.Errorf("table 630 reported open (%s) with its IPv6 unreachable default still there", c)
+	}
+	if errs := logs.FilterMessageSnippet("cannot leave a VRF table open").All(); len(errs) != 1 || errs[0].Level != zap.ErrorLevel {
+		t.Errorf("logs = %v, want one error", logs.All())
+	}
+	if got, _ := m2.GetVrfByName("vrf-h"); len(got.UnreachableDefaultAdded) != 1 || got.UnreachableDefaultAdded[0] != familyIPv6 {
+		t.Errorf("vrf-h records %v, want [ipv6] kept", got.UnreachableDefaultAdded)
+	}
+
+	routeDel = netlink.RouteDel
+	m3, err := NewResourceManager(m.statePath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m3.SetTableCloseGuard(circuitGuard(630))
+	if err := m3.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 630, 0)
+	if _, held := m3.TablesHeldOpen()[630]; !held {
+		t.Error("table 630 not held open once the route is removed")
+	}
 }

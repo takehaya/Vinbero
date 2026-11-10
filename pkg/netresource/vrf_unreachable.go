@@ -46,22 +46,17 @@ func unreachableDefault(tableID uint32, family string) *netlink.Route {
 	return r
 }
 
-// ensureUnreachableDefault adds the unreachable defaults to the table of
-// the VRF name, which is created or adopted with members, and returns the
-// families whose route it added. The add never replaces a route: a default
-// the operator put in the table at a better metric is a different route and
-// stays the one lookups use, and a route already at this metric (the
-// operator's own unreachable default, or one added before a restart) is
-// kept as it is and not counted as added. A host without IPv6
-// (ipv6.disable=1) gets the IPv4 route only, with one log line. Every route
-// Vinbero adds goes through here, so the L2 circuit check (tableMayClose)
-// cannot be skipped.
-func (m *ResourceManager) ensureUnreachableDefault(name string, tableID uint32, members []string) ([]string, error) {
+// ensureUnreachableDefault adds the unreachable defaults to the table and
+// returns the families whose route it added. The add never replaces a
+// route: a default the operator put in the table at a better metric is a
+// different route and stays the one lookups use, and a route already at this
+// metric (the operator's own unreachable default, or one added before a
+// restart) is kept as it is and not counted as added. A host without IPv6
+// (ipv6.disable=1) gets the IPv4 route only, with one log line. Its only
+// callers, the create and the adopt, run checkTable first.
+func (m *ResourceManager) ensureUnreachableDefault(tableID uint32) ([]string, error) {
 	if m.tablesOpen {
 		return nil, nil
-	}
-	if ok, err := m.tableMayClose(name, tableID, members); err != nil || !ok {
-		return nil, err
 	}
 	var added []string
 	for _, family := range []string{familyIPv4, familyIPv6} {
@@ -223,21 +218,38 @@ func (c L2CircuitOnTable) String() string {
 
 // TableCloseGuard returns an L2 headend circuit that the unreachable
 // default of table would cut off, or nil: one on a port of any VRF device
-// on the table (managed by Vinbero or not), of the VRF device vrf, or on
-// one of members, the ports vrf is to enslave.
-type TableCloseGuard func(vrf string, table uint32, members []string) (*L2CircuitOnTable, error)
+// on the table now (managed by Vinbero or not), or on one of members, the
+// ports VRFs on the table are to have (by name, with the VRF's name).
+type TableCloseGuard func(table uint32, members map[string]string) (*L2CircuitOnTable, error)
 
-// SetTableCloseGuard installs the L2 circuit check every unreachable
-// default goes through. Call it before Reconcile.
+// SetTableCloseGuard installs the L2 circuit check (checkTable). Call it
+// before Reconcile.
 func (m *ResourceManager) SetTableCloseGuard(g TableCloseGuard) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closeGuard = g
 }
 
-// FinishBoot ends the boot: from then on a create or adopt that would close
-// a table under an L2 headend circuit is refused. During the boot, where
-// nothing can be refused, the table is held open instead (tableMayClose).
+// ConfigVrfDevice is a VRF device the config declares.
+type ConfigVrfDevice struct {
+	Name    string
+	TableID uint32
+	Members []string
+}
+
+// SetConfigVrfDevices records the config's VRF devices, so the boot checks
+// each table over the members the config gives the VRFs on it before it
+// applies the config. Call it before Reconcile.
+func (m *ResourceManager) SetConfigVrfDevices(devices []ConfigVrfDevice) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configDevices = devices
+}
+
+// FinishBoot ends the boot: from then on a create or adopt that would put
+// a table's unreachable default over an L2 headend circuit is refused.
+// During the boot, where nothing can be refused, the table is held open
+// instead (checkTable).
 func (m *ResourceManager) FinishBoot() {
 	m.heldMu.Lock()
 	defer m.heldMu.Unlock()
@@ -245,7 +257,8 @@ func (m *ResourceManager) FinishBoot() {
 }
 
 // TablesHeldOpen returns the tables the boot left open for an L2 headend
-// circuit, each with that circuit.
+// circuit, each with that circuit: those whose unreachable defaults are
+// gone (openHeldTablesLocked).
 func (m *ResourceManager) TablesHeldOpen() map[uint32]string {
 	m.heldMu.Lock()
 	defer m.heldMu.Unlock()
@@ -256,25 +269,59 @@ func (m *ResourceManager) TablesHeldOpen() map[uint32]string {
 	return out
 }
 
-// tableMayClose reports whether table may get the unreachable default for
-// the VRF name created or adopted with members. A table the boot holds open
-// may not, until the next start. Otherwise the guard looks for an L2
-// headend circuit the routes would cut off. During the boot such a table is
-// held open: one warning names it, the routes Vinbero added to it are
-// removed (openHeldTablesLocked) and the daemon goes on. After the boot the
-// create is refused. Callers may hold m.mu.
-func (m *ResourceManager) tableMayClose(name string, table uint32, members []string) (bool, error) {
+// checkTable runs before the VRF name is created on table or adopted with
+// members, and before anything is added or enslaved. It reports whether the
+// table may end in the unreachable default.
+//
+// A table is checked when it ends in the unreachable default with the VRF
+// on it: the VRF asks for the routes, or a tracked VRF on the table does.
+// So a port enslaved into a VRF on a closed table is checked as a close is.
+// The ports looked at are the same whichever VRF on the table comes first:
+// those of every VRF device on the table now, the members every tracked VRF
+// on it records (records), those the config declares for VRFs on it, and
+// members. During the boot a table with an L2 headend circuit on one of
+// them wants to stay open: nothing is added to it, and
+// openHeldTablesLocked removes what Vinbero added. After the boot the call
+// is refused.
+func (m *ResourceManager) checkTable(records []ManagedVrf, name string, table uint32, members []string, noUnreachableDefault bool) (bool, error) {
+	if m.tablesOpen {
+		return false, nil
+	}
+	closes := !noUnreachableDefault
+	ports := map[string]string{}
+	for _, v := range records {
+		if v.TableID != table {
+			continue
+		}
+		closes = closes || (v.Name != name && !v.OptedOut())
+		for _, p := range v.Members {
+			ports[p] = v.Name
+		}
+	}
+	if !closes {
+		return false, nil
+	}
+	for _, d := range m.configDevices {
+		if d.TableID == table {
+			for _, p := range d.Members {
+				ports[p] = d.Name
+			}
+		}
+	}
+	for _, p := range members {
+		ports[p] = name
+	}
 	m.heldMu.Lock()
-	_, held := m.heldOpen[table]
+	_, wanted := m.wantOpen[table]
 	running := m.running
 	m.heldMu.Unlock()
-	if held {
+	if wanted {
 		return false, nil
 	}
 	if m.closeGuard == nil {
 		return true, nil
 	}
-	c, err := m.closeGuard(name, table, members)
+	c, err := m.closeGuard(table, ports)
 	if err != nil {
 		return false, fmt.Errorf("check table %d for L2 headend circuits: %w", table, err)
 	}
@@ -283,42 +330,108 @@ func (m *ResourceManager) tableMayClose(name string, table uint32, members []str
 	}
 	if running {
 		return false, fmt.Errorf("table %d would end in the unreachable default and drop the encapsulations and BUM copies of the %s; "+
-			"delete the circuit, or set no_unreachable_default on the VRF", table, c)
+			"delete the circuit, or set no_unreachable_default on every VRF on the table", table, c)
 	}
 	m.heldMu.Lock()
-	if m.heldOpen == nil {
-		m.heldOpen = map[uint32]L2CircuitOnTable{}
+	if m.wantOpen == nil {
+		m.wantOpen = map[uint32]L2CircuitOnTable{}
 	}
-	m.heldOpen[table] = *c
+	m.wantOpen[table] = *c
 	m.heldMu.Unlock()
-	m.logger.Warn("VRF table left open, without the unreachable default: an L2 headend circuit is on one of its ports, "+
-		"and the route would drop the circuit's encapsulations and BUM copies; delete the circuit and restart to close the table, "+
-		"or set no_unreachable_default on every VRF on the table to keep it open",
-		zap.Uint32("table_id", table), zap.String("port", c.Port), zap.Uint16("vlan", c.VLAN), zap.String("vrf", c.VRF),
-		zap.String("circuit", c.String()))
 	return false, nil
 }
 
-// openHeldTablesLocked removes the unreachable defaults Vinbero added to a
-// table the boot holds open, as SetTablesClosed(false) does for every
-// table. Callers hold m.mu.
+// openHeldTablesLocked removes the unreachable defaults Vinbero added to
+// the tables the boot wants open, as SetTablesClosed(false) does for every
+// table. A table counts as held open (TablesHeldOpen) only once it has no
+// unreachable default left; then one warning names the table and the
+// circuit. If a removal fails or another unreachable default is in the
+// table, it counts as closed: an error is logged once, the records keep the
+// routes they own, and the next call (the next create or adopt, or the next
+// start) tries again. Callers hold m.mu.
 func (m *ResourceManager) openHeldTablesLocked() {
 	m.heldMu.Lock()
-	held := make(map[uint32]bool, len(m.heldOpen))
-	for t := range m.heldOpen {
-		held[t] = true
+	want := map[uint32]L2CircuitOnTable{}
+	for t, c := range m.wantOpen {
+		if _, done := m.heldOpen[t]; !done {
+			want[t] = c
+		}
 	}
 	m.heldMu.Unlock()
-	for i := range m.state.VRFs {
-		v := &m.state.VRFs[i]
-		if !held[v.TableID] || len(v.UnreachableDefaultAdded) == 0 {
-			continue
+	for table, c := range want {
+		var failed error
+		for i := range m.state.VRFs {
+			v := &m.state.VRFs[i]
+			if v.TableID != table || len(v.UnreachableDefaultAdded) == 0 {
+				continue
+			}
+			var kept []string // the families whose removal failed
+			for _, family := range v.UnreachableDefaultAdded {
+				if err := m.removeUnreachableFamilies(table, []string{family}); err != nil {
+					failed = err
+					kept = append(kept, family)
+				}
+			}
+			v.UnreachableDefaultAdded = kept
 		}
-		if err := m.removeUnreachableFamilies(v.TableID, v.UnreachableDefaultAdded); err != nil {
-			continue // logged there; the record keeps them, and the next start retries
+		if failed == nil {
+			failed = unreachableDefaultLeft(table)
 		}
-		v.UnreachableDefaultAdded = nil
+		fields := []zap.Field{zap.Uint32("table_id", table), zap.String("port", c.Port), zap.Uint16("vlan", c.VLAN),
+			zap.String("vrf", c.VRF), zap.String("circuit", c.String())}
+		m.heldMu.Lock()
+		first := !m.openFailed[table]
+		if failed == nil {
+			if m.heldOpen == nil {
+				m.heldOpen = map[uint32]L2CircuitOnTable{}
+			}
+			m.heldOpen[table] = c
+		} else {
+			if m.openFailed == nil {
+				m.openFailed = map[uint32]bool{}
+			}
+			m.openFailed[table] = true
+		}
+		m.heldMu.Unlock()
+		switch {
+		case failed == nil:
+			m.logger.Warn("VRF table left open, without the unreachable default: an L2 headend circuit is on one of its ports, "+
+				"and the route would drop the circuit's encapsulations and BUM copies; delete the circuit and restart to close the table, "+
+				"or set no_unreachable_default on every VRF on the table to keep it open", fields...)
+		case first:
+			m.logger.Error("cannot leave a VRF table open for an L2 headend circuit on one of its ports: its unreachable default "+
+				"stays and drops the circuit's encapsulations and BUM copies; the next create on the table or the next start tries again",
+				append(fields, zap.Error(failed))...)
+		}
 	}
+}
+
+// listTableRoutes lists a table's routes of one family; tests replace it.
+var listTableRoutes = func(table uint32, family int) ([]netlink.Route, error) {
+	return netlink.RouteListFiltered(family, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+}
+
+// unreachableDefaultLeft returns an error when table still has an
+// unreachable default route in either family.
+func unreachableDefaultLeft(table uint32) error {
+	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		routes, err := listTableRoutes(table, family)
+		if err != nil {
+			if family == netlink.FAMILY_V6 && (errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EAFNOSUPPORT)) {
+				continue // no IPv6 on the host
+			}
+			return fmt.Errorf("list the routes of table %d: %w", table, err)
+		}
+		for _, r := range routes {
+			if r.Type != unix.RTN_UNREACHABLE {
+				continue
+			}
+			if ones, _ := r.Dst.Mask.Size(); r.Dst == nil || ones == 0 {
+				return fmt.Errorf("table %d still has an unreachable default (%s)", table, r.Dst)
+			}
+		}
+	}
+	return nil
 }
 
 // SetTablesClosed says whether VRF tables may be closed with the unreachable
