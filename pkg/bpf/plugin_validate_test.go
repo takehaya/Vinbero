@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
@@ -51,7 +53,7 @@ func callToSymbol(sym string) asm.Instruction {
 }
 
 func loadFuncPtr(dst asm.Register, sym string) asm.Instruction {
-	ins := asm.LoadImm(dst, 0, asm.DWord)
+	ins := asm.LoadImm(dst, -1, asm.DWord)
 	ins.Src = asm.PseudoFunc
 	return ins.WithReference(sym)
 }
@@ -601,10 +603,9 @@ func TestValidatePluginROWrites_MovPropagatesRO(t *testing.T) {
 	}
 }
 
-// Subprogram body sitting after the main program (clang appends them
-// after the entry point) must NOT be scanned. Otherwise legitimate
-// epilogue writes to slot_stats_* would trip the check the moment we
-// re-classify those maps as RO.
+// Subprogram bodies sitting after the main program must be scanned for
+// resolved RO writes, including when the symbol-bearing first instruction
+// establishes the map identity.
 func TestValidatePluginROWrites_ResolvedSubprogramWriteIsCaught(t *testing.T) {
 	// A plugin can no longer hide a read-only-map write in a noinline helper.
 	// The subprogram here resolves the map itself (LoadMapPtr + store), so the
@@ -616,8 +617,10 @@ func TestValidatePluginROWrites_ResolvedSubprogramWriteIsCaught(t *testing.T) {
 		asm.Return(),
 	}
 	sub := asm.Instructions{
-		asm.StoreImm(asm.RFP, -4, 0, asm.Word).WithSymbol("subprogram_body"),
-		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.LoadMapPtr(asm.R1, 0).
+			WithReference("sid_function_map").
+			WithSymbol("subprogram_body"),
+		asm.StoreImm(asm.RFP, -4, 0, asm.Word),
 		asm.Mov.Reg(asm.R2, asm.RFP),
 		asm.Add.Imm(asm.R2, -4),
 		asm.FnMapLookupElem.Call(),
@@ -635,6 +638,9 @@ func TestValidatePluginROWrites_ResolvedSubprogramWriteIsCaught(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPluginIntegrityMapWrite) {
 		t.Fatalf("subprogram integrity write is not fatal: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sid_function_map") {
+		t.Fatalf("subprogram violation must name sid_function_map: %v", err)
 	}
 }
 
@@ -740,7 +746,7 @@ func TestValidatePluginROWrites_WritableArgumentsAllowed(t *testing.T) {
 
 func TestValidatePluginROWrites_DifferentCallSiteMapsRemainUnresolved(t *testing.T) {
 	main := lookupAndCall("plugin_counter_map", "store_value", "first_lookup_done")
-	main = append(main, lookupAndCall("sid_function_map", "store_value", "second_lookup_done")...)
+	main = append(main, lookupAndCall("plugin_other_map", "store_value", "second_lookup_done")...)
 	main = append(main, callToSymbol(SymTailcallEpilogue), asm.Return())
 	sub := asm.Instructions{
 		asm.StoreImm(asm.R1, 0, 1, asm.Word).WithSymbol("store_value"),
@@ -749,7 +755,193 @@ func TestValidatePluginROWrites_DifferentCallSiteMapsRemainUnresolved(t *testing
 	prog := buildSpec("different_call_sites", ebpf.XDP, append(main, sub...))
 
 	if err := ValidatePluginProgram(prog, roSet()); err != nil {
-		t.Fatalf("different maps at call sites must remain unresolved and skipped: %v", err)
+		t.Fatalf("different writable maps at call sites must remain unresolved and skipped: %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_ROCallSiteWins(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		other asm.Instructions
+	}{
+		{
+			name:  "writable_map",
+			other: lookupAndCall("plugin_counter_map", "store_value", "writable_lookup_done"),
+		},
+		{
+			name: "unresolved",
+			other: asm.Instructions{
+				asm.Mov.Reg(asm.R1, asm.RFP),
+				callToSymbol("store_value"),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			main := lookupAndCall("sid_function_map", "store_value", "ro_lookup_done")
+			main = append(main, tc.other...)
+			main = append(main, callToSymbol(SymTailcallEpilogue), asm.Return())
+			sub := asm.Instructions{
+				asm.StoreImm(asm.R1, 0, 1, asm.Word).WithSymbol("store_value"),
+				asm.Return(),
+			}
+			prog := buildSpec("ro_call_site_wins", ebpf.XDP, append(main, sub...))
+
+			err := ValidatePluginProgram(prog, roSet())
+			if err == nil || !strings.Contains(err.Error(), "sid_function_map") {
+				t.Fatalf("RO call site must win and name sid_function_map, got: %v", err)
+			}
+		})
+	}
+}
+
+func branchJoinCaller(callee, prefix string) asm.Instructions {
+	join := prefix + "_join"
+	done := prefix + "_done"
+	return asm.Instructions{
+		asm.StoreImm(asm.RFP, -4, 0, asm.Word),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("plugin_counter_map"),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, done),
+		asm.Mov.Reg(asm.R6, asm.R0),
+		asm.JEq.Imm(asm.R7, 0, join),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, done),
+		asm.Mov.Reg(asm.R6, asm.R0), // the RO arm only reads this value
+		asm.Mov.Reg(asm.R1, asm.R6).WithSymbol(join),
+		callToSymbol(callee),
+		asm.Mov.Imm(asm.R0, 0).WithSymbol(done),
+	}
+}
+
+func straightLineCaller(callee, prefix string) asm.Instructions {
+	done := prefix + "_done"
+	return asm.Instructions{
+		asm.StoreImm(asm.RFP, -4, 0, asm.Word),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, done),
+		asm.Mov.Reg(asm.R6, asm.R0),
+		asm.Mov.Reg(asm.R1, asm.R6),
+		callToSymbol(callee),
+		asm.Mov.Imm(asm.R0, 0).WithSymbol(done),
+	}
+}
+
+func callerShapeSpec(name string, caller asm.Instructions, nested bool) *ebpf.ProgramSpec {
+	main := caller
+	var sub asm.Instructions
+	if nested {
+		main = asm.Instructions{
+			callToSymbol("forward_value"),
+		}
+		caller[0] = caller[0].WithSymbol("forward_value")
+		sub = append(sub, caller...)
+		sub = append(sub, asm.Return())
+	}
+	main = append(main, callToSymbol(SymTailcallEpilogue), asm.Return())
+	sub = append(sub,
+		asm.StoreImm(asm.R1, 0, 1, asm.Word).WithSymbol("store_value"),
+		asm.Return(),
+	)
+	return buildSpec(name, ebpf.XDP, append(main, sub...))
+}
+
+func TestValidatePluginROWrites_BranchJoinDoesNotSeedStaleArgument(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		name := "main"
+		if nested {
+			name = "subprogram"
+		}
+		t.Run(name, func(t *testing.T) {
+			caller := branchJoinCaller("store_value", "branch_"+name)
+			prog := callerShapeSpec("branch_join_"+name, caller, nested)
+			if err := ValidatePluginProgram(prog, roSet()); err != nil {
+				t.Fatalf("stale RO identity at a branch join must not seed the store: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePluginROWrites_StraightLineArgumentRejected(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		name := "main"
+		if nested {
+			name = "subprogram"
+		}
+		t.Run(name, func(t *testing.T) {
+			caller := straightLineCaller("store_value", "straight_"+name)
+			prog := callerShapeSpec("straight_line_"+name, caller, nested)
+			err := ValidatePluginProgram(prog, roSet())
+			if err == nil || !strings.Contains(err.Error(), "sid_function_map") {
+				t.Fatalf("straight-line RO argument must be rejected and named, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePluginROWrites_JumpTargetsUseRawOffsets(t *testing.T) {
+	done := "raw_offset_done"
+	branch := asm.JEq.Imm(asm.R7, 0, "")
+	branch.Offset = 7 // the arm is seven raw instructions, but six slice entries
+	main := asm.Instructions{
+		asm.StoreImm(asm.RFP, -4, 0, asm.Word),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("plugin_counter_map"),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, done),
+		asm.Mov.Reg(asm.R6, asm.R0),
+		branch,
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, done),
+		asm.Mov.Reg(asm.R6, asm.R0),
+		asm.Mov.Reg(asm.R1, asm.R6),
+		callToSymbol("store_value"),
+		asm.Mov.Imm(asm.R0, 0).WithSymbol(done),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	}
+	sub := asm.Instructions{
+		asm.StoreImm(asm.R1, 0, 1, asm.Word).WithSymbol("store_value"),
+		asm.Return(),
+	}
+	prog := buildSpec("raw_jump_offset", ebpf.XDP, append(main, sub...))
+	if err := ValidatePluginProgram(prog, roSet()); err != nil {
+		t.Fatalf("raw-offset branch target must clear the stale identity: %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_DeepSubprogramChainIsBounded(t *testing.T) {
+	const functions = 4000
+	main := lookupAndCall("sid_function_map", "forward_0000", "deep_lookup_done")
+	main = append(main, callToSymbol(SymTailcallEpilogue), asm.Return())
+	ins := append(asm.Instructions{}, main...)
+	for i := range functions {
+		name := fmt.Sprintf("forward_%04d", i)
+		body := asm.Instructions{asm.Mov.Reg(asm.R1, asm.R1).WithSymbol(name)}
+		if i+1 < functions {
+			body = append(body, callToSymbol(fmt.Sprintf("forward_%04d", i+1)))
+		}
+		body = append(body, asm.Return())
+		ins = append(ins, body...)
+	}
+
+	start := time.Now()
+	if err := ValidatePluginProgram(buildSpec("deep_chain", ebpf.XDP, ins), roSet()); err != nil {
+		t.Fatalf("deep malformed chain should remain validation-safe: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("validation took %v; the propagation rounds are not bounded", elapsed)
 	}
 }
 
