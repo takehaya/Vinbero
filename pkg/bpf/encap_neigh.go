@@ -444,9 +444,9 @@ func neighManaged(n netlink.Neigh) bool { return n.FlagsExt&netlink.NTF_EXT_MANA
 //   - a route, nexthop-object or ip-rule change re-resolves the set;
 //   - a deleted neighbour entry the keeper holds is made managed again;
 //   - at start and every resweep, a full walk of the maps (EncapDestinations)
-//     replaces the set: it picks up writers that do not notify (a plugin
-//     writing a map directly, the data plane's End.AD cache) and drops
-//     destinations no entry uses any more.
+//     picks up writers that do not notify (a plugin writing a map directly,
+//     the data plane's End.AD cache) and drops destinations no entry uses
+//     any more, conservatively (see Sweep).
 //
 // A next hop no destination uses any more is given back: the managed entry
 // the keeper made is deleted. Entries that were static (permanent, noarp),
@@ -471,9 +471,15 @@ type EncapNeighKeeper struct {
 	pending map[netip.Addr]struct{} // written, not yet resolved
 	reroute bool                    // routes changed: re-resolve the set
 	rekeep  bool                    // a kept entry was deleted
+	// walkNotified collects what is written while a sweep walks the maps
+	// (nil when no walk runs): the sweep keeps it whatever the walk saw.
+	walkNotified map[netip.Addr]struct{}
 
 	// mu guards the set and the owned entries, and is held by a pass.
 	mu sync.Mutex
+	// missed counts, per destination, the complete walks in a row that did
+	// not see it; it is dropped at sweepsBeforeRelease.
+	missed map[netip.Addr]int
 	// dests is the destination set with each one's next hops.
 	dests map[netip.Addr][]NeighTarget
 	// owned are the next hops whose managed entry this keeper made.
@@ -503,6 +509,7 @@ func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighK
 		wake:    make(chan struct{}, 1),
 		pending: map[netip.Addr]struct{}{},
 		dests:   map[netip.Addr][]NeighTarget{},
+		missed:  map[netip.Addr]int{},
 		owned:   map[string]NeighTarget{},
 		warned:  map[string]string{},
 	}
@@ -515,6 +522,9 @@ func (k *EncapNeighKeeper) Notify(dsts []netip.Addr) {
 	k.pmu.Lock()
 	for _, d := range dsts {
 		k.pending[d] = struct{}{}
+		if k.walkNotified != nil {
+			k.walkNotified[d] = struct{}{}
+		}
 	}
 	k.pmu.Unlock()
 	k.poke()
@@ -560,21 +570,65 @@ func (k *EncapNeighKeeper) warnOnce(key, msg string, err error, fields ...zap.Fi
 	k.logger.Warn(msg, fields...)
 }
 
-// Sweep walks the maps, replaces the destination set with what they hold,
-// resolves all of it and brings the neighbour entries in line. It returns
-// the next hops kept.
+// sweepsBeforeRelease is how many complete walks in a row must miss a
+// destination before it is dropped (and a next hop only it used is given
+// back): a destination that moves between maps while a walk runs, or that
+// one walk misses for any other reason, keeps its neighbour.
+const sweepsBeforeRelease = 2
+
+// Sweep walks the maps, brings the destination set in line with what they
+// hold, resolves all of it and brings the neighbour entries in line. It
+// returns the next hops kept.
+//
+// Pruning is conservative. A destination leaves the set only after
+// sweepsBeforeRelease complete walks in a row did not see it, and a
+// destination written while a walk runs counts as seen by it. A walk that
+// failed part-way may add destinations, never remove them.
 func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
-	// Events from before the walk are covered by it.
+	// Events from before the walk are covered by it; writes during it are
+	// collected.
 	_, _, _ = k.takeEvents()
+	k.pmu.Lock()
+	k.walkNotified = map[netip.Addr]struct{}{}
+	k.pmu.Unlock()
 	dsts, werr := k.walk()
+	k.pmu.Lock()
+	notified := k.walkNotified
+	k.walkNotified = nil
+	k.pmu.Unlock()
+
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if werr != nil && len(dsts) == 0 {
-		// A walk that read nothing must not release every next hop.
-		return k.targetsLocked(), werr
+	seen := make(map[netip.Addr]struct{}, len(dsts)+len(notified))
+	for _, d := range dsts {
+		seen[d] = struct{}{}
 	}
-	err := k.resolveLocked(dsts, true)
-	return k.targetsLocked(), errors.Join(werr, err)
+	for d := range notified {
+		seen[d] = struct{}{}
+	}
+	list := make([]netip.Addr, 0, len(seen))
+	for d := range seen {
+		list = append(list, d)
+		delete(k.missed, d)
+	}
+	if werr != nil {
+		// Incomplete: add and re-resolve what was seen, keep the rest.
+		err := k.resolveLocked(list, false)
+		return k.targetsLocked(), errors.Join(werr, err)
+	}
+	for d := range k.dests {
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		k.missed[d]++
+		if k.missed[d] < sweepsBeforeRelease {
+			list = append(list, d) // missed once: kept for now
+			continue
+		}
+		delete(k.missed, d)
+	}
+	err := k.resolveLocked(list, true)
+	return k.targetsLocked(), err
 }
 
 // pass runs what the events since the last pass asked for.
@@ -589,6 +643,7 @@ func (k *EncapNeighKeeper) pass() error {
 		}
 	}
 	for d := range pending {
+		delete(k.missed, d) // written again: in use
 		if _, known := k.dests[d]; !known {
 			dsts = append(dsts, d)
 		}
@@ -693,26 +748,32 @@ func (k *EncapNeighKeeper) applyLocked() error {
 			k.owned[key] = t
 		}
 	}
+	// Ownership ends only when the entry is gone or is no longer the
+	// keeper's to remove; a release whose dump or delete failed stays owned
+	// and is retried by a later pass.
 	for _, t := range release {
 		key := t.key()
-		delete(k.owned, key)
 		if _, bum := bumNeighClaims.Load(key); bum {
+			delete(k.owned, key) // the BUM flood slots hold it now
 			continue
 		}
 		dump, ok := dumps[group{int(t.Ifindex), ipFamily(t.IP)}]
 		if !ok {
-			continue
+			continue // the list failed: retried later
 		}
 		n, exists := dump[t.IP.String()]
 		if !exists || neighStatic(n) || !neighManaged(n) {
-			continue // gone, or someone changed it since
+			delete(k.owned, key) // gone, or someone changed it since
+			continue
 		}
 		if err := k.neigh.del(n); err != nil && !errors.Is(err, unix.ENOENT) {
 			k.warnOnce("release "+key, "cannot give back an encapsulation next hop", err,
 				zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
 			errs = append(errs, err)
-			continue
+			continue // still owned: retried later
 		}
+		delete(k.owned, key)
+		delete(k.warned, "release "+key)
 		k.logger.Info("encapsulation next hop no longer used; managed neighbour removed",
 			zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
 	}

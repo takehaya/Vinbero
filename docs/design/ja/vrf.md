@@ -89,10 +89,10 @@ headend が encap したパケットの外側の IPv6 ヘッダは underlay の�
 
 対象は H.Encaps と H.Encaps.Red (IPv4 / IPv6)、H.Insert と H.Insert.Red、H.Encaps.L2 系、MUP の H.M.GTP4.D と GTP6 の headend、service proxy の戻り (End.AS / End.AD / End.AM) です。vrf_id は front door が決めた値を tail call の文脈から渡すので、encap ごとの map lookup は増えません。
 
-BUM の複製 (TC の clone と xdp mode の devmap egress) は、送信元の L2 headend の circuit の port で引きます。その port が閉じた VRF table の VRF device に enslave されていると、unicast の encap も BUM のコピーも VRF table で止まります。そのため Vinbero が管理し unreachable default で閉じた VRF に限って、次を拒否します。管理していない VRF や `no_unreachable_default` の VRF の port は、これまでどおり使えます。
+BUM の複製 (TC の clone と xdp mode の devmap egress) は、送信元の L2 headend の circuit の port で引きます。その port が閉じた VRF table の VRF device に enslave されていると、unicast の encap も BUM のコピーも VRF table で止まります。そのため閉じた VRF に限って、次を拒否します。閉じているかは table で決まります。Vinbero が管理する VRF のうち `no_unreachable_default` でないものが 1 つでもその table を使っていれば、その table の VRF はすべて閉じています (opt-out した VRF も、閉じた VRF と table を共有していれば閉じています)。管理していない VRF や、opt-out した VRF だけが使う table の VRF の port は、そのまま使えます。
 
 - `HeadendL2Create` で、閉じた VRF の port に circuit を作ること
-- `VrfCreate` で、circuit を持つ port を閉じる VRF の member にすること
+- `VrfCreate` で、circuit を持つ port を閉じる VRF に入れること。要求の member に加えて、adopt する device に kernel が既に持つ port も確かめます
 
 Vinbero を通さずに enslave された port の circuit は、起動時に 1 つずつ warning に出します。
 
@@ -105,10 +105,10 @@ VRF device に enslave したまま AC にしていない interface は vrf_id 0
 そのため vinberod は、encap が使う underlay の next hop をすべて managed の neighbour (`NTF_EXT_MANAGED`、`ip neigh` の `managed extern_learn`) にします。kernel は通信が無くてもその neighbour を解決し、解決したまま保ちます。BUM の flood 先の next hop と同じ仕組みです ([bum_mode.md](bum_mode.md))。vrf_id 0 の encap も対象です。
 
 - 宛先: L3 の headend (IPv4 / IPv6、MUP の session、ECMP の各 path)、SR Policy の最初の transport SID、L2 headend の circuit、BD の peer、End.B6 / End.B6.Encaps の policy、service proxy の戻りの encap と End.AD の cache の宛先です。map への書き込みは、書いた entry の宛先を keeper に渡します。keeper は宛先の集合を持ち、まだ知らない宛先だけを解決します
-- 全体の見直し: 起動時と 30 秒ごとに map を全部読み、宛先の集合を置き換えます。通知の無い書き込み (map を直接書く plugin、data plane が書く End.AD の cache) を拾い、もう使われない宛先を落とします。経路、nexthop object、ip rule が変わったとき (BUM と同じ route の購読を使います) は集合を解決し直し、keeper が持つ neighbour entry が消えたときは managed にし直します
+- 全体の見直し: 起動時と 30 秒ごとに map を全部読み、宛先の集合を map に合わせます。通知の無い書き込み (map を直接書く plugin、data plane が書く End.AD の cache) を拾い、もう使われない宛先を落とします。落とすのは控えめにします。途中で失敗した読み込みは宛先を足すだけで落とさず、読んでいる間に書き込まれた宛先は読み込みが見たものとして扱い、最後まで読めた見直しが 2 回続けて見なかった宛先だけを落とします。経路、nexthop object、ip rule が変わったとき (BUM と同じ route の購読を使います) は集合を解決し直し、keeper が持つ neighbour entry が消えたときは managed にし直します
 - 宛先の next hop は data plane の 2 つの引き方の両方で求め、両方を保ちます。main table を直接引いた結果 (tenant の encap) と、ip rule を通した host の経路 lookup の結果 (vrf_id 0 の encap) です。multipath の経路は全 member を対象にし、gateway の無い on-link の経路では宛先そのものです。blackhole / prohibit / unreachable の経路の宛先には next hop が無く、エラーにも warning にもしません
 - nexthop object を使う経路で `net.ipv4.nexthop_compat_mode=0` のとき (IPv6 にも効きます)、vinberod の netlink library は経路から next hop を読めません。その宛先の neighbour は保てないので、warning を 1 回出します。`net.ipv4.nexthop_compat_mode=1` (既定) にしてください
-- どの宛先も使わなくなった next hop は返します。keeper が managed にした entry を消し、元の動的な扱いに戻します。最初から静的 (permanent、noarp) だった entry、keeper が見る前から managed だった entry、BUM の flood 先として managed にした entry には触れません。1 回の見直しで neighbour table を読むのは device と family ごとに 1 回です
+- どの宛先も使わなくなった next hop は返します。keeper が managed にした entry を消し、元の動的な扱いに戻します。neighbour の読み込みや削除が失敗したときは keeper のものとして持ち続け、後の見直しでやり直します。最初から静的 (permanent、noarp) だった entry、keeper が見る前から managed だった entry、BUM の flood 先として managed にした entry には触れません。1 回の見直しで neighbour table を読むのは device と family ごとに 1 回です
 - End.AM の戻りの次の宛先はパケットの SRH にしかなく、map から知る方法がありません。End.AM の戻りの next hop は keeper の対象外で、ほかの通信で解決されている必要があります ([service_programming.md](service_programming.md))
 
 ## kernel device facet

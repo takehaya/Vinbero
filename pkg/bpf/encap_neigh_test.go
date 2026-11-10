@@ -465,8 +465,10 @@ func TestEncapNeighKeeperIncremental(t *testing.T) {
 	bumNeighClaims.Store(neighKey(2, net.ParseIP("fe80::3")), struct{}{})
 	t.Cleanup(func() { bumNeighClaims.Delete(neighKey(2, net.ParseIP("fe80::3"))) })
 	walk = []netip.Addr{netip.MustParseAddr("fc00:1::1")}
-	if _, err := k.Sweep(); err != nil {
-		t.Fatalf("Sweep: %v", err)
+	for range sweepsBeforeRelease {
+		if _, err := k.Sweep(); err != nil {
+			t.Fatalf("Sweep: %v", err)
+		}
 	}
 	if !slices.Equal(nt.dels, []string{neighKey(2, net.ParseIP("fe80::2"))}) {
 		t.Errorf("released = %v, want only the keeper's fe80::2", nt.dels)
@@ -725,4 +727,128 @@ func TestEncapNeighKeeperResubscribes(t *testing.T) {
 	base = gets()
 	second.routes <- netlink.RouteUpdate{}
 	waitFor("a re-resolution after an event on the new subscription", func() bool { return gets() > base })
+}
+
+// Pruning is conservative. A walk that failed part-way removes nothing; a
+// destination written while a walk runs counts as seen by it; a destination
+// complete walks miss is dropped only at the second miss in a row, and a
+// write in between resets the count.
+func TestEncapNeighKeeperConservativePrune(t *testing.T) {
+	a, b := netip.MustParseAddr("fc00:1::1"), netip.MustParseAddr("fc00:2::1")
+	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2), route("fc00:2::/32", "fe80::2", 2)}
+	walk := []netip.Addr{a, b}
+	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{}}
+	k, _ := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	bKey := neighKey(2, net.ParseIP("fe80::2"))
+	kept := func(what string) {
+		t.Helper()
+		if _, ok := k.dests[b]; !ok {
+			t.Fatalf("%s: fc00:2::1 was dropped", what)
+		}
+		if len(nt.dels) != 0 {
+			t.Fatalf("%s: neighbours deleted: %v", what, nt.dels)
+		}
+	}
+
+	// An aborted walk that returned only a.
+	k.walk = func() ([]netip.Addr, error) { return []netip.Addr{a}, errors.New("iteration aborted") }
+	for range 3 {
+		_, _ = k.Sweep()
+	}
+	kept("incomplete walks")
+
+	// Complete walks that miss b, but b is written during each of them.
+	k.walk = func() ([]netip.Addr, error) {
+		k.Notify([]netip.Addr{b})
+		return []netip.Addr{a}, nil
+	}
+	for range 3 {
+		if _, err := k.Sweep(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept("walks during which b was written")
+
+	// One complete miss, then a write, then one more miss: still kept.
+	k.walk = func() ([]netip.Addr, error) { return []netip.Addr{a}, nil }
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	k.Notify([]netip.Addr{b})
+	if err := k.pass(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	kept("a miss, a write, a miss")
+
+	// Two complete misses in a row: dropped and given back.
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.dests[b]; ok {
+		t.Fatal("fc00:2::1 kept after two complete misses in a row")
+	}
+	if !slices.Equal(nt.dels, []string{bKey}) {
+		t.Errorf("released = %v, want %s", nt.dels, bKey)
+	}
+}
+
+// A release whose neighbour list or delete fails stays owned and is retried
+// by a later pass until the entry is gone.
+func TestEncapNeighKeeperRetriesRelease(t *testing.T) {
+	d := netip.MustParseAddr("fc00:1::1")
+	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2)}
+	walk := []netip.Addr{d}
+	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{}}
+	k, _ := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	oldKey := neighKey(2, net.ParseIP("fe80::1"))
+	ops := nt.ops()
+	failList, failDel := true, true
+	k.neigh.list = func(ifindex, family int) ([]netlink.Neigh, error) {
+		if failList && ifindex == 2 {
+			return nil, errors.New("dump interrupted")
+		}
+		return ops.list(ifindex, family)
+	}
+	k.neigh.del = func(n netlink.Neigh) error {
+		if failDel {
+			return unix.EBUSY
+		}
+		return ops.del(n)
+	}
+	// The next hop moves to another device: fe80::1 on 2 is no longer used.
+	main = []netlink.Route{route("fc00:1::/32", "fe80::9", 3)}
+	reroute := func() {
+		t.Helper()
+		k.setFlag(true, false)
+		_ = k.pass()
+	}
+	reroute()
+	if _, ok := k.owned[oldKey]; !ok {
+		t.Fatal("ownership dropped although the neighbour list failed")
+	}
+	failList = false
+	reroute()
+	if _, ok := k.owned[oldKey]; !ok {
+		t.Fatal("ownership dropped although the delete failed")
+	}
+	if _, ok := nt.entries[oldKey]; !ok {
+		t.Fatal("the entry is gone although the delete failed")
+	}
+	failDel = false
+	reroute()
+	if _, ok := k.owned[oldKey]; ok {
+		t.Error("still owned after the delete succeeded")
+	}
+	if _, ok := nt.entries[oldKey]; ok {
+		t.Error("the entry was not removed on the retry")
+	}
 }
