@@ -445,6 +445,213 @@ type roViolation struct {
 	fatal bool
 }
 
+const roRegisterCount = 11 // R0..R10
+
+type roRegisterIdentity struct {
+	mapName string
+	seeded  bool
+}
+
+type roStepResult struct {
+	mutatesMap bool
+	mapName    string
+}
+
+// stepRORegisters applies one instruction's register transfer rules.
+func stepRORegisters(in asm.Instruction, regs *[roRegisterCount]roRegisterIdentity) roStepResult {
+	if cls := in.OpCode.Class(); cls == asm.StClass || cls == asm.StXClass {
+		isLoadAcquire := cls == asm.StXClass && in.OpCode.Mode() == asm.AtomicMode &&
+			in.OpCode.AtomicOp() == loadAcqAtomicOp
+		if isLoadAcquire {
+			dst := int(in.Dst)
+			if dst >= 0 && dst < len(regs) {
+				regs[dst] = roRegisterIdentity{}
+			}
+		}
+		return roStepResult{}
+	}
+
+	if in.OpCode.JumpOp() == asm.Call {
+		r1 := regs[1]
+		result := roStepResult{mapName: r1.mapName}
+		if in.IsBuiltinCall() {
+			fn := asm.BuiltinFunc(in.Constant)
+			result.mutatesMap = isMapMutateHelper(fn)
+			if fn == asm.FnMapLookupElem || fn == asm.FnMapLookupPercpuElem {
+				regs[0] = r1
+			} else {
+				regs[0] = roRegisterIdentity{}
+			}
+		} else {
+			regs[0] = roRegisterIdentity{}
+		}
+		for r := 1; r <= 5; r++ {
+			regs[r] = roRegisterIdentity{}
+		}
+		return result
+	}
+
+	op := in.OpCode
+	if (op.Class() == asm.ALU64Class || op.Class() == asm.ALUClass) &&
+		op.ALUOp() == asm.Mov && op.Source() == asm.RegSource {
+		src := int(in.Src)
+		dst := int(in.Dst)
+		if dst >= 0 && dst < len(regs) && src >= 0 && src < len(regs) {
+			regs[dst] = regs[src]
+			return roStepResult{}
+		}
+	}
+
+	cls := in.OpCode.Class()
+	if cls != asm.LdClass && cls != asm.LdXClass &&
+		cls != asm.ALUClass && cls != asm.ALU64Class {
+		return roStepResult{}
+	}
+	dst := int(in.Dst)
+	if dst < 0 || dst >= len(regs) {
+		return roStepResult{}
+	}
+	if in.IsLoadFromMap() {
+		regs[dst] = roRegisterIdentity{mapName: in.Reference()}
+	} else if (cls != asm.ALUClass && cls != asm.ALU64Class) ||
+		(in.OpCode.ALUOp() != asm.Add && in.OpCode.ALUOp() != asm.Sub) {
+		regs[dst] = roRegisterIdentity{}
+	}
+	return roStepResult{}
+}
+
+// jumpTargetOffsets returns branch targets in raw BPF instruction units.
+func jumpTargetOffsets(ins asm.Instructions) map[asm.RawInstructionOffset]struct{} {
+	symbols := make(map[string]asm.RawInstructionOffset)
+	iter := ins.Iterate()
+	for iter.Next() {
+		if sym := iter.Ins.Symbol(); sym != "" {
+			symbols[sym] = iter.Offset
+		}
+	}
+
+	targets := make(map[asm.RawInstructionOffset]struct{})
+	iter = ins.Iterate()
+	for iter.Next() {
+		in := iter.Ins
+		cls := in.OpCode.Class()
+		op := in.OpCode.JumpOp()
+		if !cls.IsJump() || op == asm.Call || op == asm.Exit {
+			continue
+		}
+		if target, ok := symbols[in.Reference()]; ok && in.Reference() != "" {
+			targets[target] = struct{}{}
+			continue
+		}
+		delta := int64(in.Offset)
+		if cls == asm.Jump32Class && op == asm.Ja {
+			delta = in.Constant
+		}
+		width := asm.RawInstructionOffset(in.Size() / asm.InstructionSize)
+		target := int64(iter.Offset) + int64(width) + delta
+		if target >= 0 {
+			targets[asm.RawInstructionOffset(target)] = struct{}{}
+		}
+	}
+	return targets
+}
+
+type subprogRegisterEntry struct {
+	writableMap string
+	readOnlyMap string
+}
+
+func (e subprogRegisterEntry) identity() roRegisterIdentity {
+	name := e.writableMap
+	if e.readOnlyMap != "" {
+		name = e.readOnlyMap
+	}
+	return roRegisterIdentity{mapName: name, seeded: name != ""}
+}
+
+// subprogMapEntries propagates direct call-site identities for at most the
+// kernel's eight call frames. Entry facts only grow and an RO identity wins
+// permanently, so stopping early can miss a detection but cannot add one.
+func subprogMapEntries(
+	ins asm.Instructions,
+	subprogs map[string]struct{},
+	roMaps map[string]struct{},
+) map[string][roRegisterCount]roRegisterIdentity {
+	const maxCallFrames = 8
+	targets := jumpTargetOffsets(ins)
+	facts := make(map[string][roRegisterCount]subprogRegisterEntry)
+
+	for range maxCallFrames {
+		var regs [roRegisterCount]roRegisterIdentity
+		callSites := make(map[string][][roRegisterCount]roRegisterIdentity)
+		iter := ins.Iterate()
+		for iter.Next() {
+			in := *iter.Ins
+			if iter.Index > 0 {
+				if _, ok := subprogs[in.Symbol()]; ok {
+					regs = [roRegisterCount]roRegisterIdentity{}
+					for r, entry := range facts[in.Symbol()] {
+						regs[r] = entry.identity()
+					}
+				}
+			}
+			if _, ok := targets[iter.Offset]; ok {
+				regs = [roRegisterCount]roRegisterIdentity{}
+			}
+			if in.IsLoadOfFunctionPointer() {
+				callSites[in.Reference()] = append(callSites[in.Reference()], [roRegisterCount]roRegisterIdentity{})
+			}
+			if in.IsFunctionCall() {
+				callSites[in.Reference()] = append(callSites[in.Reference()], regs)
+			}
+			stepRORegisters(in, &regs)
+		}
+
+		added := false
+		for name, sites := range callSites {
+			entry := facts[name]
+			for r := 1; r <= 5; r++ {
+				if entry[r].readOnlyMap == "" {
+					for _, site := range sites {
+						if _, ro := roMaps[site[r].mapName]; ro {
+							entry[r].readOnlyMap = site[r].mapName
+							added = true
+							break
+						}
+					}
+				}
+				if entry[r].writableMap == "" {
+					agreed := sites[0][r].mapName
+					for _, site := range sites[1:] {
+						if site[r].mapName != agreed {
+							agreed = ""
+							break
+						}
+					}
+					if agreed != "" {
+						entry[r].writableMap = agreed
+						added = true
+					}
+				}
+			}
+			facts[name] = entry
+		}
+		if !added {
+			break
+		}
+	}
+
+	entries := make(map[string][roRegisterCount]roRegisterIdentity, len(facts))
+	for name, fact := range facts {
+		var regs [roRegisterCount]roRegisterIdentity
+		for r, entry := range fact {
+			regs[r] = entry.identity()
+		}
+		entries[name] = regs
+	}
+	return entries
+}
+
 // checkROWrites scans the program -- the entry body and every subprogram --
 // for stores whose target is a vinbero shared RO map, or whose target cannot
 // be statically resolved. The check is a no-op when roMaps is empty, for
@@ -454,18 +661,18 @@ type roViolation struct {
 // destination pointer was loaded from, following LoadMapPtr, register MOVs,
 // map-lookup returns, and constant/register pointer arithmetic (p += off
 // still points into the same map's value, so laundering a write through an
-// offset does not erase the map identity). The register table is reset at
-// each subprogram boundary, where the callee's registers start fresh.
+// offset does not erase the map identity). At each subprogram boundary,
+// R1..R5 start with direct call-site map names; an RO map wins disagreements.
+// Seed-derived identities stop at branch targets, and nested calls propagate
+// for at most the kernel's eight call frames.
 //
 // A resolved write to an RO map is flagged anywhere it occurs, so an
 // integrity-map write hidden in a noinline helper is caught, not only one in
 // the entry body. An unresolved store is flagged fail-closed in the entry
 // body (it cannot be proven to miss an integrity map) but not inside a
-// subprogram, where a helper legitimately stores through a map pointer passed
-// as an argument (the epilogue's slot_stats_inc is exactly this) that the
-// intra-procedural tracker cannot resolve. The residual this leaves -- a
-// write whose map pointer is passed as a call argument and stored in the
-// callee -- needs inter-procedural argument propagation and is a known limit.
+// subprogram when its argument remains unresolved. The only added rejection
+// is an RO shared-map write through a directly passed, resolved pointer;
+// everything else accepted by this check remains accepted.
 //
 // Historically this scanned only the entry body: the epilogue body appended
 // after it stores to slot_stats_* through a map pointer passed as an argument,
@@ -477,32 +684,42 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	if len(roMaps) == 0 {
 		return nil
 	}
-	// One forward pass: track the most recent LoadMapPtr-sourced map name
-	// per destination register. Anything else that writes a register
-	// invalidates the entry. This avoids a quadratic reverse-scan per
-	// store on adversarial inputs.
-	const numRegs = 11 // R0..R10
-	var lastMap [numRegs]string
+	var regs [roRegisterCount]roRegisterIdentity
 	var violations []roViolation
 	ins := spec.Instructions
 	subprogs := knownSubprogNames(ins)
+	targets := jumpTargetOffsets(ins)
+	entries := subprogMapEntries(ins, subprogs, roMaps)
 	mainBody := true
-	for i, in := range ins {
-		// At the start of a real subprogram (one something actually calls),
-		// the callee's registers start fresh: reset the tracker rather than
-		// carrying stale identities across the boundary, and stop treating
-		// unresolved stores as fatal (a helper legitimately stores through a
-		// map-pointer argument). Do not stop the scan -- a resolved
+	iter := ins.Iterate()
+	for iter.Next() {
+		i := iter.Index
+		in := *iter.Ins
+		// At the start of a real subprogram (one something references), seed
+		// the tracker from its direct call sites, or leave it empty for a
+		// callback-only body. Stop treating unresolved stores as fatal (a
+		// helper legitimately stores through a map-pointer argument). Do not
+		// stop the scan -- a resolved
 		// integrity-map write in a helper must still be caught. A bare
 		// Symbol() with no caller is metadata noise or an injected fake and
 		// does not begin a subprogram.
 		if i > 0 {
 			if sym := in.Symbol(); sym != "" {
 				if _, ok := subprogs[sym]; ok {
-					for r := range lastMap {
-						lastMap[r] = ""
-					}
+					regs = entries[sym]
 					mainBody = false
+				}
+			}
+		}
+		// Preserve main's branch-insensitive behavior, but never carry a
+		// caller seed across a join inside a subprogram. Identities established
+		// by the subprogram itself keep the existing behavior.
+		if !mainBody {
+			if _, ok := targets[iter.Offset]; ok {
+				for r := range regs {
+					if regs[r].seeded {
+						regs[r] = roRegisterIdentity{}
+					}
 				}
 			}
 		}
@@ -513,8 +730,8 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 			if !isStackStore(in) {
 				dst := int(in.Dst)
 				var mapName string
-				if dst >= 0 && dst < numRegs {
-					mapName = lastMap[dst]
+				if dst >= 0 && dst < len(regs) {
+					mapName = regs[dst].mapName
 				}
 				if mapName == "" {
 					// Unresolved. In the entry body this is fail-closed
@@ -531,113 +748,18 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 				}
 			}
 		}
-		// Update the map-pointer table for this instruction's Dst.
-		// LoadMapPtr writes a known map name; any other write to a
-		// register invalidates whatever was there. Stores (BPF_ST*) do
-		// not modify Dst (they write *through* it), so they leave the
-		// table alone — with one exception: BPF_LOAD_ACQ is encoded as
-		// StXClass | AtomicMode but actually loads memory into Dst with
-		// acquire semantics. Skipping the table update there would let
-		// a stale map name carry past the load and either spuriously
-		// detect a "store into RO" or hide a real violation behind the
-		// stale tracking. Fall through to invalidate Dst for it.
-		if cls := in.OpCode.Class(); cls == asm.StClass || cls == asm.StXClass {
-			isLoadAcquire := cls == asm.StXClass &&
-				in.OpCode.Mode() == asm.AtomicMode &&
-				in.OpCode.AtomicOp() == loadAcqAtomicOp
-			if !isLoadAcquire {
-				continue
-			}
-			dst := int(in.Dst)
-			if dst >= 0 && dst < numRegs {
-				lastMap[dst] = ""
-			}
-			continue
-		}
-		// BPF helper / subprogram calls. The kernel ABI hands the return
-		// value back in R0 and treats R1..R5 as caller-saved. For map
-		// lookup helpers we additionally propagate the map identity from
-		// R1 (the &map argument established by a preceding LoadMapPtr)
-		// into R0 — without this every `*(u64 *)(r0 + 0) += ...` after a
-		// bpf_map_lookup_elem looks "dynamic" to the analyzer and trips
-		// a false-positive RO violation on plugins that legitimately
-		// mutate their own RW maps.
-		if in.OpCode.JumpOp() == asm.Call {
-			fn := asm.BuiltinFunc(in.Constant)
-			r1Map := lastMap[1]
-			// A map-mutating helper writes the map named by its first
-			// argument, which the ABI passes in R1. A store instruction is
-			// not the only way to write a map: bpf_map_update_elem /
-			// bpf_map_delete_elem on a hash map (sid_function_map,
-			// sid_aux_map) forge state without ever emitting a ST/STX, so
-			// they are checked here on the same footing. The map is a
-			// LoadMapPtr constant tracked in lastMap[1]; an integrity map is
-			// fatal, an unresolved argument in the entry body is fail-closed
-			// fatal (a subprogram may receive the map as an argument).
-			if isMapMutateHelper(fn) {
-				if r1Map != "" {
-					if _, ro := roMaps[r1Map]; ro {
-						_, integrity := integrityMapNames[r1Map]
-						violations = append(violations, roViolation{insIdx: i, mapName: r1Map, fatal: integrity})
-					}
-				} else if mainBody {
-					violations = append(violations, roViolation{insIdx: i, fatal: true})
+		step := stepRORegisters(in, &regs)
+		if step.mutatesMap {
+			if step.mapName != "" {
+				if _, ro := roMaps[step.mapName]; ro {
+					_, integrity := integrityMapNames[step.mapName]
+					violations = append(violations, roViolation{
+						insIdx: i, mapName: step.mapName, fatal: integrity,
+					})
 				}
+			} else if mainBody {
+				violations = append(violations, roViolation{insIdx: i, fatal: true})
 			}
-			for r := 1; r <= 5; r++ {
-				lastMap[r] = ""
-			}
-			switch fn {
-			case asm.FnMapLookupElem, asm.FnMapLookupPercpuElem:
-				lastMap[0] = r1Map
-			default:
-				lastMap[0] = ""
-			}
-			continue
-		}
-		// Register-to-register MOV propagates the map identity from src
-		// to dst. clang frequently emits `Rn = R0` between a lookup and
-		// the subsequent store; without this propagation the dst is
-		// treated as dynamic and the write is flagged spuriously.
-		op := in.OpCode
-		if (op.Class() == asm.ALU64Class || op.Class() == asm.ALUClass) &&
-			op.ALUOp() == asm.Mov && op.Source() == asm.RegSource {
-			src := int(in.Src)
-			dst := int(in.Dst)
-			if dst >= 0 && dst < numRegs && src >= 0 && src < numRegs {
-				lastMap[dst] = lastMap[src]
-				continue
-			}
-		}
-		// Only load / ALU classes actually write Dst. Jump and Jump32
-		// reference Dst as the left-hand operand of a compare; clobbering
-		// lastMap[Dst] for those would erase the just-propagated lookup
-		// result on the canonical clang `if (r0 == 0) goto ...; *(r0 +
-		// 0) += rN` pattern emitted after every bpf_map_lookup_elem and
-		// resurface the very false-positive we are trying to kill.
-		cls := in.OpCode.Class()
-		if cls != asm.LdClass && cls != asm.LdXClass &&
-			cls != asm.ALUClass && cls != asm.ALU64Class {
-			continue
-		}
-		dst := int(in.Dst)
-		if dst < 0 || dst >= numRegs {
-			continue
-		}
-		if in.IsLoadFromMap() {
-			lastMap[dst] = in.Reference()
-		} else if (cls == asm.ALUClass || cls == asm.ALU64Class) &&
-			(in.OpCode.ALUOp() == asm.Add || in.OpCode.ALUOp() == asm.Sub) {
-			// Pointer arithmetic keeps the map identity: `p += off` (or
-			// `p -= off`) still points into the same map's value, so a store
-			// through the result is a store into that map. Leaving lastMap[dst]
-			// intact is what stops a plugin from erasing the identity with an
-			// offset and slipping an integrity-map write into the unresolved
-			// (entry-body-fatal, subprogram-ignored) bucket. It only ever adds
-			// detections on the map already tracked, so a write to a
-			// plugin-owned RW map stays unflagged.
-		} else {
-			lastMap[dst] = ""
 		}
 	}
 	if len(violations) == 0 {

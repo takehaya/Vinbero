@@ -604,11 +604,13 @@ integrity map でないと証明できないため fail-closed で fatal にし�
 
 ここで plugin ELF の trust model を明示します。plugin ELF は operator が install し
 review する semi-trusted な artifact として扱い、`checkROWrites` は accidental な誤用の
-検出であって、敵対的 ELF に対する sandbox ではありません。map value pointer を stack に
-spill して reload する、あるいは call 引数として渡し callee 内で書く形は register
-provenance が切れ、subprogram 内では正当な helper (epilogue の slot_stats_inc が引数の
-map pointer を書く) との誤検知を避けるため素通ります。これを完全に塞ぐには
-inter-procedural / stack-slot の provenance 追跡が要り、既知の限界として別途扱います。
+検出であって、敵対的 ELF に対する sandbox ではありません。map pointer を register の
+call 引数として直接渡す形は callee の straight-line code 内だけを追跡し、分岐先で追跡を
+止めます。direct call site のいずれかが RO shared map の pointer を渡す場合は、その map の
+由来を優先します。一方、stack へ spill して reload した pointer、subprogram が返す pointer、
+callback の引数、helper の memory 引数を通じて渡す pointer は追跡しません。これらを完全に
+塞ぐには CFG / stack-slot / callback / helper の memory effect を含む provenance 追跡が要り、
+既知の限界として別途扱います。
 つまり scope 認可のうち、WASM の desired set 側は host が強制しますが、ELF data plane 側は
 semi-trusted 前提の best-effort です。第三者や tenant 提供の ELF を許す運用に広げる場合は、
 integrity map を plugin から参照させない host-owned な grant map など構造的な隔離が要ります。
