@@ -33,6 +33,16 @@ type BpfConfig struct {
 	// hundreds of megabytes up front. Zero leaves the starting size to
 	// cilium/ebpf.
 	VerifierLogSize uint32 `yaml:"verifier_log_size,omitempty" default:"0"`
+	// FibLookupTBID chooses how the outer header of a tenant AC's
+	// encapsulation is looked up. "auto" (the default) looks it up in the
+	// main table directly when the kernel's bpf_fib_lookup accepts
+	// BPF_FIB_LOOKUP_TBID, which the daemon checks at load. "off" uses the
+	// ingress-device lookup for every packet, as on a kernel without it,
+	// and leaves the VRF tables without the unreachable default.
+	FibLookupTBID string `yaml:"fib_lookup_tbid,omitempty" default:"auto"`
+	// FibLookupTBIDOff is the outcome the daemon sets at load (not read
+	// from the file): the tenant lookup falls back to the ingress device.
+	FibLookupTBIDOff bool `yaml:"-"`
 }
 
 // ServerConfig holds the gRPC/Connect server configuration

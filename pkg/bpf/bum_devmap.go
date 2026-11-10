@@ -62,6 +62,8 @@ type UplinkResolver func(q UplinkQuery) (BumUplink, error)
 // traffic to resolve its uplink's next hop. Static entries (permanent,
 // noarp) and managed ones are left as they are.
 func KeepNeighResolved(ifindex uint32, ip net.IP) error {
+	// The encapsulation next-hop keeper never gives back a BUM next hop.
+	bumNeighClaims.Store(neighKey(ifindex, ip), struct{}{})
 	family := netlink.FAMILY_V6
 	if ip.To4() != nil {
 		family = netlink.FAMILY_V4
@@ -800,6 +802,13 @@ type routeSub struct {
 }
 
 func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
+	return subscribeRouteEvents(s.logger, "xdp BUM")
+}
+
+// subscribeRouteEvents subscribes to route updates, nexthop-object updates
+// and IPv6 rule updates (see routeSub). The BUM devmap sync and the
+// encapsulation next-hop keeper share it; label prefixes their log lines.
+func subscribeRouteEvents(logger *zap.Logger, label string) (*routeSub, error) {
 	r := &routeSub{
 		routes:   make(chan netlink.RouteUpdate, 256),
 		nexthops: make(chan struct{}, 1),
@@ -807,7 +816,7 @@ func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
 	}
 	err := netlink.RouteSubscribeWithOptions(r.routes, r.done, netlink.RouteSubscribeOptions{
 		ErrorCallback: func(err error) {
-			s.logger.Warn("xdp BUM: route subscription failed", zap.Error(err))
+			logger.Warn(label+": route subscription failed", zap.Error(err))
 		},
 		ReceiveBufferSize: 1 << 20, // a full table load must not overflow it
 	})
@@ -825,7 +834,7 @@ func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
 		return nil, fmt.Errorf("subscribe to nexthop updates: %w", err)
 	}
 	if err := nh.SetReceiveBufferSize(1<<20, false); err != nil {
-		s.logger.Debug("xdp BUM: cannot grow the nexthop socket's buffer", zap.Error(err))
+		logger.Debug(label+": cannot grow the nexthop socket's buffer", zap.Error(err))
 	}
 	go func() {
 		<-r.done
@@ -838,7 +847,7 @@ func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
 				select {
 				case <-r.done:
 				default:
-					s.logger.Warn("xdp BUM: nexthop subscription failed", zap.Error(err))
+					logger.Warn(label+": nexthop subscription failed", zap.Error(err))
 				}
 				return
 			}
@@ -851,6 +860,29 @@ func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
 		}
 	}()
 	return r, nil
+}
+
+// resubscribeDelay is the wait before each resubscribe attempt.
+var resubscribeDelay = time.Second
+
+// resubscribeRouteEvents replaces a subscription that ended (typically
+// ENOBUFS: the kernel dropped notifications), retrying every second. It
+// returns nil when ctx ends first. Updates may have been lost, so the caller
+// treats a new subscription as "everything may have changed".
+func resubscribeRouteEvents(ctx context.Context, old *routeSub, subscribe func() (*routeSub, error), logger *zap.Logger, label string) *routeSub {
+	close(old.done)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(resubscribeDelay):
+		}
+		sub, err := subscribe()
+		if err == nil {
+			return sub
+		}
+		logger.Warn(label+": route resubscribe failed; retrying", zap.Error(err))
+	}
 }
 
 // routeSyncMaxDelay caps how long a steady stream of route updates can
@@ -942,18 +974,8 @@ func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce
 	// notifications). Updates may be lost, so subscribe again and rebuild
 	// everything. False when ctx ended first.
 	resubscribe := func() bool {
-		close(sub.done)
-		sub = nil
-		for sub == nil {
-			select {
-			case <-ctx.Done():
-				return false
-			case <-time.After(time.Second):
-			}
-			var err error
-			if sub, err = s.subscribeRoutes(); err != nil {
-				s.logger.Warn("xdp BUM: route resubscribe failed; retrying", zap.Error(err))
-			}
+		if sub = resubscribeRouteEvents(ctx, sub, s.subscribeRoutes, s.logger, "xdp BUM"); sub == nil {
+			return false
 		}
 		first = time.Time{}
 		schedule(0)

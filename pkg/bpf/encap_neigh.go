@@ -17,11 +17,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SetEncapChangeHook installs fn to run after every map write that can add an
-// encapsulation (headend, ECMP path, SR policy, MUP session, L2 headend, BD
-// peer, End.B6 SID, service-return circuit); nil removes it. The
-// EncapNeighKeeper uses it to look at a new outer destination at once.
-func (m *MapOperations) SetEncapChangeHook(fn func()) {
+// ===== Write notification =====
+
+// SetEncapChangeHook installs fn to receive the outer destinations of every
+// map write that can add an encapsulation (headend, MUP session, ECMP path,
+// SR policy, L2 headend, BD peer, End.B6 SID, service-return circuit); nil
+// removes it. fn must not block. The EncapNeighKeeper uses it to resolve a
+// new destination at once. TestEncapMapWritersNotify fails when a writer of
+// one of those maps does not call encapWrote.
+func (m *MapOperations) SetEncapChangeHook(fn func(dsts []netip.Addr)) {
 	if fn == nil {
 		m.encapHook.Store(nil)
 		return
@@ -29,35 +33,97 @@ func (m *MapOperations) SetEncapChangeHook(fn func()) {
 	m.encapHook.Store(&fn)
 }
 
-func (m *MapOperations) encapChanged() {
+// encapWrote hands the destinations of a write to the hook. A failed write
+// may notify too: a destination the maps do not hold is dropped by the
+// keeper's next resweep.
+func (m *MapOperations) encapWrote(dsts ...netip.Addr) {
+	if len(dsts) == 0 {
+		return
+	}
 	if fn := m.encapHook.Load(); fn != nil {
-		(*fn)()
+		(*fn)(dsts)
 	}
 }
 
+// segmentDst is the outer destination a segment becomes, or false for one
+// that is never routed (unset, an IPv4-mapped placeholder, multicast).
+func segmentDst(seg [IPv6AddrLen]byte) (netip.Addr, bool) {
+	a := netip.AddrFrom16(seg)
+	if a.IsUnspecified() || a.Is4In6() || a.IsMulticast() {
+		return netip.Addr{}, false
+	}
+	return a, true
+}
+
+// headendDst is the outer destination of a headend entry: its first segment.
+// A MUP gate (no segments of its own) has none. A policy-steered entry's
+// transport SID is the SR policy's own write.
+func headendDst(e *HeadendEntry) []netip.Addr {
+	if e == nil || e.NumSegments == 0 || e.NumSegments > MaxSegments {
+		return nil
+	}
+	if a, ok := segmentDst(e.Segments[0]); ok {
+		return []netip.Addr{a}
+	}
+	return nil
+}
+
+func firstAddr(addrs []netip.Addr) []netip.Addr {
+	if len(addrs) == 0 || !addrs[0].Is6() {
+		return nil
+	}
+	return addrs[:1]
+}
+
+func ecmpPathDsts(paths []EcmpPath) []netip.Addr {
+	var out []netip.Addr
+	for _, p := range paths {
+		out = append(out, headendDst(p.Entry)...)
+	}
+	return out
+}
+
+func serviceIngressDst(e *ServiceIngressEntry) []netip.Addr {
+	if e == nil {
+		return nil
+	}
+	return headendDst(&e.Encap)
+}
+
+func isB6Action(action uint8) bool {
+	switch vinberov1.Srv6LocalAction(action) {
+	case vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6,
+		vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS:
+		return true
+	}
+	return false
+}
+
+// sidPolicyDst is the outer destination of an End.B6 / End.B6.Encaps
+// policy; other behaviours encapsulate nothing.
+func sidPolicyDst(entry *SidFunctionEntry, aux *SidAuxEntry) []netip.Addr {
+	if entry == nil || aux == nil || !isB6Action(entry.Action) {
+		return nil
+	}
+	return headendDst(SidAuxB6PolicyData(aux))
+}
+
+// ===== Full walk =====
+
 // EncapDestinations returns every outer IPv6 destination an encapsulation
 // can be sent to: the first segment of each headend entry (IPv4 and IPv6
-// headends, the MUP gate's per-session entries, the ECMP paths, the L2
-// headend circuits and the BD peers), the first transport SID of each SR
-// policy, the first segment of each End.B6 / End.B6.Encaps policy, the
-// encapsulation of each service-return circuit, and the destination of each
-// End.AD cached header. They are read from the maps, so every writer is
-// covered (operator RPC, BGP, plugins, a pinned map restored after a
-// restart). The result is sorted and has no duplicates.
+// headends, the MUP sessions, the ECMP paths, the L2 headend circuits and the
+// BD peers), the first transport SID of each SR policy, the first segment of
+// each End.B6 / End.B6.Encaps policy, the encapsulation of each service-return
+// circuit, and the destination of each End.AD cached header. End.AM's next
+// destination is not here: it comes from each packet's SRH and is in no map.
+// The result is sorted and has no duplicates.
 func (m *MapOperations) EncapDestinations() ([]netip.Addr, error) {
 	set := map[netip.Addr]struct{}{}
-	addSeg := func(seg [IPv6AddrLen]byte) {
-		a := netip.AddrFrom16(seg)
-		if a.IsUnspecified() || a.Is4In6() || a.IsMulticast() {
-			return
+	add := func(dsts []netip.Addr) {
+		for _, d := range dsts {
+			set[d] = struct{}{}
 		}
-		set[a] = struct{}{}
-	}
-	addEntry := func(e *HeadendEntry) {
-		if e.NumSegments == 0 || e.NumSegments > MaxSegments {
-			return // a MUP gate or an empty slot: no segment of its own
-		}
-		addSeg(e.Segments[0])
 	}
 	var errs []error
 	for _, mp := range []*ebpf.Map{
@@ -65,20 +131,22 @@ func (m *MapOperations) EncapDestinations() ([]netip.Addr, error) {
 		m.objs.EcmpPathMap, m.objs.HeadendL2Map, m.objs.BdPeerMap,
 	} {
 		var e HeadendEntry
-		if err := iterateValues(mp, &e, func() { addEntry(&e) }); err != nil {
+		if err := iterateValues(mp, &e, func() { add(headendDst(&e)) }); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	var pol BpfSrPolicyValue
 	if err := iterateValues(m.objs.SrPolicyMap, &pol, func() {
 		if pol.Len > 0 {
-			addSeg(pol.Segs[0])
+			if a, ok := segmentDst(pol.Segs[0]); ok {
+				set[a] = struct{}{}
+			}
 		}
 	}); err != nil {
 		errs = append(errs, err)
 	}
 	var svc ServiceIngressEntry
-	if err := iterateValues(m.objs.ServiceIngressMap, &svc, func() { addEntry(&svc.Encap) }); err != nil {
+	if err := iterateValues(m.objs.ServiceIngressMap, &svc, func() { add(serviceIngressDst(&svc)) }); err != nil {
 		errs = append(errs, err)
 	}
 	var ad AdCacheVal
@@ -87,31 +155,29 @@ func (m *MapOperations) EncapDestinations() ([]netip.Addr, error) {
 		if ad.Valid != 0 && ad.HdrLen >= 40 {
 			var da [IPv6AddrLen]byte
 			copy(da[:], ad.Hdr[24:40])
-			addSeg(da)
+			if a, ok := segmentDst(da); ok {
+				set[a] = struct{}{}
+			}
 		}
 	}); err != nil {
 		errs = append(errs, err)
 	}
-	sids, err := m.ListSidFunctions()
-	if err != nil {
+	var sid SidFunctionEntry
+	var b6 []uint16
+	if err := iterateValues(m.objs.SidFunctionMap, &sid, func() {
+		if isB6Action(sid.Action) && sid.AuxIndex != 0 {
+			b6 = append(b6, sid.AuxIndex)
+		}
+	}); err != nil {
 		errs = append(errs, err)
 	}
-	for _, sid := range sids {
-		switch vinberov1.Srv6LocalAction(sid.Action) {
-		case vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6,
-			vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS:
-		default:
+	for _, idx := range b6 {
+		var aux SidAuxEntry
+		if err := m.objs.SidAuxMap.Lookup(uint32(idx), &aux); err != nil {
+			errs = append(errs, fmt.Errorf("lookup sid_aux_map[%d]: %w", idx, err))
 			continue
 		}
-		if sid.AuxIndex == 0 {
-			continue
-		}
-		aux, err := m.GetSidAux(uint32(sid.AuxIndex))
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		addEntry(SidAuxB6PolicyData(aux))
+		add(headendDst(SidAuxB6PolicyData(&aux)))
 	}
 	out := make([]netip.Addr, 0, len(set))
 	for a := range set {
@@ -138,6 +204,8 @@ func iterateValues[V any](mp *ebpf.Map, val *V, each func()) error {
 	return nil
 }
 
+// ===== Resolution =====
+
 // NeighTarget is one underlay next hop: the device and the address whose
 // neighbour entry an encapsulation needs.
 type NeighTarget struct {
@@ -145,209 +213,580 @@ type NeighTarget struct {
 	IP      net.IP
 }
 
-func (t NeighTarget) key() string { return fmt.Sprintf("%d/%s", t.Ifindex, t.IP) }
+func (t NeighTarget) key() string { return neighKey(t.Ifindex, t.IP) }
 
-// MainTableNexthops resolves dst the way the outer header of an
-// encapsulation is routed: the route the host's lookup selects (the main
-// table, through the rules a host-originated packet meets), with every
-// member of a multipath route. A gatewayed route gives the gateway, an
-// on-link one the destination itself. A destination with no unicast route
-// gives none.
-func MainTableNexthops(dst net.IP) ([]NeighTarget, error) {
-	routes, err := netlink.RouteGetWithOptions(dst, &netlink.RouteGetOptions{FIBMatch: true})
-	if err != nil {
-		if errors.Is(err, unix.ENETUNREACH) || errors.Is(err, unix.EHOSTUNREACH) || errors.Is(err, unix.ESRCH) {
-			return nil, nil
+func neighKey(ifindex uint32, ip net.IP) string { return fmt.Sprintf("%d/%s", ifindex, ip) }
+
+const mainTableID = 254 // RT_TABLE_MAIN
+
+// mainTable is an LPM index over the main table's IPv6 routes, built from
+// one dump per pass.
+type mainTable struct {
+	byLen map[int]map[netip.Prefix]netlink.Route // the lowest-metric route per prefix
+}
+
+func newMainTable(routes []netlink.Route) *mainTable {
+	t := &mainTable{byLen: map[int]map[netip.Prefix]netlink.Route{}}
+	for _, r := range routes {
+		var p netip.Prefix
+		if r.Dst == nil {
+			p = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
+		} else {
+			a, ok := netip.AddrFromSlice(r.Dst.IP)
+			if !ok {
+				continue
+			}
+			ones, _ := r.Dst.Mask.Size()
+			p = netip.PrefixFrom(a.Unmap(), ones).Masked()
 		}
-		return nil, err
+		if !p.Addr().Is6() {
+			continue
+		}
+		bucket := t.byLen[p.Bits()]
+		if bucket == nil {
+			bucket = map[netip.Prefix]netlink.Route{}
+			t.byLen[p.Bits()] = bucket
+		}
+		if cur, ok := bucket[p]; !ok || r.Priority < cur.Priority {
+			bucket[p] = r
+		}
 	}
-	var out []NeighTarget
+	return t
+}
+
+// lookup returns the main-table route the direct (BPF_FIB_LOOKUP_TBID)
+// lookup selects for dst: the longest prefix, the lowest metric.
+func (t *mainTable) lookup(dst netip.Addr) (netlink.Route, bool) {
+	for bits := 128; bits >= 0; bits-- {
+		bucket := t.byLen[bits]
+		if bucket == nil {
+			continue
+		}
+		p, _ := dst.Prefix(bits)
+		if r, ok := bucket[p]; ok {
+			return r, true
+		}
+	}
+	return netlink.Route{}, false
+}
+
+// routeTargets are the next hops of a route: every member of a multipath
+// route, the gateway of a gatewayed one, dst itself for an on-link one. A
+// blackhole, prohibit or unreachable route has none, and that is not an
+// error. nhObject reports a unicast route whose next hops the netlink
+// library cannot read (a nexthop object, RTA_NH_ID, with
+// net.ipv4.nexthop_compat_mode=0).
+func routeTargets(r netlink.Route, dst net.IP) (targets []NeighTarget, nhObject bool) {
+	if r.Type != unix.RTN_UNICAST {
+		return nil, false
+	}
 	add := func(ifindex int, gw net.IP) {
 		if ifindex <= 1 {
-			return // no device, or the loopback (a local or a reject route)
+			return
 		}
 		ip := gw
 		if ip == nil {
 			ip = dst
 		}
-		out = append(out, NeighTarget{Ifindex: uint32(ifindex), IP: ip})
+		targets = append(targets, NeighTarget{Ifindex: uint32(ifindex), IP: ip})
 	}
-	for _, r := range routes {
-		if r.Type != unix.RTN_UNICAST {
-			continue
+	if len(r.MultiPath) > 0 {
+		for _, nh := range r.MultiPath {
+			add(nh.LinkIndex, nh.Gw)
 		}
-		if len(r.MultiPath) > 0 {
-			for _, nh := range r.MultiPath {
-				add(nh.LinkIndex, nh.Gw)
-			}
-			continue
-		}
-		add(r.LinkIndex, r.Gw)
+		return targets, false
 	}
-	return out, nil
+	if r.LinkIndex == 0 && r.Gw == nil {
+		return nil, true
+	}
+	add(r.LinkIndex, r.Gw)
+	return targets, false
 }
+
+// isRejectRouteErr reports the errors a route lookup returns for a
+// destination with no route or a reject route (blackhole EINVAL, prohibit
+// EACCES, unreachable EHOSTUNREACH / ENETUNREACH): none is a failure.
+func isRejectRouteErr(err error) bool {
+	for _, e := range []error{unix.EINVAL, unix.EACCES, unix.EHOSTUNREACH, unix.ENETUNREACH, unix.ESRCH} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolver resolves destinations the two ways the data plane looks the outer
+// header up: a tenant AC's encapsulation in the main table directly (the
+// mainTable index, from one dump per pass), the global VRF's through the ip
+// rules (a rule-based route lookup, as a host-originated packet meets them).
+// Both results' next hops are kept.
+type resolver struct {
+	dumpMain func() ([]netlink.Route, error)
+	ruleGet  func(dst net.IP) ([]netlink.Route, error)
+}
+
+func defaultResolver() resolver {
+	return resolver{
+		dumpMain: func() ([]netlink.Route, error) {
+			return netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: mainTableID}, netlink.RT_FILTER_TABLE)
+		},
+		ruleGet: func(dst net.IP) ([]netlink.Route, error) {
+			return netlink.RouteGetWithOptions(dst, &netlink.RouteGetOptions{FIBMatch: true})
+		},
+	}
+}
+
+// resolve returns the next hops of each destination. nhObject reports a
+// route whose next hops could not be read (see routeTargets).
+func (r resolver) resolve(dsts []netip.Addr) (map[netip.Addr][]NeighTarget, bool, error) {
+	out := make(map[netip.Addr][]NeighTarget, len(dsts))
+	if len(dsts) == 0 {
+		return out, false, nil
+	}
+	routes, err := r.dumpMain()
+	if err != nil {
+		return nil, false, fmt.Errorf("dump the main table: %w", err)
+	}
+	main := newMainTable(routes)
+	nhObject := false
+	var errs []error
+	for _, d := range dsts {
+		ip := net.IP(d.AsSlice())
+		seen := map[string]struct{}{}
+		var targets []NeighTarget
+		addAll := func(ts []NeighTarget, nh bool) {
+			nhObject = nhObject || nh
+			for _, t := range ts {
+				if _, dup := seen[t.key()]; !dup {
+					seen[t.key()] = struct{}{}
+					targets = append(targets, t)
+				}
+			}
+		}
+		if rt, ok := main.lookup(d); ok {
+			addAll(routeTargets(rt, ip))
+		}
+		rs, err := r.ruleGet(ip)
+		switch {
+		case err == nil:
+			for _, rt := range rs {
+				addAll(routeTargets(rt, ip))
+			}
+		case isRejectRouteErr(err):
+		default:
+			errs = append(errs, fmt.Errorf("route lookup for %s: %w", d, err))
+		}
+		out[d] = targets
+	}
+	return out, nhObject, errors.Join(errs...)
+}
+
+// ===== Neighbour entries =====
+
+// neighOps is the neighbour-table surface of the keeper; tests replace it.
+type neighOps struct {
+	list       func(ifindex, family int) ([]netlink.Neigh, error)
+	setManaged func(ifindex uint32, ip net.IP) error
+	del        func(n netlink.Neigh) error
+}
+
+func kernelNeighOps() neighOps {
+	return neighOps{
+		list: netlink.NeighList,
+		setManaged: func(ifindex uint32, ip net.IP) error {
+			return netlink.NeighSet(&netlink.Neigh{
+				LinkIndex: int(ifindex), Family: ipFamily(ip), IP: ip,
+				State: netlink.NUD_NONE, Flags: netlink.NTF_EXT_LEARNED, FlagsExt: netlink.NTF_EXT_MANAGED,
+			})
+		},
+		del: func(n netlink.Neigh) error {
+			// Only the key: the kernel deletes the entry whatever flags it
+			// carries.
+			return netlink.NeighDel(&netlink.Neigh{LinkIndex: n.LinkIndex, Family: ipFamily(n.IP), IP: n.IP})
+		},
+	}
+}
+
+func ipFamily(ip net.IP) int {
+	if ip.To4() != nil {
+		return netlink.FAMILY_V4
+	}
+	return netlink.FAMILY_V6
+}
+
+// bumNeighClaims holds the next hops KeepNeighResolved made managed for the
+// BUM flood slots. The keeper never gives those back.
+var bumNeighClaims sync.Map
+
+func neighStatic(n netlink.Neigh) bool {
+	return n.State&(netlink.NUD_PERMANENT|netlink.NUD_NOARP) != 0
+}
+
+func neighManaged(n netlink.Neigh) bool { return n.FlagsExt&netlink.NTF_EXT_MANAGED != 0 }
+
+// ===== Keeper =====
 
 // EncapNeighKeeper keeps the underlay next hop of every encapsulation
 // resolved, so no encapsulation depends on other traffic to resolve it.
 //
 // An encapsulation whose next hop has no neighbour entry is handed to the
 // kernel (XDP_PASS) to resolve it. From a port enslaved to a VRF device the
-// kernel looks that packet up in the VRF table, where the unreachable
-// default drops it, so the neighbour would never be solicited; the L2 and
+// kernel looks that packet up in the VRF table, where the unreachable default
+// drops it, so the neighbour would never be solicited; the L2 and
 // service-return paths drop such a packet outright. The keeper makes each
-// next hop a managed neighbour (KeepNeighResolved): the kernel resolves it
-// and keeps it resolved whether or not traffic uses it.
+// next hop a managed neighbour (NTF_EXT_MANAGED with extern_learn): the
+// kernel resolves it and keeps it resolved whether or not traffic uses it.
 //
-// The destinations come from the maps (MapOperations.EncapDestinations) and
-// are resolved with the route lookup (MainTableNexthops). A sync runs at
-// start, after a write that can add an encapsulation (the map hook), after a
-// route change, after a kept neighbour entry is deleted, and every resweep as
-// a backstop (it also covers changes that send no route event, such as a
-// nexthop object or an ip rule). A managed entry is left in place when its
-// next hop is no longer used.
+// The keeper holds the set of destinations and their next hops:
+//
+//   - a map write hands it the destinations it wrote (SetEncapChangeHook),
+//     and only a destination not yet in the set is resolved;
+//   - a route, nexthop-object or ip-rule change re-resolves the set;
+//   - a deleted neighbour entry the keeper holds is made managed again;
+//   - at start and every resweep, a full walk of the maps (EncapDestinations)
+//     replaces the set: it picks up writers that do not notify (a plugin
+//     writing a map directly, the data plane's End.AD cache) and drops
+//     destinations no entry uses any more.
+//
+// A next hop no destination uses any more is given back: the managed entry
+// the keeper made is deleted. Entries that were static (permanent, noarp),
+// already managed when the keeper first saw them, or kept for the BUM flood
+// slots are left alone. Each pass reads the neighbour table once per
+// device and family.
 type EncapNeighKeeper struct {
-	dests   func() ([]netip.Addr, error)
-	resolve func(net.IP) ([]NeighTarget, error)
-	keep    func(ifindex uint32, ip net.IP) error
+	walk    func() ([]netip.Addr, error)
+	res     resolver
+	neigh   neighOps
 	logger  *zap.Logger
-	kick    chan struct{}
+	resweep time.Duration
 
-	mu     sync.Mutex
-	kept   map[string]NeighTarget
-	failed map[string]string // what was logged, so each failure is logged once
+	wake chan struct{}
+	// subRoutes subscribes to route, nexthop-object and ip-rule changes
+	// (shared with the BUM devmap sync); tests replace it.
+	subRoutes func() (*routeSub, error)
+
+	// pmu guards what the events ask for; Notify takes only it, so a map
+	// writer never waits for a pass.
+	pmu     sync.Mutex
+	pending map[netip.Addr]struct{} // written, not yet resolved
+	reroute bool                    // routes changed: re-resolve the set
+	rekeep  bool                    // a kept entry was deleted
+
+	// mu guards the set and the owned entries, and is held by a pass.
+	mu sync.Mutex
+	// dests is the destination set with each one's next hops.
+	dests map[netip.Addr][]NeighTarget
+	// owned are the next hops whose managed entry this keeper made.
+	owned map[string]NeighTarget
+	// warned holds what was logged, so a lasting condition logs once.
+	warned map[string]string
 }
 
-// encapNeighResweep is the backstop interval: writes the hook does not see
-// (a plugin writing a map directly) are picked up within it.
+// encapNeighResweep is the interval of the full walk.
 const encapNeighResweep = 30 * time.Second
 
-// encapNeighDebounce coalesces a burst of route or map changes into one sync.
+// encapNeighDebounce coalesces a burst of writes or route changes into one
+// pass.
 const encapNeighDebounce = 200 * time.Millisecond
 
-// NewEncapNeighKeeper builds a keeper over mapOps. Nil resolve and keep use
-// MainTableNexthops and KeepNeighResolved.
-func NewEncapNeighKeeper(mapOps *MapOperations, resolve func(net.IP) ([]NeighTarget, error), keep func(uint32, net.IP) error, logger *zap.Logger) *EncapNeighKeeper {
-	if resolve == nil {
-		resolve = MainTableNexthops
-	}
-	if keep == nil {
-		keep = KeepNeighResolved
-	}
+// NewEncapNeighKeeper builds a keeper over mapOps.
+func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighKeeper {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &EncapNeighKeeper{
-		dests:   mapOps.EncapDestinations,
-		resolve: resolve,
-		keep:    keep,
+	k := &EncapNeighKeeper{
+		walk:    mapOps.EncapDestinations,
+		res:     defaultResolver(),
+		neigh:   kernelNeighOps(),
 		logger:  logger.Named("encap.neigh"),
-		kick:    make(chan struct{}, 1),
-		kept:    map[string]NeighTarget{},
-		failed:  map[string]string{},
+		resweep: encapNeighResweep,
+		wake:    make(chan struct{}, 1),
+		pending: map[netip.Addr]struct{}{},
+		dests:   map[netip.Addr][]NeighTarget{},
+		owned:   map[string]NeighTarget{},
+		warned:  map[string]string{},
 	}
+	k.subRoutes = func() (*routeSub, error) { return subscribeRouteEvents(k.logger, "encap next hops") }
+	return k
 }
 
-// Kick asks for a sync soon. It never blocks.
-func (k *EncapNeighKeeper) Kick() {
+// Notify queues written destinations. It never blocks.
+func (k *EncapNeighKeeper) Notify(dsts []netip.Addr) {
+	k.pmu.Lock()
+	for _, d := range dsts {
+		k.pending[d] = struct{}{}
+	}
+	k.pmu.Unlock()
+	k.poke()
+}
+
+// takeEvents returns and clears what the events since the last pass asked
+// for.
+func (k *EncapNeighKeeper) takeEvents() (pending map[netip.Addr]struct{}, reroute, rekeep bool) {
+	k.pmu.Lock()
+	defer k.pmu.Unlock()
+	pending, reroute, rekeep = k.pending, k.reroute, k.rekeep
+	k.pending = map[netip.Addr]struct{}{}
+	k.reroute, k.rekeep = false, false
+	return pending, reroute, rekeep
+}
+
+func (k *EncapNeighKeeper) setFlag(reroute, rekeep bool) {
+	k.pmu.Lock()
+	k.reroute = k.reroute || reroute
+	k.rekeep = k.rekeep || rekeep
+	k.pmu.Unlock()
+}
+
+func (k *EncapNeighKeeper) poke() {
 	select {
-	case k.kick <- struct{}{}:
+	case k.wake <- struct{}{}:
 	default:
 	}
 }
 
-// Sync resolves every encapsulation destination and makes each next hop a
-// managed neighbour. It returns the next hops it covers.
-func (k *EncapNeighKeeper) Sync() ([]NeighTarget, error) {
-	dests, derr := k.dests()
+func (k *EncapNeighKeeper) warnOnce(key, msg string, err error, fields ...zap.Field) {
+	text := ""
+	if err != nil {
+		text = err.Error()
+	}
+	if v, ok := k.warned[key]; ok && v == text {
+		return
+	}
+	k.warned[key] = text
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+	}
+	k.logger.Warn(msg, fields...)
+}
+
+// Sweep walks the maps, replaces the destination set with what they hold,
+// resolves all of it and brings the neighbour entries in line. It returns
+// the next hops kept.
+func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
+	// Events from before the walk are covered by it.
+	_, _, _ = k.takeEvents()
+	dsts, werr := k.walk()
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	seen := map[string]NeighTarget{}
-	var errs []error
-	if derr != nil {
-		errs = append(errs, derr)
+	if werr != nil && len(dsts) == 0 {
+		// A walk that read nothing must not release every next hop.
+		return k.targetsLocked(), werr
 	}
-	for _, d := range dests {
-		ip := net.IP(d.AsSlice())
-		targets, err := k.resolve(ip)
+	err := k.resolveLocked(dsts, true)
+	return k.targetsLocked(), errors.Join(werr, err)
+}
+
+// pass runs what the events since the last pass asked for.
+func (k *EncapNeighKeeper) pass() error {
+	pending, reroute, rekeep := k.takeEvents()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	var dsts []netip.Addr
+	if reroute {
+		for d := range k.dests {
+			dsts = append(dsts, d)
+		}
+	}
+	for d := range pending {
+		if _, known := k.dests[d]; !known {
+			dsts = append(dsts, d)
+		}
+	}
+	if len(dsts) == 0 && !rekeep {
+		return nil
+	}
+	if len(dsts) == 0 {
+		return k.applyLocked()
+	}
+	return k.resolveLocked(dsts, false)
+}
+
+// resolveLocked resolves dsts and merges them into the set: replace makes
+// dsts the whole set (a destination not in it is dropped), otherwise they
+// are added. Then the neighbour entries are brought in line.
+func (k *EncapNeighKeeper) resolveLocked(dsts []netip.Addr, replace bool) error {
+	resolved, nhObject, rerr := k.res.resolve(dsts)
+	if resolved == nil {
+		k.warnOnce("resolve", "cannot resolve the next hops of encapsulation destinations", rerr)
+		return rerr
+	}
+	if rerr != nil {
+		k.warnOnce("resolve", "cannot resolve the next hop of some encapsulation destinations", rerr)
+	} else {
+		delete(k.warned, "resolve")
+	}
+	if nhObject {
+		k.warnOnce("nhobject", "an encapsulation destination is routed through a nexthop object whose next hops "+
+			"vinberod cannot read; set net.ipv4.nexthop_compat_mode=1 (it covers IPv6 too) so its neighbour is kept resolved", nil)
+	}
+	if replace {
+		k.dests = resolved
+	} else {
+		for d, ts := range resolved {
+			k.dests[d] = ts
+		}
+	}
+	return errors.Join(rerr, k.applyLocked())
+}
+
+// applyLocked makes every next hop of the set managed and gives back the
+// owned ones no destination uses, reading each device's neighbours once.
+func (k *EncapNeighKeeper) applyLocked() error {
+	wanted := map[string]NeighTarget{}
+	for _, ts := range k.dests {
+		for _, t := range ts {
+			wanted[t.key()] = t
+		}
+	}
+	type group struct{ ifindex, family int }
+	byDev := map[group][]NeighTarget{}
+	for _, t := range wanted {
+		g := group{int(t.Ifindex), ipFamily(t.IP)}
+		byDev[g] = append(byDev[g], t)
+	}
+	var release []NeighTarget
+	for key, t := range k.owned {
+		if _, ok := wanted[key]; !ok {
+			release = append(release, t)
+			g := group{int(t.Ifindex), ipFamily(t.IP)}
+			if _, ok := byDev[g]; !ok {
+				byDev[g] = nil
+			}
+		}
+	}
+	dumps := map[group]map[string]netlink.Neigh{}
+	var errs []error
+	for g := range byDev {
+		neighs, err := k.neigh.list(g.ifindex, g.family)
 		if err != nil {
-			k.logOnce("resolve "+d.String(), "cannot resolve the next hop of an encapsulation destination", err, zap.Stringer("dst", d))
+			errs = append(errs, fmt.Errorf("list the neighbours of %d: %w", g.ifindex, err))
+			continue
+		}
+		m := make(map[string]netlink.Neigh, len(neighs))
+		for _, n := range neighs {
+			m[n.IP.String()] = n
+		}
+		dumps[g] = m
+	}
+	for g, ts := range byDev {
+		dump, ok := dumps[g]
+		if !ok {
+			continue
+		}
+		for _, t := range ts {
+			key := t.key()
+			if n, exists := dump[t.IP.String()]; exists && (neighStatic(n) || neighManaged(n)) {
+				continue // static, or already managed (by this keeper or someone else)
+			}
+			if err := k.neigh.setManaged(t.Ifindex, t.IP); err != nil {
+				k.warnOnce("keep "+key, "cannot keep an encapsulation next hop resolved", err,
+					zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
+				errs = append(errs, err)
+				continue
+			}
+			delete(k.warned, "keep "+key)
+			if _, mine := k.owned[key]; !mine {
+				k.logger.Info("keeping an encapsulation next hop resolved",
+					zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
+			}
+			k.owned[key] = t
+		}
+	}
+	for _, t := range release {
+		key := t.key()
+		delete(k.owned, key)
+		if _, bum := bumNeighClaims.Load(key); bum {
+			continue
+		}
+		dump, ok := dumps[group{int(t.Ifindex), ipFamily(t.IP)}]
+		if !ok {
+			continue
+		}
+		n, exists := dump[t.IP.String()]
+		if !exists || neighStatic(n) || !neighManaged(n) {
+			continue // gone, or someone changed it since
+		}
+		if err := k.neigh.del(n); err != nil && !errors.Is(err, unix.ENOENT) {
+			k.warnOnce("release "+key, "cannot give back an encapsulation next hop", err,
+				zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
 			errs = append(errs, err)
 			continue
 		}
-		for _, t := range targets {
+		k.logger.Info("encapsulation next hop no longer used; managed neighbour removed",
+			zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
+	}
+	return errors.Join(errs...)
+}
+
+func (k *EncapNeighKeeper) targetsLocked() []NeighTarget {
+	seen := map[string]NeighTarget{}
+	for _, ts := range k.dests {
+		for _, t := range ts {
 			seen[t.key()] = t
 		}
 	}
-	for key, t := range seen {
-		if err := k.keep(t.Ifindex, t.IP); err != nil {
-			k.logOnce("keep "+key, "cannot keep an encapsulation next hop resolved", err,
-				zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
-			errs = append(errs, err)
-			continue
-		}
-		delete(k.failed, "keep "+key)
-		if _, ok := k.kept[key]; !ok {
-			k.logger.Info("keeping an encapsulation next hop resolved",
-				zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
-		}
-	}
-	k.kept = seen
 	out := make([]NeighTarget, 0, len(seen))
 	for _, t := range seen {
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
-	return out, errors.Join(errs...)
+	return out
 }
 
-func (k *EncapNeighKeeper) logOnce(key, msg string, err error, fields ...zap.Field) {
-	if k.failed[key] == err.Error() {
-		return
-	}
-	k.failed[key] = err.Error()
-	k.logger.Warn(msg, append(fields, zap.Error(err))...)
-}
-
-// isKept reports whether a neighbour on ifindex for ip is one the keeper
-// covers.
-func (k *EncapNeighKeeper) isKept(ifindex int, ip net.IP) bool {
+func (k *EncapNeighKeeper) isOwned(ifindex int, ip net.IP) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	_, ok := k.kept[NeighTarget{Ifindex: uint32(ifindex), IP: ip}.key()]
+	_, ok := k.owned[neighKey(uint32(ifindex), ip)]
 	return ok
 }
 
-// Run syncs once and then keeps syncing until ctx ends (see the type). It
-// returns after the first sync; the watch runs in the background.
+// Run sweeps once and then follows writes, route changes, deleted entries
+// and the resweep until ctx ends. It returns after the first sweep; the
+// watch runs in the background.
 func (k *EncapNeighKeeper) Run(ctx context.Context) error {
-	if _, err := k.Sync(); err != nil {
-		k.logger.Warn("initial encapsulation next-hop sync incomplete", zap.Error(err))
+	if _, err := k.Sweep(); err != nil {
+		k.logger.Warn("initial encapsulation next-hop sweep incomplete", zap.Error(err))
 	}
-	routes := make(chan netlink.RouteUpdate, 256)
-	neighs := make(chan netlink.NeighUpdate, 256)
-	done := make(chan struct{})
-	opts := func(what string) func(error) {
-		return func(err error) { k.logger.Warn(what+" subscription failed", zap.Error(err)) }
-	}
-	if err := netlink.RouteSubscribeWithOptions(routes, done, netlink.RouteSubscribeOptions{
-		ErrorCallback: opts("route"), ReceiveBufferSize: 1 << 20,
-	}); err != nil {
-		close(done)
+	routes, err := k.subRoutes()
+	if err != nil {
 		return fmt.Errorf("subscribe to route updates: %w", err)
 	}
-	if err := netlink.NeighSubscribeWithOptions(neighs, done, netlink.NeighSubscribeOptions{
-		ErrorCallback: opts("neighbour"),
-	}); err != nil {
-		close(done)
-		return fmt.Errorf("subscribe to neighbour updates: %w", err)
+	neighs, err := k.subscribeNeighs()
+	if err != nil {
+		close(routes.done)
+		return err
 	}
-	go k.watch(ctx, routes, neighs, done)
+	go k.watch(ctx, routes, neighs)
 	return nil
 }
 
-func (k *EncapNeighKeeper) watch(ctx context.Context, routes chan netlink.RouteUpdate, neighs chan netlink.NeighUpdate, done chan struct{}) {
-	defer close(done)
-	resweep := time.NewTicker(encapNeighResweep)
+type neighSub struct {
+	updates chan netlink.NeighUpdate
+	done    chan struct{}
+}
+
+func (k *EncapNeighKeeper) subscribeNeighs() (*neighSub, error) {
+	s := &neighSub{updates: make(chan netlink.NeighUpdate, 256), done: make(chan struct{})}
+	if err := netlink.NeighSubscribeWithOptions(s.updates, s.done, netlink.NeighSubscribeOptions{
+		ErrorCallback: func(err error) { k.logger.Warn("neighbour subscription failed", zap.Error(err)) },
+	}); err != nil {
+		close(s.done)
+		return nil, fmt.Errorf("subscribe to neighbour updates: %w", err)
+	}
+	return s, nil
+}
+
+func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *neighSub) {
+	defer func() {
+		if routes != nil {
+			close(routes.done)
+		}
+		if neighs != nil {
+			close(neighs.done)
+		}
+	}()
+	resweep := time.NewTicker(k.resweep)
 	defer resweep.Stop()
 	timer := time.NewTimer(encapNeighDebounce)
 	timer.Stop()
@@ -358,33 +797,62 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes chan netlink.RouteU
 			fire = timer.C
 		}
 	}
+	reroute := func() {
+		k.setFlag(true, false)
+		pending()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case _, ok := <-routes:
+		case _, ok := <-routes.routes:
 			if !ok {
-				routes = nil // the resweep still covers route changes
-				continue
+				if routes = resubscribeRouteEvents(ctx, routes, k.subRoutes, k.logger, "encap next hops"); routes == nil {
+					return
+				}
 			}
-			pending()
-		case u, ok := <-neighs:
+			reroute()
+		case _, ok := <-routes.nexthops:
 			if !ok {
+				if routes = resubscribeRouteEvents(ctx, routes, k.subRoutes, k.logger, "encap next hops"); routes == nil {
+					return
+				}
+			}
+			reroute()
+		case u, ok := <-neighs.updates:
+			if !ok {
+				close(neighs.done)
 				neighs = nil
+				for neighs == nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+					var err error
+					if neighs, err = k.subscribeNeighs(); err != nil {
+						k.logger.Warn("neighbour resubscribe failed; retrying", zap.Error(err))
+					}
+				}
+				k.setFlag(false, true)
+				pending()
 				continue
 			}
-			if u.Type == unix.RTM_DELNEIGH && k.isKept(u.LinkIndex, u.IP) {
+			if u.Type == unix.RTM_DELNEIGH && k.isOwned(u.LinkIndex, u.IP) {
+				k.setFlag(false, true)
 				pending()
 			}
-		case <-k.kick:
+		case <-k.wake:
 			pending()
 		case <-resweep.C:
-			pending()
+			if _, err := k.Sweep(); err != nil {
+				k.logger.Debug("encapsulation next-hop sweep incomplete", zap.Error(err))
+			}
 		case <-fire:
 			fire = nil
-			if _, err := k.Sync(); err != nil {
-				k.logger.Debug("encapsulation next-hop sync incomplete", zap.Error(err))
+			if err := k.pass(); err != nil {
+				k.logger.Debug("encapsulation next-hop pass incomplete", zap.Error(err))
 			}
 		}
 	}

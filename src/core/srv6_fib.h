@@ -24,6 +24,12 @@
 
 #define SRV6_FIB_MAIN_TABLE 254 // RT_TABLE_MAIN
 
+// Whether the kernel's bpf_fib_lookup accepts BPF_FIB_LOOKUP_TBID. The
+// daemon sets it at load from bpf.ProbeFibLookupTBID (or the
+// internal.bpf.fib_lookup_tbid override). Without it every lookup is the
+// ingress-device one, and the daemon does not close the VRF tables.
+const volatile __u8 fib_lookup_tbid = 1;
+
 // Fill zeroed params for the IPv6 FIB lookup the data plane makes and return
 // the flags to run it with. Family, the device the lookup runs on, source and
 // destination are set; flowinfo and L4 stay 0. vrf_id is the ingress VRF of
@@ -36,9 +42,9 @@
 // BPF_FIB_LOOKUP_TBID): the outer header is underlay traffic, and on a port
 // enslaved to a VRF device the l3mdev rule would take the lookup to the
 // tenant's table, which ends in an unreachable default and may hold a tenant
-// route that covers the SID. That lookup does not consult ip rules. The
-// daemon checks at load time that the kernel accepts BPF_FIB_LOOKUP_TBID
-// (bpf.ProbeFibLookupTBID).
+// route that covers the SID. That lookup does not consult ip rules. On a
+// kernel without BPF_FIB_LOOKUP_TBID (fib_lookup_tbid 0) a tenant packet takes
+// the ingress-device lookup too, and the VRF tables are left open.
 //
 // Every IPv6 lookup goes through here: the XDP path (srv6_fib_lookup_v6_core,
 // srv6_fib_lookup_encap), the tc path's encap and the control plane's uplink
@@ -56,7 +62,7 @@ static __always_inline __u32 srv6_fib_v6_params_set(
     params->ifindex = ifindex;
     __builtin_memcpy(params->ipv6_src, src, sizeof(params->ipv6_src));
     __builtin_memcpy(params->ipv6_dst, dst, sizeof(params->ipv6_dst));
-    if (vrf_id == 0)
+    if (vrf_id == 0 || !fib_lookup_tbid)
         return 0;
     params->tbid = SRV6_FIB_MAIN_TABLE;
     return BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID;

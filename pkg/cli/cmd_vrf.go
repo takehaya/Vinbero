@@ -283,6 +283,12 @@ func vrfCommand() *cli.Command {
 						}
 					}
 					printTable(headers, rows)
+					for _, v := range resp.Msg.Vrfs {
+						if m := v.GetMembersWithoutAc(); len(m) > 0 {
+							fmt.Printf("vrf %s: member ports without an AC, whose encapsulation the VRF table drops: %s\n",
+								v.GetName(), strings.Join(m, ", "))
+						}
+					}
 					return nil
 				},
 			},

@@ -1,17 +1,27 @@
 package bpf
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 )
 
@@ -190,13 +200,27 @@ func (e *encapNeighEnv) hasNeigh(ip net.IP) bool {
 	return false
 }
 
+// neighCount is the number of global unicast neighbour entries on the
+// uplink (the kernel's own multicast and link-local entries left out).
+func (e *encapNeighEnv) neighCount() int {
+	neighs, _ := netlink.NeighList(e.uplink, netlink.FAMILY_V6)
+	n := 0
+	for _, x := range neighs {
+		if x.IP.IsGlobalUnicast() {
+			n++
+		}
+	}
+	return n
+}
+
 // A tenant encapsulation from an enslaved AC, with a static underlay route
 // and no neighbour entry for its gateway, cannot recover by itself: XDP
 // hands the packet to the kernel, which drops it at the VRF table's
 // unreachable default, so the gateway is never solicited. Once the keeper
-// has synced, the kernel resolves the gateway with no other traffic, and the
+// has swept, the kernel resolves the gateway with no other traffic, and the
 // encapsulation is redirected to it. After the route moves to another
-// gateway, a sync makes that one resolve too.
+// gateway, a pass makes that one resolve and gives the first one back;
+// flipping the route back and forth does not grow the neighbour table.
 func TestEncapNeighKeeperResolvesTenantNexthop(t *testing.T) {
 	h := newXDPTestHelper(t)
 	e := newEncapNeighEnv(t)
@@ -240,73 +264,465 @@ func TestEncapNeighKeeperResolvesTenantNexthop(t *testing.T) {
 		t.Fatalf("a neighbour entry for %s appeared without the keeper", e.gw1)
 	}
 
-	k := NewEncapNeighKeeper(h.mapOps, nil, nil, zap.NewNop())
-	targets, err := k.Sync()
+	k := NewEncapNeighKeeper(h.mapOps, zap.NewNop())
+	targets, err := k.Sweep()
 	if err != nil {
-		t.Fatalf("Sync: %v", err)
+		t.Fatalf("Sweep: %v", err)
 	}
 	if len(targets) != 1 || targets[0].Ifindex != uint32(e.uplink) || !targets[0].IP.Equal(e.gw1) {
 		t.Fatalf("keeper covers %+v, want gw1 on the uplink", targets)
 	}
 	converges("gateway 1")
 
-	e.routeSIDsVia(t, e.gw2)
-	if _, err := k.Sync(); err != nil {
-		t.Fatalf("Sync after the route change: %v", err)
+	reroute := func(gw net.IP) {
+		t.Helper()
+		e.routeSIDsVia(t, gw)
+		k.setFlag(true, false)
+		if err := k.pass(); err != nil {
+			t.Fatalf("pass after the route change: %v", err)
+		}
 	}
+	reroute(e.gw2)
 	converges("gateway 2")
-	if !e.hasNeigh(e.gw2) {
-		t.Errorf("no neighbour entry for %s after the route change", e.gw2)
+	if e.hasNeigh(e.gw1) {
+		t.Errorf("the managed entry for %s is still there after no destination uses it", e.gw1)
+	}
+	for i := range 20 {
+		if i%2 == 0 {
+			reroute(e.gw1)
+		} else {
+			reroute(e.gw2)
+		}
+	}
+	if n := e.neighCount(); n > 1 {
+		neighs, _ := netlink.NeighList(e.uplink, netlink.FAMILY_V6)
+		t.Errorf("%d neighbour entries on the uplink after 20 route changes, want 1: %+v", n, neighs)
+	}
+	converges("gateway 2 after the churn")
+}
+
+// The keeper keeps both next hops the data plane can use: the main table's
+// (a tenant AC's direct lookup) and the one the ip rules select (the global
+// VRF's lookup), here a rule ahead of main that sends the SIDs to table 200.
+// A destination behind a blackhole route has no next hop, which is not an
+// error.
+func TestEncapNeighKeeperMainAndRuleNexthops(t *testing.T) {
+	h := newXDPTestHelper(t)
+	e := newEncapNeighEnv(t)
+	_, sids, _ := net.ParseCIDR("fc00:e00::/32")
+	if err := netlink.RouteAdd(&netlink.Route{Dst: sids, Gw: e.gw2, LinkIndex: e.uplink, Table: 200}); err != nil {
+		t.Fatal(err)
+	}
+	rule := netlink.NewRule()
+	rule.Family = netlink.FAMILY_V6
+	rule.Dst = sids
+	rule.Table = 200
+	rule.Priority = 100
+	if err := netlink.RuleAdd(rule); err != nil {
+		t.Fatalf("RuleAdd: %v", err)
+	}
+	_, hole, _ := net.ParseCIDR("fc00:dead::/32")
+	if err := netlink.RouteAdd(&netlink.Route{Dst: hole, Type: unix.RTN_BLACKHOLE}); err != nil {
+		t.Fatal(err)
+	}
+
+	src, _ := ParseIPv6("fc00:e01::1")
+	for i, sid := range []string{"fc00:e00::1", "fc00:dead::1"} {
+		segs, n, _ := ParseSegments([]string{sid})
+		h.createHeadendEntry(fmt.Sprintf("10.9%d.0.0/24", i), src, [16]byte{}, segs, n, true)
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	k := NewEncapNeighKeeper(h.mapOps, zap.New(core))
+	targets, err := k.Sweep()
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	var ips []string
+	for _, tg := range targets {
+		ips = append(ips, tg.IP.String())
+	}
+	slices.Sort(ips)
+	if !slices.Equal(ips, []string{e.gw1.String(), e.gw2.String()}) {
+		t.Errorf("next hops = %v, want the main table's %s and the rule's %s", ips, e.gw1, e.gw2)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("warnings for a normal configuration: %v", logs.All())
 	}
 }
 
-// Sync covers every next hop of every destination, keeps going past a
-// destination it cannot resolve or a next hop it cannot keep, and logs each
-// failure once however often it repeats. Unprivileged: all inputs are fakes.
-func TestEncapNeighKeeperSync(t *testing.T) {
-	gw := func(s string) net.IP { return net.ParseIP(s) }
-	k := &EncapNeighKeeper{
-		dests: func() ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr("fc00::1"), netip.MustParseAddr("fc00::2"), netip.MustParseAddr("fc00::3")}, nil
-		},
-		resolve: func(dst net.IP) ([]NeighTarget, error) {
-			switch dst.String() {
-			case "fc00::1":
-				return []NeighTarget{{2, gw("fe80::1")}, {3, gw("fe80::2")}}, nil
-			case "fc00::2":
-				return []NeighTarget{{2, gw("fe80::1")}}, nil // shared with fc00::1
+// ===== Unprivileged: the keeper's logic with fakes =====
+
+type fakeNeighTable struct {
+	entries map[string]netlink.Neigh // "ifindex/ip"
+	lists   int
+	sets    []string
+	dels    []string
+}
+
+func (f *fakeNeighTable) ops() neighOps {
+	return neighOps{
+		list: func(ifindex, family int) ([]netlink.Neigh, error) {
+			f.lists++
+			var out []netlink.Neigh
+			for _, n := range f.entries {
+				if n.LinkIndex == ifindex {
+					out = append(out, n)
+				}
 			}
-			return nil, errors.New("no route")
+			return out, nil
 		},
-		logger: zap.NewNop(),
-		kept:   map[string]NeighTarget{},
-		failed: map[string]string{},
+		setManaged: func(ifindex uint32, ip net.IP) error {
+			key := neighKey(ifindex, ip)
+			f.sets = append(f.sets, key)
+			f.entries[key] = netlink.Neigh{LinkIndex: int(ifindex), IP: ip, FlagsExt: netlink.NTF_EXT_MANAGED, Flags: netlink.NTF_EXT_LEARNED}
+			return nil
+		},
+		del: func(n netlink.Neigh) error {
+			key := neighKey(uint32(n.LinkIndex), n.IP)
+			f.dels = append(f.dels, key)
+			delete(f.entries, key)
+			return nil
+		},
 	}
-	var calls []string
-	k.keep = func(ifindex uint32, ip net.IP) error {
-		calls = append(calls, NeighTarget{ifindex, ip}.key())
-		if ifindex == 3 {
-			return os.ErrPermission
+}
+
+func route(cidr string, gw string, link int) netlink.Route {
+	_, dst, _ := net.ParseCIDR(cidr)
+	r := netlink.Route{Dst: dst, LinkIndex: link, Type: unix.RTN_UNICAST}
+	if gw != "" {
+		r.Gw = net.ParseIP(gw)
+	}
+	return r
+}
+
+// newFakeKeeper is a keeper over a fixed main table, a rule lookup that
+// finds nothing, and a fake neighbour table. walk is what the maps hold.
+func newFakeKeeper(t *testing.T, main *[]netlink.Route, walk *[]netip.Addr, nt *fakeNeighTable, lg *zap.Logger) (*EncapNeighKeeper, *int) {
+	t.Helper()
+	ruleGets := 0
+	k := NewEncapNeighKeeper(nil, lg)
+	k.walk = func() ([]netip.Addr, error) { return slices.Clone(*walk), nil }
+	k.res = resolver{
+		dumpMain: func() ([]netlink.Route, error) { return *main, nil },
+		ruleGet: func(net.IP) ([]netlink.Route, error) {
+			ruleGets++
+			return nil, unix.ENETUNREACH
+		},
+	}
+	k.neigh = nt.ops()
+	return k, &ruleGets
+}
+
+// A write resolves only its new destinations; the neighbour table is read
+// once per device and family per pass however many next hops it holds; a
+// next hop no destination uses any more is given back, and only if the
+// keeper made it: static entries, entries already managed by someone else
+// and BUM next hops stay.
+func TestEncapNeighKeeperIncremental(t *testing.T) {
+	main := []netlink.Route{
+		route("fc00:1::/32", "fe80::1", 2),
+		route("fc00:2::/32", "fe80::2", 2),
+		route("fc00:3::/32", "fe80::3", 2),
+		route("fc00:4::/32", "fe80::4", 3),
+		route("fc00:5::/32", "fe80::5", 3),
+	}
+	walk := []netip.Addr{netip.MustParseAddr("fc00:1::1"), netip.MustParseAddr("fc00:2::1")}
+	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{
+		neighKey(3, net.ParseIP("fe80::4")): {LinkIndex: 3, IP: net.ParseIP("fe80::4"), State: netlink.NUD_PERMANENT},
+		neighKey(3, net.ParseIP("fe80::5")): {LinkIndex: 3, IP: net.ParseIP("fe80::5"), FlagsExt: netlink.NTF_EXT_MANAGED},
+	}}
+	k, ruleGets := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
+
+	if _, err := k.Sweep(); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if nt.lists != 1 || len(nt.sets) != 2 {
+		t.Errorf("sweep: %d neighbour lists, %d sets; want 1 list (one device) and 2 sets", nt.lists, len(nt.sets))
+	}
+
+	// A write of a known destination and three new ones: only the new
+	// ones are resolved.
+	*ruleGets = 0
+	nt.lists = 0
+	k.Notify([]netip.Addr{netip.MustParseAddr("fc00:1::1"), netip.MustParseAddr("fc00:3::1"),
+		netip.MustParseAddr("fc00:4::1"), netip.MustParseAddr("fc00:5::1")})
+	if err := k.pass(); err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if *ruleGets != 3 {
+		t.Errorf("rule lookups = %d, want 3 (the new destinations only)", *ruleGets)
+	}
+	if nt.lists != 2 {
+		t.Errorf("neighbour lists = %d, want 2 (one per device)", nt.lists)
+	}
+	if !slices.Contains(nt.sets, neighKey(2, net.ParseIP("fe80::3"))) || len(nt.sets) != 3 {
+		t.Errorf("sets = %v, want fe80::3 added and the static / foreign-managed ones left", nt.sets)
+	}
+
+	// The maps no longer hold fc00:2, fc00:4 and fc00:5: fe80::2 (the
+	// keeper's) goes, the static fe80::4 and the foreign fe80::5 stay. A BUM
+	// next hop stays too.
+	bumNeighClaims.Store(neighKey(2, net.ParseIP("fe80::3")), struct{}{})
+	t.Cleanup(func() { bumNeighClaims.Delete(neighKey(2, net.ParseIP("fe80::3"))) })
+	walk = []netip.Addr{netip.MustParseAddr("fc00:1::1")}
+	if _, err := k.Sweep(); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if !slices.Equal(nt.dels, []string{neighKey(2, net.ParseIP("fe80::2"))}) {
+		t.Errorf("released = %v, want only the keeper's fe80::2", nt.dels)
+	}
+	for _, keep := range []string{"3/fe80::4", "3/fe80::5", "2/fe80::3", "2/fe80::1"} {
+		if _, ok := nt.entries[keep]; !ok {
+			t.Errorf("%s was removed", keep)
 		}
-		return nil
 	}
-	for range 2 {
-		got, err := k.Sync()
-		if err == nil {
-			t.Error("Sync with an unresolvable destination and a failing keep: want an error")
+}
+
+// The main table index picks the longest prefix and, among equal prefixes,
+// the lowest metric. A reject route and a nexthop-object route have no next
+// hop; the latter is warned about once, however many passes see it, and a
+// reject route is not warned about at all.
+func TestEncapNeighKeeperResolution(t *testing.T) {
+	low := route("fc00:1::/32", "fe80::2", 2)
+	low.Priority = 10
+	high := route("fc00:1::/32", "fe80::3", 2)
+	high.Priority = 20
+	hole := route("fc00:2::/32", "", 0)
+	hole.Type = unix.RTN_BLACKHOLE
+	nh := route("fc00:3::/32", "", 0) // RTA_NH_ID only
+	multi := route("fc00:4::/32", "", 0)
+	multi.MultiPath = []*netlink.NexthopInfo{{LinkIndex: 2, Gw: net.ParseIP("fe80::7")}, {LinkIndex: 3, Gw: net.ParseIP("fe80::8")}}
+	main := []netlink.Route{route("fc00::/16", "fe80::1", 2), high, low, hole, nh, multi, route("fc00:5::/32", "", 4)}
+	walk := []netip.Addr{
+		netip.MustParseAddr("fc00:1::1"), netip.MustParseAddr("fc00:2::1"), netip.MustParseAddr("fc00:3::1"),
+		netip.MustParseAddr("fc00:4::1"), netip.MustParseAddr("fc00:5::1"), netip.MustParseAddr("fc00:6::1"),
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{}}
+	k, _ := newFakeKeeper(t, &main, &walk, nt, zap.New(core))
+	for range 3 {
+		if _, err := k.Sweep(); err != nil {
+			t.Fatalf("Sweep: %v", err)
 		}
-		if len(got) != 2 {
-			t.Errorf("targets = %+v, want both next hops", got)
+	}
+	got := map[string][]string{}
+	for d, ts := range k.dests {
+		for _, tg := range ts {
+			got[d.String()] = append(got[d.String()], tg.key())
+		}
+		slices.Sort(got[d.String()])
+	}
+	want := map[string][]string{
+		"fc00:1::1": {"2/fe80::2"},
+		"fc00:4::1": {"2/fe80::7", "3/fe80::8"},
+		"fc00:5::1": {"4/fc00:5::1"},
+		"fc00:6::1": {"2/fe80::1"},
+	}
+	for d, w := range want {
+		if !slices.Equal(got[d], w) {
+			t.Errorf("%s: next hops %v, want %v", d, got[d], w)
 		}
 	}
-	slices.Sort(calls)
-	if !slices.Equal(calls, []string{"2/fe80::1", "2/fe80::1", "3/fe80::2", "3/fe80::2"}) {
-		t.Errorf("keep calls = %v, want each next hop once per sync", calls)
+	for _, d := range []string{"fc00:2::1", "fc00:3::1"} {
+		if len(got[d]) != 0 {
+			t.Errorf("%s: next hops %v, want none", d, got[d])
+		}
 	}
-	if len(k.failed) != 2 {
-		t.Errorf("failures recorded = %v, want the resolve and the keep", k.failed)
+	if n := logs.FilterMessageSnippet("nexthop_compat_mode").Len(); n != 1 {
+		t.Errorf("nexthop-object warnings = %d, want 1", n)
 	}
-	if !k.isKept(2, gw("fe80::1")) || k.isKept(4, gw("fe80::1")) {
-		t.Error("isKept does not match the synced next hops")
+	if logs.Len() != 1 {
+		t.Errorf("warnings = %v, want only the nexthop-object one", logs.All())
 	}
+}
+
+// Every function in this package that writes an encapsulation map hands the
+// written destinations to the keeper (encapWrote), or is listed here with
+// the reason it does not. A new writer that forgets fails this test.
+func TestEncapMapWritersNotify(t *testing.T) {
+	encapMaps := map[string]bool{
+		"HeadendV4Map": true, "HeadendV6Map": true, "MupUplinkV4Map": true, "MupUplinkV6Map": true,
+		"EcmpPathMap": true, "SrPolicyMap": true, "HeadendL2Map": true, "BdPeerMap": true,
+		"ServiceIngressMap": true, "SidAuxMap": true,
+	}
+	exempt := map[string]string{
+		"releaseSupersededBuiltinAux": "zeroes a freed aux slot",
+		"deleteSidFunctionInternal":   "zeroes the aux of a deleted SID",
+		"PutPluginAux":                "plugin-defined aux; End.B6 policies are built-in aux",
+		"FreePluginAux":               "zeroes a freed aux slot",
+	}
+	fset := token.NewFileSet()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") || strings.HasPrefix(path, "bpf_bpfe") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			writes, notifies := "", false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch fun := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					if fun.Sel.Name == "encapWrote" {
+						notifies = true
+					}
+					if inner, ok := fun.X.(*ast.SelectorExpr); ok && encapMaps[inner.Sel.Name] {
+						switch fun.Sel.Name {
+						case "Put", "Update", "BatchUpdate":
+							writes = inner.Sel.Name
+						}
+					}
+				case *ast.Ident:
+					if fun.Name == "putMainAndOwner" || fun.Name == "putControlEntry" {
+						if len(call.Args) > 0 {
+							if sel, ok := call.Args[0].(*ast.SelectorExpr); ok && encapMaps[sel.Sel.Name] {
+								writes = sel.Sel.Name
+							}
+						}
+					}
+				}
+				return true
+			})
+			if writes == "" {
+				continue
+			}
+			checked++
+			if _, ok := exempt[fn.Name.Name]; ok {
+				continue
+			}
+			if !notifies {
+				t.Errorf("%s: %s writes %s but does not call encapWrote", fset.Position(fn.Pos()), fn.Name.Name, writes)
+			}
+		}
+	}
+	if checked < 10 {
+		t.Errorf("found %d writers, the scan is not seeing them", checked)
+	}
+}
+
+// The resweep's map walk on a large table: about 100k IPv4 headend entries
+// over 100 SIDs. Opt-in (VINBERO_ENCAP_SCALE=1), as it needs a large map and
+// root; it reports the time of the walk and of a full sweep.
+func TestEncapSweepScale(t *testing.T) {
+	if os.Getenv("VINBERO_ENCAP_SCALE") == "" {
+		t.Skip("set VINBERO_ENCAP_SCALE=1 to run")
+	}
+	const n = 100_000
+	cfg := &config.Config{}
+	cfg.Setting.Entries.Headendv4.Capacity = n + 1024
+	objs, err := ReadCollection(nil, cfg)
+	if err != nil {
+		t.Fatalf("ReadCollection: %v", err)
+	}
+	defer func() { _ = objs.Close() }()
+	m := NewMapOperations(objs)
+	src, _ := ParseIPv6("fc00:e01::1")
+	for i := range n {
+		segs, nseg, _ := ParseSegments([]string{fmt.Sprintf("fc00:%x::1", 0x100+i%100)})
+		prefix := fmt.Sprintf("10.%d.%d.0/24", i/256%256, i%256)
+		if i >= 65536 {
+			prefix = fmt.Sprintf("11.%d.%d.0/24", (i-65536)/256%256, i%256)
+		}
+		if err := m.CreateHeadendV4(prefix, &HeadendEntry{Mode: modeHEncaps, NumSegments: nseg, SrcAddr: src, Segments: segs}, OwnerRPC); err != nil {
+			t.Fatalf("CreateHeadendV4 %d: %v", i, err)
+		}
+	}
+	start := time.Now()
+	dsts, err := m.EncapDestinations()
+	walk := time.Since(start)
+	if err != nil || len(dsts) != 100 {
+		t.Fatalf("EncapDestinations = %d, %v; want 100", len(dsts), err)
+	}
+	inNewNetns(t)
+	k := NewEncapNeighKeeper(m, zap.NewNop())
+	start = time.Now()
+	if _, err := k.Sweep(); err != nil {
+		t.Logf("Sweep: %v", err)
+	}
+	sweep := time.Since(start)
+	t.Logf("walk of %d headend entries: %v; full sweep (walk, resolution of %d destinations, neighbours): %v; resweep interval %v",
+		n, walk, len(dsts), sweep, encapNeighResweep)
+	if sweep > encapNeighResweep/10 {
+		t.Errorf("a sweep takes %v, not small against the %v interval", sweep, encapNeighResweep)
+	}
+}
+
+// When the route subscription ends (an ENOBUFS overflow), the keeper
+// subscribes again, re-resolves its destinations, and keeps reacting to the
+// new subscription's events. Unprivileged: the subscriptions are fakes.
+func TestEncapNeighKeeperResubscribes(t *testing.T) {
+	resubscribeDelay = 10 * time.Millisecond
+	t.Cleanup(func() { resubscribeDelay = time.Second })
+	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2)}
+	walk := []netip.Addr{netip.MustParseAddr("fc00:1::1")}
+	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{}}
+	k, ruleGets := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
+	var mu sync.Mutex
+	gets := func() int { mu.Lock(); defer mu.Unlock(); return *ruleGets }
+	k.res.ruleGet = func(net.IP) ([]netlink.Route, error) {
+		mu.Lock()
+		*ruleGets++
+		mu.Unlock()
+		return nil, unix.ENETUNREACH
+	}
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	newSub := func() *routeSub {
+		return &routeSub{routes: make(chan netlink.RouteUpdate, 1), nexthops: make(chan struct{}, 1), done: make(chan struct{})}
+	}
+	subs := make(chan *routeSub, 4)
+	k.subRoutes = func() (*routeSub, error) {
+		s := newSub()
+		subs <- s
+		return s, nil
+	}
+	first := newSub()
+	neighs := &neighSub{updates: make(chan netlink.NeighUpdate), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go k.watch(ctx, first, neighs)
+
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	base := gets()
+	close(first.routes) // the subscription ended
+	var second *routeSub
+	select {
+	case second = <-subs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the keeper did not subscribe again")
+	}
+	waitFor("a re-resolution after the resubscribe", func() bool { return gets() > base })
+	select {
+	case <-first.done:
+	default:
+		t.Error("the ended subscription was not closed")
+	}
+	base = gets()
+	second.routes <- netlink.RouteUpdate{}
+	waitFor("a re-resolution after an event on the new subscription", func() bool { return gets() > base })
 }

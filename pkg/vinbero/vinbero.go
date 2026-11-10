@@ -53,11 +53,14 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 		}
 	}
 
+	if err := resolveFibLookupTBID(&cfg.InternalConfig.BpfOptions, bpf.ProbeFibLookupTBID, logger); err != nil {
+		return nil, err
+	}
+
 	obj, err := bpf.ReadCollection(cfg.BpfConstants(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
 	}
-	warnWithoutFibLookupTBID(bpf.ProbeFibLookupTBID, logger)
 
 	// Create map operations and recover aux index state from existing entries
 	mapOps := bpf.NewMapOperations(obj)
@@ -145,20 +148,41 @@ func bumXDPUnavailable(probe func(time.Duration) (bool, error)) string {
 	return ""
 }
 
-// warnWithoutFibLookupTBID warns once at load when the kernel's
-// bpf_fib_lookup does not accept BPF_FIB_LOOKUP_TBID (Linux 6.5 or a
-// backport). The outer header of a tenant AC's encapsulation is looked up
-// with it, so on such a kernel their outer lookup fails and XDP does not
-// forward them (they are passed to the kernel or dropped). The global VRF is
-// not affected.
-func warnWithoutFibLookupTBID(probe func() (bool, error), logger *zap.Logger) {
+// resolveFibLookupTBID decides, before the programs load, how the outer
+// header of a tenant AC's encapsulation is looked up (FibLookupTBIDOff
+// sets the program's fib_lookup_tbid). With BPF_FIB_LOOKUP_TBID (Linux 6.5,
+// or a stable kernel with it) the lookup goes to the main table directly and
+// the VRF tables are closed with an unreachable default. Without it, or with
+// internal.bpf.fib_lookup_tbid "off", every packet takes the ingress-device
+// lookup and the tables stay open, so an encapsulation from an enslaved port
+// still reaches the underlay through the main table; that is logged once
+// here.
+func resolveFibLookupTBID(opts *config.BpfConfig, probe func() (bool, error), logger *zap.Logger) error {
+	switch opts.FibLookupTBID {
+	case "", "auto":
+	case "off":
+		opts.FibLookupTBIDOff = true
+		logger.Warn("internal.bpf.fib_lookup_tbid is off: tenant encapsulations look the outer header up on the ingress device, and VRF tables are not closed with an unreachable default")
+		return nil
+	default:
+		return fmt.Errorf(`internal.bpf.fib_lookup_tbid %q: want "auto" or "off"`, opts.FibLookupTBID)
+	}
 	ok, err := probe()
 	switch {
 	case err != nil:
-		logger.Warn("cannot check bpf_fib_lookup for BPF_FIB_LOOKUP_TBID; encapsulation of packets from tenant VRF ACs needs it", zap.Error(err))
+		opts.FibLookupTBIDOff = true
+		logger.Warn("cannot check whether bpf_fib_lookup accepts BPF_FIB_LOOKUP_TBID; tenant encapsulations look the outer header up on the ingress device, and VRF tables are not closed with an unreachable default", zap.Error(err))
 	case !ok:
-		logger.Warn("this kernel's bpf_fib_lookup does not accept BPF_FIB_LOOKUP_TBID (Linux 6.5): XDP cannot forward the encapsulation of packets from tenant VRF ACs (they are passed to the kernel or dropped); the global VRF is not affected")
+		opts.FibLookupTBIDOff = true
+		logger.Warn("this kernel's bpf_fib_lookup does not accept BPF_FIB_LOOKUP_TBID (Linux 6.5): tenant encapsulations look the outer header up on the ingress device, and VRF tables are not closed with an unreachable default (a closed table would drop the encapsulations from enslaved ports)")
 	}
+	return nil
+}
+
+// FibLookupTBID reports whether tenant encapsulations look the outer header
+// up in the main table directly, which is what lets VRF tables be closed.
+func (v *Vinbero) FibLookupTBID() bool {
+	return !v.cfg.InternalConfig.BpfOptions.FibLookupTBIDOff
 }
 
 // kernelRealtimePath reads "1" on a PREEMPT_RT kernel.
@@ -192,11 +216,11 @@ const bumRouteDebounce = 200 * time.Millisecond
 
 // StartEncapNeighKeeper keeps the underlay next hop of every encapsulation a
 // managed neighbour (bpf.EncapNeighKeeper), so an encapsulation never waits
-// for other traffic to resolve it. It syncs once before returning and keeps
+// for other traffic to resolve it. It sweeps once before returning and keeps
 // following map writes, route changes and deleted neighbour entries.
 func (v *Vinbero) StartEncapNeighKeeper(ctx context.Context) error {
-	k := bpf.NewEncapNeighKeeper(v.mapOps, nil, nil, v.logger)
-	v.mapOps.SetEncapChangeHook(k.Kick)
+	k := bpf.NewEncapNeighKeeper(v.mapOps, v.logger)
+	v.mapOps.SetEncapChangeHook(k.Notify)
 	return k.Run(ctx)
 }
 
@@ -230,6 +254,9 @@ func (v *Vinbero) InitResourceManager() error {
 	// the first start after it is set: Reconcile applies it before it adds
 	// any route.
 	resMgr.SetConfigUnreachableDefault(configNoUnreachableDefault(v.cfg))
+	// Without the main-table lookup a closed table would drop the
+	// encapsulations from enslaved ports, so the tables stay open.
+	resMgr.SetTablesClosed(v.FibLookupTBID())
 
 	// Fail-closed: a state entry that cannot be materialized aborts the boot
 	// (the error carries a repair hint). Continuing with a phantom entry

@@ -20,6 +20,9 @@ type ResourceManager struct {
 	// name (SetConfigUnreachableDefault); Reconcile applies it.
 	configNoUnreachable map[string]bool
 	noIPv6Logged        atomic.Bool // the "no IPv6" line is logged once
+	// tablesOpen leaves every VRF table without the unreachable default
+	// (SetTablesClosed(false)).
+	tablesOpen bool
 }
 
 func NewResourceManager(statePath string, logger *zap.Logger) (*ResourceManager, error) {

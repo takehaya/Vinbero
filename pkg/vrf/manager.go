@@ -137,6 +137,9 @@ type Manager struct {
 	// about, so a stale AC is reported once rather than on every reconcile.
 	goneMu  sync.Mutex
 	goneACs map[runtimeACKey]struct{}
+	// tablesOpen: the managed VRF tables have no unreachable default
+	// (SetTablesClosed(false)).
+	tablesOpen bool
 }
 
 type runtimeACKey struct {

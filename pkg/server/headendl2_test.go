@@ -68,7 +68,7 @@ func TestHeadendL2DeleteOutcomes(t *testing.T) {
 // table. (mapOps is nil, so reaching the write would panic.)
 func TestHeadendL2CreateRefusesVrfPort(t *testing.T) {
 	s := NewHeadendL2Server(nil)
-	s.vrfMaster = func(uint32) (string, error) { return "vrf-cust", nil }
+	s.SetClosedVRFCheck(func(uint32) (string, bool, error) { return "vrf-cust", true, nil })
 	resp, err := s.HeadendL2Create(context.Background(), connect.NewRequest(&v1.HeadendL2CreateRequest{
 		HeadendL2S: []*v1.HeadendL2{{InterfaceName: "lo", SrcAddr: "fc00::1", Segments: []string{"fc00::2"}, BdId: 100}},
 	}))
@@ -76,7 +76,7 @@ func TestHeadendL2CreateRefusesVrfPort(t *testing.T) {
 		t.Fatalf("HeadendL2Create: %v", err)
 	}
 	if len(resp.Msg.Created) != 0 || len(resp.Msg.Errors) != 1 ||
-		!strings.Contains(resp.Msg.Errors[0].Reason, `enslaved to VRF device "vrf-cust"`) {
+		!strings.Contains(resp.Msg.Errors[0].Reason, `port of VRF "vrf-cust"`) {
 		t.Errorf("got %+v, want one VRF-port error", resp.Msg)
 	}
 }

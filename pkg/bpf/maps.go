@@ -105,9 +105,9 @@ type MapOperator interface {
 // MapOperations provides operations for BPF maps
 type MapOperations struct {
 	objs     *BpfObjects
-	// encapHook runs after every write that can add an encapsulation
-	// (SetEncapChangeHook); nil disables it.
-	encapHook atomic.Pointer[func()]
+	// encapHook receives the outer destinations of every write that can
+	// add an encapsulation (SetEncapChangeHook); nil disables it.
+	encapHook atomic.Pointer[func([]netip.Addr)]
 	auxAlloc *indexAllocator
 	// Per-entry owner tracking for the main LPM maps. Paired HASH maps
 	// (key matches the corresponding main map) record the OwnerTag that
@@ -989,7 +989,7 @@ func SidAuxB6PolicyData(entry *SidAuxEntry) *HeadendEntry {
 // caller can restore it if a later step of its transaction fails. A bind
 // attempt by a different SID is a conflict.
 func (m *MapOperations) CreateServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) (*ServiceIngressEntry, error) {
-	defer m.encapChanged()
+	defer m.encapWrote(serviceIngressDst(entry)...)
 	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
 	err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateNoExist)
 	if err == nil {
@@ -1016,6 +1016,7 @@ func (m *MapOperations) CreateServiceIngress(ifindex uint32, vlanID uint16, entr
 // RestoreServiceIngress puts back a previously captured binding (rollback
 // path of CreateServiceIngress's same-SID update).
 func (m *MapOperations) RestoreServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) error {
+	defer m.encapWrote(serviceIngressDst(entry)...)
 	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
 	if err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("failed to restore service ingress entry: %w", err)
@@ -1173,6 +1174,7 @@ func ParseIPv6(addr string) ([IPv6AddrLen]uint8, error) {
 // (aux != nil); CreateSidFunctionWithAuxIndex consumes an aux index that
 // is already owned by a plugin.
 func (m *MapOperations) allocAndPutBuiltinAux(entry *SidFunctionEntry, aux *SidAuxEntry) error {
+	defer m.encapWrote(sidPolicyDst(entry, aux)...)
 	idx, err := m.auxAlloc.AllocOwner(AuxOwnerBuiltin)
 	if err != nil {
 		return fmt.Errorf("failed to allocate aux index: %w", err)
@@ -1199,7 +1201,6 @@ func (m *MapOperations) allocAndPutBuiltinAux(entry *SidFunctionEntry, aux *SidA
 // is rejected (see ErrEntryOwnerMismatch). An empty owner is rejected
 // up front (see ErrEmptyOwner).
 func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry, aux *SidAuxEntry, owner OwnerTag) error {
-	defer m.encapChanged()
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
@@ -1309,7 +1310,6 @@ func (m *MapOperations) releaseSupersededBuiltinAux(oldIdx, newIdx uint16) {
 // entryOwner is the OwnerTag persisted to sid_function_owner_map so the
 // entry itself participates in the same ownership scheme as builtin SIDs.
 func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entry *SidFunctionEntry, expectedAuxOwner string, entryOwner OwnerTag) error {
-	defer m.encapChanged()
 	if entry.AuxIndex == 0 {
 		return fmt.Errorf("aux_index must be non-zero")
 	}
@@ -1748,7 +1748,7 @@ func (m *MapOperations) ResetSlotStats(mapType string) error {
 // headend_v4_owner_map; empty owner returns ErrEmptyOwner, cross-owner
 // write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	defer m.encapChanged()
+	defer m.encapWrote(headendDst(entry)...)
 	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
@@ -1867,7 +1867,6 @@ func buildMupUplinkV4Key(instance uint32, endpoint string, teid uint32, teidPref
 // H.Encaps headend_entry; set entry.ArgsOffset = MupArgsOffsetNone for a direct
 // (End.DT4) target so Args.Mob.Session is not patched into the outgoing SID.
 func (m *MapOperations) CreateMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
-	defer m.encapChanged()
 	return m.CreateMupUplinkV4Owned(instance, endpoint, teid, teidPrefixBits, entry, OwnerRPC)
 }
 
@@ -1911,7 +1910,6 @@ func buildMupUplinkV6Key(instance uint32, endpoint string, teid uint32, teidPref
 // T2ST, IPv6 endpoint): the IPv6 counterpart of CreateMupUplinkV4, read by the
 // H.M.GTP6.D_TEID behavior. See CreateMupUplinkV4 for the entry semantics.
 func (m *MapOperations) CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
-	defer m.encapChanged()
 	return m.CreateMupUplinkV6Owned(instance, endpoint, teid, teidPrefixBits, entry, OwnerRPC)
 }
 
@@ -2003,7 +2001,7 @@ func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction u
 // headend_v6_owner_map; empty owner returns ErrEmptyOwner, cross-owner
 // write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	defer m.encapChanged()
+	defer m.encapWrote(headendDst(entry)...)
 	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
@@ -2086,7 +2084,7 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 // is value-atomic, so a policy change never exposes a torn segment list,
 // and it is O(1) regardless of how many routes steer onto the policy.
 func (m *MapOperations) UpsertSRPolicy(policyID uint32, transport []netip.Addr) error {
-	defer m.encapChanged()
+	defer m.encapWrote(firstAddr(transport)...)
 	// policy_id 0 is the "no steering" sentinel in the headend entry, so the
 	// XDP program never looks it up; an sr_policy_map[0] entry would be dead.
 	// Reject it to catch a caller that handed out 0 (e.g. an exhausted id).
@@ -2231,7 +2229,7 @@ type EcmpPath struct {
 // letting them mask freshly installed paths would starve those paths until
 // the prober's next write. The prober re-registers after a group change.
 func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []EcmpPath, owner OwnerTag) error {
-	defer m.encapChanged()
+	defer m.encapWrote(ecmpPathDsts(paths)...)
 	if groupID == EcmpGroupNone {
 		return fmt.Errorf("ecmp group id 0 is the no-group sentinel")
 	}
@@ -2307,7 +2305,7 @@ func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []EcmpPath, owner Own
 // without touching its siblings or the group info. pathIndex must already
 // be covered by the group's num_paths; use PutEcmpGroup to grow or shrink.
 func (m *MapOperations) SetEcmpPath(groupID, pathIndex uint32, entry *HeadendEntry, requester OwnerTag) error {
-	defer m.encapChanged()
+	defer m.encapWrote(headendDst(entry)...)
 	if groupID == EcmpGroupNone {
 		return fmt.Errorf("ecmp group id 0 is the no-group sentinel")
 	}
@@ -2522,7 +2520,7 @@ func (m *MapOperations) DeleteEcmpLive(groupID uint32) error {
 // single-homing and skips the side-table write. The BD's local ESI is derived
 // from its ACs (see deriveBdLocalEsi).
 func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry, esi [ESILen]byte) error {
-	defer m.encapChanged()
+	defer m.encapWrote(headendDst(entry)...)
 	key := buildHeadendL2Key(ifindex, vlanID)
 	touched := []uint16{entry.BdId}
 	defer func() { m.resyncBum(touched...) }() // after the unlock below
@@ -2735,6 +2733,26 @@ func (m *MapOperations) ListHeadendL2() (map[HeadendL2Key]*HeadendEntry, error) 
 		return nil, fmt.Errorf("failed to iterate headend L2 map: %w", err)
 	}
 	return result, nil
+}
+
+// HeadendL2Ports returns the ifindexes that carry an L2 headend circuit,
+// each once.
+func (m *MapOperations) HeadendL2Ports() ([]uint32, error) {
+	var key HeadendL2Key
+	var entry HeadendEntry
+	seen := map[uint32]bool{}
+	var out []uint32
+	iter := m.objs.HeadendL2Map.Iterate()
+	for iter.Next(&key, &entry) {
+		if !seen[key.Ifindex] {
+			seen[key.Ifindex] = true
+			out = append(out, key.Ifindex)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate headend L2 map: %w", err)
+	}
+	return out, nil
 }
 
 // ===== FDB Map Operations (for End.DT2) =====
@@ -2956,6 +2974,7 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 }
 
 func (m *MapOperations) createBdPeerLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
+	defer m.encapWrote(headendDst(entry)...)
 	// Snapshot whatever the slot holds before touching it: a create is
 	// also the refresh path for an already-installed peer, and a partial
 	// failure must put the PREVIOUS state back, not roll forward to an

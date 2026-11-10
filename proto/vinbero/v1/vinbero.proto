@@ -509,6 +509,12 @@ message Vrf {
   // there instead of going on to the main table. Set to leave them out
   // (kernel-device facet).
   bool no_unreachable_default = 9;
+  // Member ports of the device the data plane runs on that are not an AC of
+  // this VRF ("eth2", or "eth2.100" for a VLAN subinterface without its
+  // {parent, VLAN} AC): their packets are in the global VRF, and with the
+  // unreachable default their encapsulation is dropped at the VRF table.
+  // Server-reported (VrfShow).
+  repeated string members_without_ac = 10;
 }
 
 message VrfCreateRequest {

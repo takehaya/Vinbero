@@ -86,6 +86,7 @@ func deleteControlEntry[K comparable, V any](main *ebpf.Map, owners *entryOwnerM
 }
 
 func (m *MapOperations) CreateMupUplinkV4Owned(instance uint32, endpoint string, teid uint32, bits uint8, entry *HeadendEntry, owner OwnerTag) error {
+	defer m.encapWrote(headendDst(entry)...)
 	key, err := buildMupUplinkV4Key(instance, endpoint, teid, bits)
 	if err != nil {
 		return err
@@ -109,6 +110,7 @@ func (m *MapOperations) DeleteMupUplinkV4Owned(instance uint32, endpoint string,
 	return deleteControlEntry[MupUplinkV4Key, HeadendEntry](m.objs.MupUplinkV4Map, m.mupUplinkV4Owners, key, owner, true)
 }
 func (m *MapOperations) CreateMupUplinkV6Owned(instance uint32, endpoint string, teid uint32, bits uint8, entry *HeadendEntry, owner OwnerTag) error {
+	defer m.encapWrote(headendDst(entry)...)
 	key, err := buildMupUplinkV6Key(instance, endpoint, teid, bits)
 	if err != nil {
 		return err
@@ -166,7 +168,7 @@ func (m *MapOperations) CreateBdPeerOwned(bdID, index uint16, entry *HeadendEntr
 	return m.createBdPeerOwnedLocked(bdID, index, entry, esi, remoteSrc, writeReverse, owner)
 }
 func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) error {
-	defer m.encapChanged()
+	defer m.encapWrote(headendDst(entry)...)
 	if entry == nil {
 		return errors.New("nil BD peer entry")
 	}

@@ -1332,20 +1332,85 @@ func mustEnsure(t *testing.T, m *vrf.Manager, name string) vrf.VRF {
 	return v
 }
 
-// A create enslaves members, so VrfCreate checks them: a member port that is
-// not an AC of the VRF is named in a warning.
-func TestVrfServer_CreateWarnsMemberWithoutAC(t *testing.T) {
+// The member check: the normal sequence (create with members, then add the
+// AC) warns nothing; VrfShow lists the uncovered member meanwhile; an AC
+// removal that leaves the attached member uncovered warns once, naming it.
+func TestVrfServer_MemberChecks(t *testing.T) {
 	s, _, _ := newTestVrfServerFull()
-	s.members = func(uint32) ([]string, error) { return []string{"eth2"}, nil }
+	// The first create gets device ifindex 100; eth1 (ifindex 11) is its
+	// attached member.
+	s.links = func() (vrf.Links, error) {
+		return vrf.Links{11: {Name: "eth1", XDP: true, Master: 100}, 100: {Name: "vrf-cust", IsVrf: true}}, nil
+	}
 	core, logs := observer.New(zap.WarnLevel)
 	s.SetLogger(zap.New(core))
-	if _, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
-		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100, Members: []string{"eth2"}}},
+	ctx := context.Background()
+	if _, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100, Members: []string{"eth1"}}},
 	})); err != nil {
 		t.Fatalf("VrfCreate: %v", err)
 	}
+	show := func() []string {
+		t.Helper()
+		resp, err := s.VrfShow(ctx, connect.NewRequest(&v1.VrfShowRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range resp.Msg.GetVrfs() {
+			if v.GetName() == "vrf-cust" {
+				return v.GetMembersWithoutAc()
+			}
+		}
+		return nil
+	}
+	if got := show(); !slices.Equal(got, []string{"eth1"}) {
+		t.Errorf("VrfShow before the AC: members_without_ac = %v, want [eth1]", got)
+	}
+	if _, err := s.VrfAcAdd(ctx, connect.NewRequest(&v1.VrfAcAddRequest{Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth1"}})); err != nil {
+		t.Fatalf("VrfAcAdd: %v", err)
+	}
+	if got := show(); len(got) != 0 {
+		t.Errorf("VrfShow with the AC: members_without_ac = %v, want none", got)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("create then ac-add warned: %v", logs.All())
+	}
+	if _, err := s.VrfAcRemove(ctx, connect.NewRequest(&v1.VrfAcRemoveRequest{Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth1"}})); err != nil {
+		t.Fatalf("VrfAcRemove: %v", err)
+	}
 	got := logs.FilterMessageSnippet("is not an access circuit of its VRF").All()
-	if len(got) != 1 || got[0].ContextMap()["interface"] != "eth2" || got[0].ContextMap()["vrf"] != "vrf-cust" {
-		t.Errorf("warnings = %v, want one for vrf-cust / eth2", logs.All())
+	if len(got) != 1 || got[0].ContextMap()["interface"] != "eth1" || got[0].ContextMap()["vrf"] != "vrf-cust" {
+		t.Errorf("warnings after the removal = %v, want one for vrf-cust / eth1", logs.All())
+	}
+}
+
+// A create refuses to enslave a port that carries an L2 headend circuit
+// into a VRF whose table ends in the unreachable default; with the opt-out,
+// or with the tables open, it goes ahead.
+func TestVrfServer_CreateRefusesL2CircuitMember(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{10}, nil }) // eth0
+	ctx := context.Background()
+	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-a", TableId: 100, Members: []string{"eth0"}}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, "carries an L2 headend circuit") || len(dev.created) != 0 {
+		t.Errorf("errors = %v, created = %v; want the L2-circuit refusal before any device", resp.Msg.Errors, dev.created)
+	}
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-b", TableId: 200, Members: []string{"eth0"}, NoUnreachableDefault: true}},
+	}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Errorf("opted-out create: %v %v", err, resp.Msg.GetErrors())
+	}
+	s.mgr.SetTablesClosed(false)
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-c", TableId: 300, Members: []string{"eth0"}}},
+	}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Errorf("create with open tables: %v %v", err, resp.Msg.GetErrors())
 	}
 }

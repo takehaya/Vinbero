@@ -20,6 +20,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
 	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/bgp/export"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/cplane"
@@ -105,6 +106,9 @@ func run(cliCtx *cli.Context) error {
 	}
 	vrfBgpMgr := vrfbgp.NewManager()
 	vrfBgpMgr.VRF().SetLogger(lg)
+	// The VRF tables are closed only when the data plane can look tenant
+	// encapsulations up in the main table (bpf.ProbeFibLookupTBID).
+	vrfBgpMgr.VRF().SetTablesClosed(vin.FibLookupTBID())
 	bindingVRFs := make([]string, 0, len(cfg.BGP.VrfBindings))
 	for _, b := range cfg.BGP.VrfBindings {
 		bindingVRFs = append(bindingVRFs, b.VRFName)
@@ -126,6 +130,7 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	warnVRFPorts(vrfBgpMgr.VRF(), vin.GetMapOperations(), lg)
 	// Forget runtime attachments whose interface is deleted.
 	if err := vin.WatchDevices(); err != nil {
 		return fmt.Errorf("watch devices: %w", err)
@@ -764,11 +769,30 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 		return fmt.Errorf("vrf: %w", err)
 	}
 	lg.Info("VRF ingress classification programmed", zap.Int("vrfs", len(mgr.List())))
-	// A port enslaved to a managed VRF device but not one of its ACs is in
-	// the global VRF, and its encapsulation stops at the VRF table: name
-	// each one so an existing configuration does not black-hole silently.
-	mgr.WarnMembersWithoutAC(vrf.KernelMembers, lg)
 	return nil
+}
+
+// warnVRFPorts names, once XDP runs on the devices, what the VRF tables'
+// unreachable default drops: member ports the data plane classifies to the
+// global VRF (no AC in their VRF), and L2 headend circuits on a port of such
+// a VRF (enslaved outside Vinbero, which refuses it itself). An existing
+// configuration then does not black-hole silently.
+func warnVRFPorts(mgr *vrf.Manager, mapOps *bpf.MapOperations, lg *zap.Logger) {
+	if !mgr.TablesClosed() {
+		return
+	}
+	links, err := vrf.SnapshotLinks()
+	if err != nil {
+		lg.Warn("cannot check the VRF ports", zap.Error(err))
+		return
+	}
+	mgr.WarnMembersWithoutAC(links, "", lg)
+	ports, err := mapOps.HeadendL2Ports()
+	if err != nil {
+		lg.Warn("cannot list the L2 headend circuits", zap.Error(err))
+		return
+	}
+	mgr.WarnL2CircuitsOnClosedVRFs(links, ports, lg)
 }
 
 // bridgeRegistrar is the FDB-watcher surface watchBridgeFacets needs.

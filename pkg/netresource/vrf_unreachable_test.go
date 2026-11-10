@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -482,9 +483,13 @@ func TestManagedVrfUnreachableDefaultState(t *testing.T) {
 // is logged once. Unprivileged: the route calls are replaced.
 func TestEnsureUnreachableDefaultWithoutIPv6(t *testing.T) {
 	var added []string
+	errs := []error{unix.EOPNOTSUPP, unix.EAFNOSUPPORT} // ipv6.disable=1, no IPv6 at all
+	call := 0
 	routeAdd = func(r *netlink.Route) error {
 		if r.Dst.IP.To4() == nil {
-			return unix.EAFNOSUPPORT
+			err := errs[call%2]
+			call++
+			return err
 		}
 		added = append(added, r.Dst.String())
 		return nil
@@ -524,5 +529,60 @@ func TestEnsureUnreachableDefaultWithoutIPv6(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != "0.0.0.0/0" {
 		t.Errorf("removed = %v, want the IPv4 route taken back", removed)
+	}
+}
+
+// On a host booted with ipv6.disable=1 a VRF is created with the IPv4
+// unreachable default only. Runs only on such a host (the VM job boots one).
+func TestCreateVrfIPv6Disabled(t *testing.T) {
+	if _, err := os.Stat("/proc/sys/net/ipv6"); err == nil {
+		t.Skip("IPv6 is enabled on this kernel; boot with ipv6.disable=1 to run")
+	}
+	withTestNetns(t)
+	m := newTestManager(t)
+	createVrfOrSkip(t, m, "vrf-v4only", 100, false)
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: 100}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range routes {
+		if r.Type == unix.RTN_UNREACHABLE && r.Priority == unreachableDefaultMetric {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("table 100 = %+v, want the IPv4 unreachable default", routes)
+	}
+	if got, _ := m.GetVrfByName("vrf-v4only"); !slices.Equal(got.UnreachableDefaultAdded, []string{familyIPv4}) {
+		t.Errorf("recorded = %v, want [ipv4]", got.UnreachableDefaultAdded)
+	}
+	if err := m.DeleteVrf("vrf-v4only"); err != nil {
+		t.Fatalf("DeleteVrf: %v", err)
+	}
+}
+
+// On a kernel without BPF_FIB_LOOKUP_TBID (or with the override off) the
+// tables stay open: a create adds nothing, and Reconcile gives back what a
+// previous run added.
+func TestTablesOpen(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+	createVrfOrSkip(t, m, "vrf-was", 100, false)
+	wantUnreachable(t, 100, 1)
+
+	m2, err := NewResourceManager(m.statePath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.SetTablesClosed(false)
+	if err := m2.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 100, 0)
+	createVrfOrSkip(t, m2, "vrf-new", 200, false)
+	wantUnreachable(t, 200, 0)
+	if got, _ := m2.GetVrfByName("vrf-was"); len(got.UnreachableDefaultAdded) != 0 {
+		t.Errorf("vrf-was still records %v", got.UnreachableDefaultAdded)
 	}
 }

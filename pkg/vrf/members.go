@@ -8,74 +8,186 @@ import (
 	"go.uber.org/zap"
 )
 
-// MemberWithoutAC is a port enslaved to a VRF's kernel device that is not an
-// access circuit of that VRF.
+// LinkInfo is what the member and L2-circuit checks need of one interface.
+type LinkInfo struct {
+	Name    string
+	Master  uint32 // ifindex of the master device, 0 for none
+	XDP     bool   // an XDP program is attached
+	VLANOf  uint32 // a VLAN subinterface: the parent's ifindex (0 otherwise)
+	VLANID  uint16
+	IsVrf   bool
+	VrfName string
+}
+
+// Links is one snapshot of the host's interfaces, by ifindex.
+type Links map[uint32]LinkInfo
+
+// SnapshotLinks reads every interface once.
+func SnapshotLinks() (Links, error) {
+	all, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	out := make(Links, len(all))
+	for _, l := range all {
+		a := l.Attrs()
+		info := LinkInfo{Name: a.Name, Master: uint32(a.MasterIndex)}
+		if a.Xdp != nil && a.Xdp.Attached {
+			info.XDP = true
+		}
+		if v, ok := l.(*netlink.Vlan); ok {
+			info.VLANOf = uint32(a.ParentIndex)
+			info.VLANID = uint16(v.VlanId)
+		}
+		if _, ok := l.(*netlink.Vrf); ok {
+			info.IsVrf = true
+		}
+		out[uint32(a.Index)] = info
+	}
+	return out, nil
+}
+
+// SetTablesClosed says whether the managed VRF tables end in the
+// unreachable default (the data plane can look tenant encapsulations up in
+// the main table). The member and L2-circuit checks only matter when they
+// do. The default is closed.
+func (m *Manager) SetTablesClosed(closed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tablesOpen = !closed
+}
+
+// TablesClosed reports whether the managed VRF tables end in the
+// unreachable default (SetTablesClosed).
+func (m *Manager) TablesClosed() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !m.tablesOpen
+}
+
+// closedVRFs returns the VRFs whose kernel device's table ends in the
+// unreachable default, by device ifindex.
+func (m *Manager) closedVRFs() map[uint32]VRF {
+	m.mu.RLock()
+	open := m.tablesOpen
+	m.mu.RUnlock()
+	out := map[uint32]VRF{}
+	if open {
+		return out
+	}
+	for _, v := range m.List() {
+		if v.Device != nil && v.Device.Ifindex != 0 && !v.Device.NoUnreachableDefault {
+			out[v.Device.Ifindex] = v
+		}
+	}
+	return out
+}
+
+// ClosedVRFOfPort returns the managed VRF whose closed table the port with
+// this ifindex is enslaved to, if any.
+func (m *Manager) ClosedVRFOfPort(links Links, ifindex uint32) (string, bool) {
+	l, ok := links[ifindex]
+	if !ok || l.Master == 0 {
+		return "", false
+	}
+	v, ok := m.closedVRFs()[l.Master]
+	return v.Name, ok
+}
+
+// MemberWithoutAC is a port of a VRF's kernel device, attached to the data
+// plane, whose packets are not classified to that VRF.
 type MemberWithoutAC struct {
+	VRF       string
+	Interface string
+	// AC is the access circuit that would cover it: {Interface, 0} for a
+	// port XDP runs on, {parent, VLAN} for a VLAN subinterface of one.
+	AC AC
+}
+
+// MembersWithoutAC returns, for every VRF whose table ends in the
+// unreachable default, the member ports the data plane classifies to
+// another VRF: a member XDP runs on without the AC {member, 0}, or a VLAN
+// subinterface of a port XDP runs on without the AC {parent, VLAN}. Their
+// packets are in the global VRF, so their encapsulation looks the outer
+// header up on the port, which goes to the VRF table and stops at the
+// unreachable default. Members XDP never sees (a dummy, a bridge, an SVI)
+// are not reported. only, when set, limits the check to that VRF.
+func (m *Manager) MembersWithoutAC(links Links, only string) []MemberWithoutAC {
+	var out []MemberWithoutAC
+	closed := m.closedVRFs()
+	ifindexes := make([]uint32, 0, len(links))
+	for i := range links {
+		ifindexes = append(ifindexes, i)
+	}
+	slices.Sort(ifindexes)
+	for _, i := range ifindexes {
+		l := links[i]
+		v, ok := closed[l.Master]
+		if !ok || (only != "" && v.Name != only) {
+			continue
+		}
+		var want AC
+		switch {
+		case l.XDP:
+			want = AC{Interface: l.Name}
+		case l.VLANOf != 0 && links[l.VLANOf].XDP:
+			want = AC{Interface: links[l.VLANOf].Name, VLAN: l.VLANID}
+		default:
+			continue
+		}
+		if !slices.Contains(v.ACs, want) {
+			out = append(out, MemberWithoutAC{VRF: v.Name, Interface: l.Name, AC: want})
+		}
+	}
+	return out
+}
+
+// WarnMembersWithoutAC logs one warning per member reported by
+// MembersWithoutAC.
+func (m *Manager) WarnMembersWithoutAC(links Links, only string, lg *zap.Logger) {
+	for _, f := range m.MembersWithoutAC(links, only) {
+		lg.Warn("VRF member port is not an access circuit of its VRF: packets from it are in the global VRF, "+
+			"and their encapsulation is dropped at the VRF table's unreachable default; "+
+			"make the port an AC of the VRF (vbctl vrf ac-add / vrfs.entries[].acs) or opt the VRF out (no_unreachable_default)",
+			zap.String("vrf", f.VRF), zap.String("interface", f.Interface),
+			zap.String("ac_interface", f.AC.Interface), zap.Uint16("ac_vlan", f.AC.VLAN))
+	}
+}
+
+// L2CircuitOnClosedVRF is an L2 headend circuit on a port of a VRF whose
+// table ends in the unreachable default.
+type L2CircuitOnClosedVRF struct {
 	VRF       string
 	Interface string
 }
 
-// MembersFunc lists the names of the ports enslaved to the kernel device
-// with this ifindex.
-type MembersFunc func(vrfIfindex uint32) ([]string, error)
-
-// KernelMembers lists the ports enslaved to the device with this ifindex.
-func KernelMembers(vrfIfindex uint32) ([]string, error) {
-	links, err := netlink.LinkList()
-	if err != nil {
-		return nil, fmt.Errorf("list links: %w", err)
-	}
-	var names []string
-	for _, l := range links {
-		if uint32(l.Attrs().MasterIndex) == vrfIfindex {
-			names = append(names, l.Attrs().Name)
-		}
-	}
-	return names, nil
-}
-
-// MembersWithoutAC returns, for every VRF with a kernel device whose table
-// ends in the unreachable default, the member ports that are not an AC of
-// that VRF (on any VLAN). Such a port's packets are classified to the global
-// VRF, so their encapsulation looks the outer header up on the port, which
-// goes to the VRF table and stops at the unreachable default. A VRF whose
-// members cannot be listed is reported in the error and skipped.
-func (m *Manager) MembersWithoutAC(members MembersFunc) ([]MemberWithoutAC, error) {
-	var out []MemberWithoutAC
-	var firstErr error
-	for _, v := range m.List() {
-		if v.Device == nil || v.Device.Ifindex == 0 || v.Device.NoUnreachableDefault {
+// L2CircuitsOnClosedVRFs returns the L2 circuit ports (by ifindex) that are
+// enslaved to a VRF whose table ends in the unreachable default. Their
+// encapsulations and BUM copies are looked up on the port, so in the VRF
+// table, where they stop.
+func (m *Manager) L2CircuitsOnClosedVRFs(links Links, circuitPorts []uint32) []L2CircuitOnClosedVRF {
+	var out []L2CircuitOnClosedVRF
+	seen := map[uint32]bool{}
+	for _, p := range circuitPorts {
+		if seen[p] {
 			continue
 		}
-		names, err := members(v.Device.Ifindex)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("vrf %q: %w", v.Name, err)
-			}
-			continue
-		}
-		slices.Sort(names)
-		for _, n := range names {
-			if !slices.ContainsFunc(v.ACs, func(ac AC) bool { return ac.Interface == n }) {
-				out = append(out, MemberWithoutAC{VRF: v.Name, Interface: n})
-			}
+		seen[p] = true
+		if name, ok := m.ClosedVRFOfPort(links, p); ok {
+			out = append(out, L2CircuitOnClosedVRF{VRF: name, Interface: links[p].Name})
 		}
 	}
-	return out, firstErr
+	return out
 }
 
-// WarnMembersWithoutAC logs one warning per member port of a VRF that is not
-// an AC of it (MembersWithoutAC): its encapsulation is dropped at the VRF
-// table until the port becomes an AC or the VRF opts out.
-func (m *Manager) WarnMembersWithoutAC(members MembersFunc, lg *zap.Logger) {
-	found, err := m.MembersWithoutAC(members)
-	if err != nil {
-		lg.Warn("cannot check the VRF member ports for access circuits", zap.Error(err))
-	}
-	for _, f := range found {
-		lg.Warn("VRF member port is not an access circuit of its VRF: packets from it are in the global VRF, "+
-			"and their encapsulation is dropped at the VRF table's unreachable default; "+
-			"make the port an AC of the VRF (vbctl vrf ac-add / vrfs.entries[].acs) or opt the VRF out (no_unreachable_default)",
-			zap.String("vrf", f.VRF), zap.String("interface", f.Interface))
+// WarnL2CircuitsOnClosedVRFs logs one warning per port reported by
+// L2CircuitsOnClosedVRFs (ports enslaved outside Vinbero; Vinbero refuses
+// to make such a port itself).
+func (m *Manager) WarnL2CircuitsOnClosedVRFs(links Links, circuitPorts []uint32, lg *zap.Logger) {
+	for _, c := range m.L2CircuitsOnClosedVRFs(links, circuitPorts) {
+		lg.Warn("L2 headend circuit on a port of a VRF whose table ends in the unreachable default: its encapsulations "+
+			"and BUM copies are looked up in the VRF table and dropped; move the circuit to a port in no VRF (or a bridge port), "+
+			"or opt the VRF out (no_unreachable_default)",
+			zap.String("vrf", c.VRF), zap.String("interface", c.Interface))
 	}
 }

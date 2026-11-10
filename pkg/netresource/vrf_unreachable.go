@@ -54,6 +54,9 @@ func unreachableDefault(tableID uint32, family string) *netlink.Route {
 // restart) is kept as it is and not counted as added. A host without IPv6
 // (ipv6.disable=1) gets the IPv4 route only, with one log line.
 func (m *ResourceManager) ensureUnreachableDefault(tableID uint32) ([]string, error) {
+	if m.tablesOpen {
+		return nil, nil
+	}
 	var added []string
 	for _, family := range []string{familyIPv4, familyIPv6} {
 		r := unreachableDefault(tableID, family)
@@ -62,7 +65,10 @@ func (m *ResourceManager) ensureUnreachableDefault(tableID uint32) ([]string, er
 		case err == nil:
 			added = append(added, family)
 		case errors.Is(err, unix.EEXIST):
-		case family == familyIPv6 && errors.Is(err, unix.EAFNOSUPPORT):
+		case family == familyIPv6 && (errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EAFNOSUPPORT)):
+			// ipv6.disable=1 registers no IPv6 route handlers, and rtnetlink
+			// answers EOPNOTSUPP; EAFNOSUPPORT covers a kernel without the
+			// family altogether.
 			if !m.noIPv6Logged.Swap(true) {
 				m.logger.Info("IPv6 is not available on this host; VRF tables get no IPv6 unreachable default",
 					zap.Uint32("table_id", tableID))
@@ -126,7 +132,7 @@ func (m *ResourceManager) releaseUnreachableLocked(idx int) error {
 	}
 	for i := range m.state.VRFs {
 		o := &m.state.VRFs[i]
-		if i != idx && o.TableID == v.TableID && !o.OptedOut() {
+		if !m.tablesOpen && i != idx && o.TableID == v.TableID && !o.OptedOut() {
 			o.addUnreachableFamilies(v.UnreachableDefaultAdded)
 			m.logger.Info("unreachable default stays: another VRF uses the table",
 				zap.String("vrf", v.Name), zap.String("kept_for", o.Name), zap.Uint32("table_id", v.TableID))
@@ -195,6 +201,17 @@ func (m *ResourceManager) warnSharedOptOut(name string) {
 	}
 }
 
+// SetTablesClosed says whether VRF tables may be closed with the unreachable
+// default. The data plane needs BPF_FIB_LOOKUP_TBID to look a tenant
+// encapsulation's outer header up past a closed table; without it the tables
+// stay open: nothing is added, and Reconcile gives back the routes a previous
+// run added. Call it before Reconcile; the default is closed.
+func (m *ResourceManager) SetTablesClosed(closed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tablesOpen = !closed
+}
+
 // SetConfigUnreachableDefault records the config's no_unreachable_default
 // for each VRF it declares with a kernel device, by name. Reconcile applies
 // it to the state's records before it touches any table, so a setting in
@@ -226,7 +243,7 @@ func (m *ResourceManager) decideUnreachableLocked(idx int) error {
 			zap.String("vrf", v.Name), zap.Bool("no_unreachable_default", no))
 	}
 	v.setNoUnreachableDefault(no)
-	if no {
+	if no || m.tablesOpen {
 		return m.releaseUnreachableLocked(idx)
 	}
 	return nil

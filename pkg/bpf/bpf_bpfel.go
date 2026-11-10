@@ -474,6 +474,7 @@ type BpfVariableSpecs struct {
 	BumXdpEnabled  *ebpf.VariableSpec `ebpf:"bum_xdp_enabled"`
 	BumXdpNative   *ebpf.VariableSpec `ebpf:"bum_xdp_native"`
 	EnableStats    *ebpf.VariableSpec `ebpf:"enable_stats"`
+	FibLookupTbid  *ebpf.VariableSpec `ebpf:"fib_lookup_tbid"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -623,6 +624,7 @@ type BpfVariables struct {
 	BumXdpEnabled  *ebpf.Variable `ebpf:"bum_xdp_enabled"`
 	BumXdpNative   *ebpf.Variable `ebpf:"bum_xdp_native"`
 	EnableStats    *ebpf.Variable `ebpf:"enable_stats"`
+	FibLookupTbid  *ebpf.Variable `ebpf:"fib_lookup_tbid"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.

@@ -163,3 +163,41 @@ func TestXDPProgEncapOuterLookupFromTenantVRF(t *testing.T) {
 		t.Errorf("H.Encaps from the enslaved port in vrf 0: ret %d, want XDP_DROP at the VRF table", ret)
 	}
 }
+
+// With fib_lookup_tbid 0 (a kernel without BPF_FIB_LOOKUP_TBID, or the
+// override) a tenant AC's encapsulation takes the ingress-device lookup like
+// every other: from an enslaved port it stops at a closed VRF table, and
+// once the table is open (the daemon does not close tables in this mode) it
+// reaches the underlay through the main table.
+func TestXDPProgEncapOuterLookupWithoutTBID(t *testing.T) {
+	h := newXDPTestHelperWithConstants(t, map[string]any{"fib_lookup_tbid": uint8(0)})
+	e := newEncapVrfEnv(t)
+	src, _ := ParseIPv6("fc00:e01::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00:e00::1"})
+	h.createHeadendEntry("10.99.0.0/24", src, [16]byte{}, segments, numSegments, true)
+	if err := h.mapOps.SetIngressPolicy(true, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.SetIngressVrf(map[IngressACKey]uint32{{Ifindex: e.tenant}: 1}); err != nil {
+		t.Fatal(err)
+	}
+	v4, err := buildSimpleIPv4Packet(net.ParseIP("10.98.0.1"), net.ParseIP("10.99.0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ret, _ := h.runOnIfindex(v4, e.tenant); ret != XDP_DROP {
+		t.Errorf("tenant AC, closed table: ret %d, want XDP_DROP (the ingress lookup meets the unreachable default)", ret)
+	}
+	for _, cidr := range []string{"0.0.0.0/0", "::/0"} {
+		_, dst, _ := net.ParseCIDR(cidr)
+		if err := netlink.RouteDel(&netlink.Route{Table: 100, Type: unix.RTN_UNREACHABLE, Dst: dst, Priority: 4278198272}); err != nil {
+			t.Fatalf("open the table: %v", err)
+		}
+	}
+	if ret, out := h.runOnIfindex(v4, e.tenant); !e.redirectedToGateway(ret, out) {
+		t.Errorf("tenant AC, open table: ret %d dst MAC %x, want XDP_REDIRECT to %s through the main table", ret, out[0:6], e.gwMAC)
+	}
+	if ret, out := h.runOnIfindex(v4, e.global); !e.redirectedToGateway(ret, out) {
+		t.Errorf("port in no VRF: ret %d dst MAC %x, want XDP_REDIRECT to %s", ret, out[0:6], e.gwMAC)
+	}
+}

@@ -327,6 +327,12 @@ func (c *Config) BpfConstants() map[string]any {
 			consts["bum_xdp_native"] = uint8(1)
 		}
 	}
+	// fib_lookup_tbid defaults to 1 in the program; it is set only when the
+	// daemon found the kernel without BPF_FIB_LOOKUP_TBID (or was told to
+	// behave as if), so the usual constant set stays as it was.
+	if c.InternalConfig.BpfOptions.FibLookupTBIDOff {
+		consts["fib_lookup_tbid"] = uint8(0)
+	}
 	return consts
 }
 
