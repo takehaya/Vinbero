@@ -806,18 +806,20 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, dev vrf.DeviceOps, br vrf
 	mgr.SetPolicy(vrf.Policy{DefaultDeny: cfg.DefaultDeny, DenyAction: action})
 	for _, v := range cfg.Entries {
 		// Kernel-device facet first: table_id != 0 creates (or adopts) the
-		// Linux VRF device. members / enable_l3mdev_rule without a table are a
-		// typo (they configure the device), so reject rather than ignore.
+		// Linux VRF device. members / enable_l3mdev_rule /
+		// no_unreachable_default without a table are a typo (they configure
+		// the device), so reject rather than ignore.
 		if v.TableID != 0 {
 			if _, err := mgr.CreateDevice(v.Name, vrf.Device{
-				TableID:          v.TableID,
-				Members:          v.Members,
-				EnableL3mdevRule: v.EnableL3mdevRule,
+				TableID:              v.TableID,
+				Members:              v.Members,
+				EnableL3mdevRule:     v.EnableL3mdevRule,
+				NoUnreachableDefault: v.NoUnreachableDefault,
 			}, dev); err != nil {
 				return err
 			}
-		} else if len(v.Members) > 0 || v.EnableL3mdevRule {
-			return fmt.Errorf("vrf %q: members / enable_l3mdev_rule require table_id (they configure the kernel device)", v.Name)
+		} else if len(v.Members) > 0 || v.EnableL3mdevRule || v.NoUnreachableDefault {
+			return fmt.Errorf("vrf %q: members / enable_l3mdev_rule / no_unreachable_default require table_id (they configure the kernel device)", v.Name)
 		}
 		// L2 bridge-domain facet: creates (or adopts, idempotent over the
 		// state-file seed) the kernel bridge. watchBridgeFacets registers
@@ -867,10 +869,11 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, dev vrf.DeviceOps, br vrf
 func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error {
 	for _, mv := range resMgr.ListVrfs() {
 		if _, err := mgr.SetDevice(mv.Name, vrf.Device{
-			TableID:          mv.TableID,
-			Members:          mv.Members,
-			EnableL3mdevRule: mv.EnableL3mdevRule,
-			Ifindex:          mv.Ifindex,
+			TableID:              mv.TableID,
+			Members:              mv.Members,
+			EnableL3mdevRule:     mv.EnableL3mdevRule,
+			NoUnreachableDefault: mv.NoUnreachableDefault,
+			Ifindex:              mv.Ifindex,
 		}); err != nil {
 			return fmt.Errorf("seed vrf %q from state: %w (remove the entry from the netresource state file, settings.state_path, and restart)", mv.Name, err)
 		}

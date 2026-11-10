@@ -140,7 +140,9 @@ vinbero peer create \
 ## L3VPN のセットアップ例
 
 ```bash
-# VRF 作成 (kernel device + vrf_id を持つ一級 VRF オブジェクトになる)
+# VRF 作成 (kernel device + vrf_id を持つ一級 VRF オブジェクトになる)。
+# table 100 には unreachable default が入り、table に無い宛先は main table へ
+# 進まない (--no-unreachable-default で省略)
 vinbero vrf create \
   --name vrf100 \
   --table-id 100 \

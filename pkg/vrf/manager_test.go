@@ -171,13 +171,19 @@ type fakeDeviceOps struct {
 	deleteErr error
 	created   []string
 	deleted   []string
+	// noUnreachable is the noUnreachableDefault each create passed, by name.
+	noUnreachable map[string]bool
 }
 
-func (f *fakeDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev bool) (uint32, error) {
+func (f *fakeDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev, noUnreachable bool) (uint32, error) {
 	if f.createErr != nil {
 		return 0, f.createErr
 	}
 	f.created = append(f.created, name)
+	if f.noUnreachable == nil {
+		f.noUnreachable = map[string]bool{}
+	}
+	f.noUnreachable[name] = noUnreachable
 	return f.ifindexes[name], nil
 }
 
@@ -217,6 +223,26 @@ func TestManager_CreateDevice(t *testing.T) {
 	}
 	if len(ops.created) != 1 {
 		t.Errorf("rejected creates still hit ops: %v", ops.created)
+	}
+}
+
+// The unreachable-default opt-out reaches the mechanics layer and stays on
+// the facet; leaving it unset asks for the routes.
+func TestManager_CreateDevice_NoUnreachableDefault(t *testing.T) {
+	m := NewManager()
+	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"vrf-a": 42, "vrf-b": 43}}
+	v, err := m.CreateDevice("vrf-a", Device{TableID: 100, NoUnreachableDefault: true}, ops)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	if !ops.noUnreachable["vrf-a"] || v.Device == nil || !v.Device.NoUnreachableDefault {
+		t.Errorf("opt-out: ops saw %v, facet %+v; want true on both", ops.noUnreachable["vrf-a"], v.Device)
+	}
+	if _, err := m.CreateDevice("vrf-b", Device{TableID: 200}, ops); err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	if got, ok := ops.noUnreachable["vrf-b"]; !ok || got {
+		t.Errorf("default: ops saw noUnreachableDefault=%v (called %v), want false", got, ok)
 	}
 }
 

@@ -79,14 +79,14 @@ func (m *ResourceManager) Reconcile() error {
 			if err != nil {
 				m.logger.Info("Reconcile: recreating VRF",
 					zap.String("name", v.Name), zap.Uint32("table_id", v.TableID))
-				ifindex, err := createVrfNetlink(v.Name, v.TableID, v.Members, v.EnableL3mdevRule)
+				ifindex, err := createVrfNetlink(v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.NoUnreachableDefault)
 				if err != nil {
 					return fix("vrf "+v.Name, err)
 				}
 				v.Ifindex = ifindex
 				continue
 			}
-			ifindex, err := adoptVrfDevice(link, v.Name, v.TableID, v.Members, v.EnableL3mdevRule)
+			ifindex, err := adoptVrfDevice(link, v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.NoUnreachableDefault)
 			if err != nil {
 				return fix("vrf "+v.Name, err)
 			}

@@ -95,18 +95,21 @@ type VRFsConfig struct {
 
 // VRFConfig is one VRF: its name, ingress access circuits, the optional
 // kernel-device facet and the optional L2 bridge facet. table_id != 0 creates
-// (or adopts) the Linux VRF device at boot; members and enable_l3mdev_rule
-// require it. bridge creates (or adopts) the Linux bridge as the VRF's bridge
-// domain. Removing an entry does NOT delete an already-created device or
-// bridge (config is additive; deletion is an explicit `vbctl vrf delete` /
+// (or adopts) the Linux VRF device at boot; members, enable_l3mdev_rule and
+// no_unreachable_default require it. The device's table gets an IPv4 and an
+// IPv6 unreachable default unless no_unreachable_default is set. bridge
+// creates (or adopts) the Linux bridge as the VRF's bridge domain. Removing an
+// entry does NOT delete an already-created device or bridge (config is
+// additive; deletion is an explicit `vbctl vrf delete` /
 // `vbctl vrf bridge-detach`).
 type VRFConfig struct {
-	Name             string           `yaml:"name,omitempty"`
-	ACs              []VRFACConfig    `yaml:"acs,omitempty"`
-	TableID          uint32           `yaml:"table_id,omitempty"`
-	Members          []string         `yaml:"members,omitempty"`
-	EnableL3mdevRule bool             `yaml:"enable_l3mdev_rule,omitempty"`
-	Bridge           *VRFBridgeConfig `yaml:"bridge,omitempty"`
+	Name                 string           `yaml:"name,omitempty"`
+	ACs                  []VRFACConfig    `yaml:"acs,omitempty"`
+	TableID              uint32           `yaml:"table_id,omitempty"`
+	Members              []string         `yaml:"members,omitempty"`
+	EnableL3mdevRule     bool             `yaml:"enable_l3mdev_rule,omitempty"`
+	NoUnreachableDefault bool             `yaml:"no_unreachable_default,omitempty"`
+	Bridge               *VRFBridgeConfig `yaml:"bridge,omitempty"`
 }
 
 // VRFBridgeConfig is a VRF's L2 bridge-domain facet: the Linux bridge device

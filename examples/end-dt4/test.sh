@@ -31,6 +31,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# check <description> <command...>: tallies a PASS when the command succeeds.
+check() {
+    local desc=$1; shift
+    if "$@" > /dev/null 2>&1; then
+        print_success "$desc: PASS"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$desc: FAIL"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+
 # check_not <description> <command...>: tallies a PASS when the command fails.
 check_not() {
     local desc=$1; shift
@@ -115,6 +127,8 @@ echo "Phase 2: Vinbero XDP End.DT4 (VRF)"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router3..."
+# A previous run's state would adopt vrf100 at start (Phase 4 does that).
+rm -f /tmp/vinbero_end_dt4_state.json
 start_vinbero "$ns_router3" "${VINBERO_CONFIG}" "/tmp/vinbero_end_dt4_test.log"
 VINBERO_PID=$VINBERO_LAST_PID
 wait_vinbero_ready "$ns_router3" "127.0.0.1:8082" 10
@@ -193,9 +207,53 @@ ip netns exec "$ns_host2" ip link del "$h2if.5"
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 with the AC (SID from the underlay)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 with the AC (ordinary tenant path)"
 
+echo ""
+
+# Phase 4: the kernel side of the VRF
+echo "=========================================="
+echo "Phase 4: the kernel VRF table"
+echo "=========================================="
+
+# host2 now encapsulates its traffic to host1 to router1's End.DX4 SID
+# (fc00:1::1), a remote PE's SID that router3 has only in its main table.
+# The packet enters router3 on the enslaved vrf100 port, XDP has no entry
+# for it and passes it on, and the kernel looks it up in vrf100's table.
+print_info "Steering host2 -> host1 to the remote SID fc00:1::1..."
+ip netns exec "$ns_host2" ip -6 route replace fc00:1::1/128 dev "$h2if"
+ip netns exec "$ns_host2" ip -6 neigh replace fc00:1::1 lladdr "$rt3h2_mac" dev "$h2if" nud permanent
+ip netns exec "$ns_host2" ip route replace 172.0.1.1/32 encap seg6 mode encap segs fc00:1::1 dev "$h2if"
+
+# vrf100 was made with `ip link add`, so its table has no route of last
+# resort yet and a miss goes on to the main table.
+test_ping_with_counter "$ns_host2" 172.0.1.1 \
+  "host2 -> remote SID before Vinbero manages vrf100 (falls through to the main table)"
+
+print_info "Adopting vrf100 (vbctl vrf create)..."
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 vrf create \
+  --name vrf100 --table-id 100 > /dev/null
+for af in 4 6; do
+    check "vrf100's table ends in an IPv$af unreachable default" \
+      sh -c "ip netns exec '$ns_router3' ip -$af route show table 100 | grep -q '^unreachable default'"
+done
+
+check_not "host2 -> remote SID with vrf100 managed (stopped in the VRF table)" \
+  ip netns exec "$ns_host2" ping -c 3 -W 1 172.0.1.1
+ip netns exec "$ns_host2" ip route del 172.0.1.1/32
+
+# The return path's kernel seg6 route in table 100 needs the same main-table
+# lookup for its outer header, so Vinbero takes over the encapsulation. The
+# packet comes from the vrf100 AC, and its outer header is looked up in the
+# main table.
+print_info "Encapsulating host2 -> host1 with Vinbero (hv4 create)..."
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
+  --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::1 > /dev/null
+test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero H.Encaps from the vrf100 AC)"
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into the managed vrf100)"
+
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true
 wait $VINBERO_PID 2>/dev/null || true
+rm -f /tmp/vinbero_end_dt4_state.json
 
 echo ""
 echo "=========================================="

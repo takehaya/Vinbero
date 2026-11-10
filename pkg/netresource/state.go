@@ -93,7 +93,10 @@ type ManagedVrf struct {
 	TableID          uint32   `json:"table_id"`
 	Members          []string `json:"members"`
 	EnableL3mdevRule bool     `json:"enable_l3mdev_rule"`
-	Ifindex          uint32   `json:"ifindex"`
+	// NoUnreachableDefault leaves the table without the unreachable default
+	// a create, an adopt and Reconcile otherwise add.
+	NoUnreachableDefault bool   `json:"no_unreachable_default,omitempty"`
+	Ifindex              uint32 `json:"ifindex"`
 }
 
 type ManagedBridge struct {

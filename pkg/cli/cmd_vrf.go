@@ -39,16 +39,18 @@ func vrfCommand() *cli.Command {
 					&cli.UintFlag{Name: "table-id", Required: true, Usage: "Routing table ID"},
 					&cli.StringFlag{Name: "members", Usage: "Member interfaces (comma-separated)"},
 					&cli.BoolFlag{Name: "enable-l3mdev-rule", Usage: "Add l3mdev routing rule"},
+					&cli.BoolFlag{Name: "no-unreachable-default", Usage: "Do not add the unreachable default routes to the table (a miss then goes on to the main table)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					members := splitMembers(c.String("members"))
 					resp, err := clients.Vrf.VrfCreate(context.Background(),
 						connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{
-							Name:             c.String("name"),
-							TableId:          uint32(c.Uint("table-id")),
-							Members:          members,
-							EnableL3MdevRule: c.Bool("enable-l3mdev-rule"),
+							Name:                 c.String("name"),
+							TableId:              uint32(c.Uint("table-id")),
+							Members:              members,
+							EnableL3MdevRule:     c.Bool("enable-l3mdev-rule"),
+							NoUnreachableDefault: c.Bool("no-unreachable-default"),
 						}}}))
 					if err != nil {
 						return err

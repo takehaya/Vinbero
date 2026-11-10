@@ -200,9 +200,10 @@ func (s *VrfServer) createOne(in *v1.Vrf) (*vrf.VRF, *v1.OperationError) {
 		return fail("vrf_id and ifindex are server-assigned and must be unset")
 	}
 	created, err := s.mgr.CreateDevice(in.GetName(), vrf.Device{
-		TableID:          in.GetTableId(),
-		Members:          in.GetMembers(),
-		EnableL3mdevRule: in.GetEnableL3MdevRule(),
+		TableID:              in.GetTableId(),
+		Members:              in.GetMembers(),
+		EnableL3mdevRule:     in.GetEnableL3MdevRule(),
+		NoUnreachableDefault: in.GetNoUnreachableDefault(),
 	}, s.dev)
 	if err != nil {
 		return fail(err.Error())
@@ -742,6 +743,7 @@ func vrfToProto(v vrf.VRF) *v1.Vrf {
 		out.TableId = v.Device.TableID
 		out.Members = v.Device.Members
 		out.EnableL3MdevRule = v.Device.EnableL3mdevRule
+		out.NoUnreachableDefault = v.Device.NoUnreachableDefault
 		out.Ifindex = v.Device.Ifindex
 	}
 	if v.Bridge != nil {

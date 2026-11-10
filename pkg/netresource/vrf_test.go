@@ -98,7 +98,7 @@ func TestCreateDeleteVrf(t *testing.T) {
 		t.Fatalf("LinkAdd dummy: %v", err)
 	}
 
-	ifindex, err := m.CreateVrf("vrf-t", 100, []string{"vrftest0"}, true)
+	ifindex, err := m.CreateVrf("vrf-t", 100, []string{"vrftest0"}, true, false)
 	if err != nil {
 		// EOPNOTSUPP = the kernel has no vrf module (CI loads it via
 		// modprobe; a minimal dev kernel may not ship it at all).
@@ -129,19 +129,19 @@ func TestCreateDeleteVrf(t *testing.T) {
 	// An adopt with unspecified members/l3mdev (the CLI defaults) must MERGE
 	// into the tracked entry, not weaken it: the recorded members and l3mdev
 	// flag survive so a post-reboot Reconcile recreates the full device.
-	if again, err := m.CreateVrf("vrf-t", 100, nil, false); err != nil || again != ifindex {
+	if again, err := m.CreateVrf("vrf-t", 100, nil, false, false); err != nil || again != ifindex {
 		t.Errorf("adopt = (%d, %v), want (%d, nil)", again, err, ifindex)
 	}
 	if vrfs := m.ListVrfs(); len(vrfs) != 1 ||
 		len(vrfs[0].Members) != 1 || vrfs[0].Members[0] != "vrftest0" || !vrfs[0].EnableL3mdevRule {
 		t.Errorf("adopt weakened the state entry: %+v", vrfs)
 	}
-	if _, err := m.CreateVrf("vrf-t", 200, nil, false); err == nil ||
+	if _, err := m.CreateVrf("vrf-t", 200, nil, false, false); err == nil ||
 		!strings.Contains(err.Error(), "table") {
 		t.Errorf("table-mismatch adopt: err = %v, want table error", err)
 	}
 	// Adopting a non-VRF link by name refuses.
-	if _, err := m.CreateVrf("vrftest0", 100, nil, false); err == nil {
+	if _, err := m.CreateVrf("vrftest0", 100, nil, false, false); err == nil {
 		t.Error("adopting a dummy link as VRF: want error")
 	}
 

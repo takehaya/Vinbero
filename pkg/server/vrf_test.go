@@ -62,13 +62,19 @@ type fakeVrfDeviceOps struct {
 	deleted    []string
 	next       uint32
 	deleteHook func() // when set, runs inside DeleteVrf
+	// noUnreachable is the noUnreachableDefault of the last create, by name.
+	noUnreachable map[string]bool
 }
 
-func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev bool) (uint32, error) {
+func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev, noUnreachable bool) (uint32, error) {
 	if f.createErr != nil {
 		return 0, f.createErr
 	}
 	f.created = append(f.created, name)
+	if f.noUnreachable == nil {
+		f.noUnreachable = map[string]bool{}
+	}
+	f.noUnreachable[name] = noUnreachable
 	f.next++
 	return 99 + f.next, nil
 }
@@ -557,6 +563,35 @@ func TestVrfServer_Create(t *testing.T) {
 	}
 	if len(dev.created) != 1 {
 		t.Errorf("rejected creates still hit DeviceOps: %v", dev.created)
+	}
+}
+
+// no_unreachable_default reaches DeviceOps and VrfShow; unset, the device is
+// created with the unreachable default.
+func TestVrfServer_CreateNoUnreachableDefault(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	resp, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{
+			{Name: "vrf-open", TableId: 100, NoUnreachableDefault: true},
+			{Name: "vrf-closed", TableId: 200},
+		},
+	}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Fatalf("VrfCreate: %v %v", err, resp.Msg.GetErrors())
+	}
+	if !dev.noUnreachable["vrf-open"] || dev.noUnreachable["vrf-closed"] {
+		t.Errorf("DeviceOps saw %v, want vrf-open opted out and vrf-closed not", dev.noUnreachable)
+	}
+	show, err := s.VrfShow(context.Background(), connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		t.Fatalf("VrfShow: %v", err)
+	}
+	got := map[string]bool{}
+	for _, v := range show.Msg.GetVrfs() {
+		got[v.GetName()] = v.GetNoUnreachableDefault()
+	}
+	if !got["vrf-open"] || got["vrf-closed"] {
+		t.Errorf("VrfShow no_unreachable_default = %v, want vrf-open only", got)
 	}
 }
 

@@ -22,12 +22,12 @@ pod netns                              node (host netns)
 ```
 
 - pod 側には IPAM のアドレスを /32 で付けます。IPAM が返した prefix (例: /16) と IPAM の `routes` は、どこにも付けない gateway `169.254.1.1` 経由の経路にします (`onlink`)。gateway の neighbour は host veth の MAC で permanent に置くので、pod は ARP を出しません。primary network の default route には触れません。IPAM が `0.0.0.0/0` を返すと ADD は失敗し、primary の経路と同じ宛先の経路も置き換えずに失敗させます
-- host 側の veth は VRF device に enslave します。同じ node の pod 間は kernel の VRF table で折り返します
+- host 側の veth は VRF device に enslave します。同じ node の pod 間は kernel の VRF table で折り返します。VRF は vinberod が作る (plugin の `VrfCreate` か config の `vrfs.entries[]`) ので、table は IPv4 / IPv6 の unreachable default で終わります ([vrf.md](vrf.md#kernel-device-facet))。pod が net1 に送った宛先が VRF table にも headend の表にも無ければ、node の kernel が止めて ICMP unreachable を返し、main table には進みません
 - host 側に pod の /32 を `proto static` で VRF table に入れます。vinberod の route watcher は redistribute `static` が RTPROT_STATIC だけを拾うので、これが VPNv4 広告の起点になります。pod の permanent neighbour も入れ、End.DT4 の decap 後の `bpf_fib_lookup` が NO_NEIGH に落ちないようにします
 - host veth は `DeviceAttach` で XDP / TC に載せ、`VrfAcAdd` で VRF の ingress AC にします
 - MTU は既定で 1436 です。1500 の underlay から外側 IPv6 header (40) と SID 1 つの SRH (8 + 16) を引いた値です
 
-pod から別 node の pod への packet は host veth の XDP で headend (`headend_v4_map`、BGP で学んだ /32) に当たり、SRv6 で encap されて underlay へ redirect されます。相手の node では End.DT4 が decap し、VRF table の /32 と permanent neighbour で host veth へ redirect します。
+pod から別 node の pod への packet は host veth の XDP で headend (`headend_v4_map`、BGP で学んだ /32) に当たり、SRv6 で encap されて underlay へ redirect されます。host veth は VRF の AC なので、外側の IPv6 ヘッダの経路は VRF table ではなく main table で引きます。相手の node では End.DT4 が decap し、VRF table の /32 と permanent neighbour で host veth へ redirect します。
 
 ## network configuration
 
