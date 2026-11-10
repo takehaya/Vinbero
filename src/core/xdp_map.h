@@ -73,22 +73,22 @@ struct {
 } aux_owner_map SEC(".maps");
 
 // Headend v4 map (IPv4 LPM Trie)
-// Key: IPv4 prefix (trigger_prefix)
+// Key: {vrf_id, IPv4 trigger prefix} (struct headend_v4_key)
 // Value: Headend configuration
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __type(key, struct lpm_key_v4);
+    __type(key, struct headend_v4_key);
     __type(value, struct headend_entry);
     __uint(max_entries, 1024);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } headend_v4_map SEC(".maps");
 
 // Headend v6 map (IPv6 LPM Trie)
-// Key: IPv6 prefix (trigger_prefix)
+// Key: {vrf_id, IPv6 trigger prefix} (struct headend_v6_key)
 // Value: Headend configuration
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __type(key, struct lpm_key_v6);
+    __type(key, struct headend_v6_key);
     __type(value, struct headend_entry);
     __uint(max_entries, 1024);
     __uint(map_flags, BPF_F_NO_PREALLOC);
@@ -261,14 +261,14 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, struct lpm_key_v4);
+    __type(key, struct headend_v4_key);
     __type(value, struct aux_owner);
     __uint(max_entries, 1024);
 } headend_v4_owner_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, struct lpm_key_v6);
+    __type(key, struct headend_v6_key);
     __type(value, struct aux_owner);
     __uint(max_entries, 1024);
 } headend_v6_owner_map SEC(".maps");

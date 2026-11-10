@@ -217,6 +217,14 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 			}
 			res.Pruned++
 		}
+		n, err := pruneUnlisted(ops, x.af, owner)
+		res.Pruned += n
+		if err != nil {
+			for _, pending := range sets {
+				releaseUnwritten(leases, pending.af, pending.keys, pending.current, owner)
+			}
+			return res, fmt.Errorf("apply %s set: %w", x.af, err)
+		}
 	}
 	for i, x := range sets {
 		for j, prefix := range x.keys {
@@ -269,7 +277,26 @@ func PruneOwner(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, af Fam
 		}
 		pruned++
 	}
-	return pruned, nil
+	n, err := pruneUnlisted(ops, af, owner)
+	return pruned + n, err
+}
+
+// pruneUnlisted removes what owner holds under keys the prefix-keyed
+// inventory cannot name: native maps key the entries by {vrf_id, prefix}
+// and the inventory covers the global VRF only. An owner pruned or
+// re-applied this way leaves nothing behind in another VRF.
+func pruneUnlisted(ops MapOps, af Family, owner bpf.OwnerTag) (int, error) {
+	unlisted, ok := ops.(interface {
+		PruneUnlistedHeadendV4(bpf.OwnerTag) (int, error)
+		PruneUnlistedHeadendV6(bpf.OwnerTag) (int, error)
+	})
+	if !ok {
+		return 0, nil
+	}
+	if af == AFv6 {
+		return unlisted.PruneUnlistedHeadendV6(owner)
+	}
+	return unlisted.PruneUnlistedHeadendV4(owner)
 }
 
 // releaseAll frees the leases on keys that were never written, so a lease

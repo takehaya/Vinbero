@@ -28,14 +28,25 @@ BPF_CFLAGS ?= -O2 -g -Wall -Werror -target bpf \
               -I$(VINBERO_CORE_ROOT) \
               $(BPF_SYS_INC)
 
+# clang writes a .d file next to each object listing the headers it read,
+# so a change to an SDK or core header rebuilds the plugins that use it.
+BPF_DEPFLAGS ?= -MMD -MP
+
 PLUGIN_SRC ?= $(wildcard *.c)
 PLUGIN_OBJ ?= $(PLUGIN_SRC:.c=.o)
+PLUGIN_DEP := $(PLUGIN_OBJ:.o=.d)
 
 .PHONY: all clean
 all: $(PLUGIN_OBJ)
 
 %.o: %.c
-	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
+	$(BPF_CLANG) $(BPF_CFLAGS) $(BPF_DEPFLAGS) -c $< -o $@
+
+# A changed build template rebuilds too, including objects built before
+# they had a .d file.
+$(PLUGIN_OBJ): $(MAKEFILE_LIST)
+
+-include $(PLUGIN_DEP)
 
 clean:
-	rm -f $(PLUGIN_OBJ)
+	rm -f $(PLUGIN_OBJ) $(PLUGIN_DEP)

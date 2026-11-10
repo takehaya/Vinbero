@@ -55,12 +55,23 @@
  *       ecmp_group_map / ecmp_path_map / ecmp_live_map declarations
  *       (all read-only for plugins; ecmp_live_map is written by the
  *       userspace prober only).
+ *   v5: headend_v4_map / headend_v6_map are keyed by {vrf_id, prefix}:
+ *       struct headend_v4_key (12 bytes) and struct headend_v6_key
+ *       (24 bytes) replace struct lpm_key_v4 / lpm_key_v6 there. The
+ *       key is {prefixlen = 32 + prefix length, instance = vrf_id
+ *       big-endian, addr}; entries live in vrf_id 0, so a full-address
+ *       lookup sets prefixlen 64 (v4) or 160 (v6) and instance to 0.
+ *       struct lpm_key_v4 is gone; lpm_key_v6 stays the sid_function_map
+ *       key. BREAKING: plugin ELFs compiled against v4 or older headers
+ *       declare the old key sizes and fail PluginRegister (BTF key type
+ *       check, and the MapReplacements compatibility check) — recompile
+ *       against the v5 headers.
  *
  * Version bumps are additive unless a bump note above says BREAKING.
  * Plugins compiled against an older SDK remain valid across additive
  * bumps only.
  */
-#define VINBERO_SDK_VERSION 4
+#define VINBERO_SDK_VERSION 5
 
 /*
  * VINBERO_PLUGIN(name) — recommended entry macro for plugin authors.

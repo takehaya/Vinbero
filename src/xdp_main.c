@@ -7,6 +7,12 @@
 static __always_inline int process_l3(struct xdp_md *ctx, __u16 l3_offset, __u16 proto,
                                       __u32 vrf_id)
 {
+    // The headend tables are keyed by {vrf_id, prefix}, but every entry is
+    // written in the global VRF and every packet is matched there,
+    // whatever its ingress VRF. Passing vrf_id here instead is what makes
+    // the headend lookup per-VRF.
+    const __u32 headend_vrf = 0;
+
     if (proto == bpf_htons(ETH_P_IPV6)) {
         struct ethhdr *eth;
         struct ipv6hdr *ip6h;
@@ -30,14 +36,14 @@ static __always_inline int process_l3(struct xdp_md *ctx, __u16 l3_offset, __u16
 
         // Stage 3: Headend encapsulation
         REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
-        return process_headend_v6(ctx, eth, ip6h, l3_offset);
+        return process_headend_v6(ctx, eth, ip6h, l3_offset, headend_vrf);
     }
 
     if (proto == bpf_htons(ETH_P_IP)) {
         struct ethhdr *eth;
         struct iphdr *iph;
         REDERIVE_ETH_IP4(ctx, l3_offset, eth, iph);
-        return process_headend_v4(ctx, eth, iph, l3_offset);
+        return process_headend_v4(ctx, eth, iph, l3_offset, headend_vrf);
     }
 
     return XDP_PASS;

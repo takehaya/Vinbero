@@ -3,6 +3,8 @@ package bpf
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -135,8 +137,9 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 			LogSizeStart: logSize,
 		}
 	}
+	pinPath := ""
 	if cfg != nil && cfg.Setting.PinMaps.Enabled {
-		pinPath := cfg.Setting.PinMaps.Path
+		pinPath = cfg.Setting.PinMaps.Path
 		if pinPath == "" {
 			pinPath = "/sys/fs/bpf/vinbero"
 		}
@@ -157,6 +160,9 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 		if errors.As(err, &verr) {
 			fmt.Printf("%+v\n", verr)
 		}
+		if pinPath != "" && errors.Is(err, ebpf.ErrMapIncompatible) {
+			return nil, incompatiblePinError(spec, pinPath, err)
+		}
 		return nil, fmt.Errorf("fail to load and assign bpf objects: %w", err)
 	}
 
@@ -167,6 +173,32 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 	}
 
 	return objs, nil
+}
+
+// incompatiblePinError explains a load refused because a map pinned under
+// pinPath does not match the map this build declares: its type, key size,
+// value size, max_entries or flags differ. It names every such map. The
+// pins are left in place: their entries cannot be carried over to another
+// layout, so starting over is the operator's decision.
+func incompatiblePinError(spec *ebpf.CollectionSpec, pinPath string, err error) error {
+	var names []string
+	for _, name := range pinnedControlMaps {
+		ms, ok := spec.Maps[name]
+		if !ok {
+			continue
+		}
+		m, lerr := ebpf.LoadPinnedMap(filepath.Join(pinPath, name), nil)
+		if lerr != nil {
+			continue
+		}
+		if ms.Compatible(m) != nil {
+			names = append(names, name)
+		}
+		_ = m.Close()
+	}
+	return fmt.Errorf("pinned maps in %s do not match this build (%s): "+
+		"stop vinberod, remove the pin directory and apply the configuration again: %w",
+		pinPath, strings.Join(names, ", "), err)
 }
 
 // populateProgArrays registers all tail call target programs into their

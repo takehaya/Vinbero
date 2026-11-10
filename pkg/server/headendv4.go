@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -119,6 +120,9 @@ func (s *Headendv4Server) Headendv4Get(
 ) (*connect.Response[v1.Headendv4GetResponse], error) {
 	entry, err := s.mapOps.GetHeadendV4(req.Msg.TriggerPrefix)
 	if err != nil {
+		if errors.Is(err, bpf.ErrInvalidHeadendPrefix) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
 		return nil, connect.NewError(connect.CodeNotFound, err)
 	}
 

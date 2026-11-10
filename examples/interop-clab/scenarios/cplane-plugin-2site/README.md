@@ -49,8 +49,9 @@ WASM registrations without any write capability cannot import the apply function
 Each is also given a scope, which says where that capability may be
 exercised. pe-tokyo's plugin may install headend entries only inside
 10.2.0.0/16, so it cannot write a longer prefix over traffic this node
-already forwards -- the headend maps are keyed on the destination alone, so
-that would win on longest match without ever touching the entry it shadows.
+already forwards -- every headend entry sits in the one global VRF and is
+matched on its destination, so that would win on longest match without ever
+touching the entry it shadows.
 pe-osaka's plugin may originate only into `vrf-cust`, allocate only from
 `LOC2`, and point a SID only at slot 32. The route distinguisher and route
 targets come from the VRF's binding rather than from the plugin, because

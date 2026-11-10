@@ -281,6 +281,62 @@ func TestValidatePluginCollection_BTF_MapValueTypeMismatch(t *testing.T) {
 	}
 }
 
+// BTF: a plugin built against headers whose headend key is the
+// prefix-only lpm_key_v4 declares headend_v4_map with the wrong key type.
+// It must be refused with a message that names the expected type; the
+// current key type and a key without a name pass.
+func TestValidatePluginCollection_BTF_HeadendKeyType(t *testing.T) {
+	prog := buildSpec("xdp_entry", ebpf.XDP, asm.Instructions{
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	for _, tc := range []struct {
+		name    string
+		mapName string
+		key     btf.Type
+		keySize uint32
+		want    string // substring of the error; "" = accepted
+	}{
+		{"v4 prefix-only key", "headend_v4_map", &btf.Struct{Name: "lpm_key_v4"}, 8, "headend_v4_key"},
+		{"v6 SID key", "headend_v6_map", &btf.Struct{Name: "lpm_key_v6"}, 20, "headend_v6_key"},
+		{"v4 current key", "headend_v4_map", &btf.Struct{Name: "headend_v4_key"}, 12, ""},
+		{"v6 current key", "headend_v6_map", &btf.Typedef{Name: "k", Type: &btf.Struct{Name: "headend_v6_key"}}, 24, ""},
+		{"anonymous key", "headend_v4_map", &btf.Struct{}, 12, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := &ebpf.CollectionSpec{
+				Programs: map[string]*ebpf.ProgramSpec{"xdp_entry": prog},
+				Maps: map[string]*ebpf.MapSpec{
+					tc.mapName: {
+						Name:       tc.mapName,
+						Type:       ebpf.LPMTrie,
+						KeySize:    tc.keySize,
+						ValueSize:  208,
+						MaxEntries: 1024,
+						Flags:      1,
+						Key:        tc.key,
+						Value:      &btf.Struct{Name: "headend_entry"},
+					},
+				},
+			}
+			_, err := ValidatePluginCollection(spec, "xdp_entry", nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("rejected: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("accepted a headend map with the wrong key type")
+			}
+			if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "key type") {
+				t.Errorf("error should name the key type %q, got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // validatePluginAuxType short-circuits when spec.Types is nil. Covers the
 // stripped-BTF fallback path so a plugin without BTF can still register.
 func TestValidatePluginAuxType_NilTypes(t *testing.T) {

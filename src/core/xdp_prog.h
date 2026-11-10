@@ -84,16 +84,28 @@ struct vlan_hdr {
 #define IPPROTO_ETHERNET 143  // Ethernet in SRv6 (RFC 8986)
 #endif
 
-// LPM key for IPv4 prefix matching
-struct lpm_key_v4 {
-    __u32 prefixlen;              // Prefix length (0-32)
-    __u8 addr[IPV4_ADDR_LEN];     // IPv4 address (4 bytes)
-} __attribute__((packed));
-
-// LPM key for IPv6 prefix matching
+// LPM key for IPv6 prefix matching (sid_function_map)
 struct lpm_key_v6 {
     __u32 prefixlen;              // Prefix length (0-128)
     __u8 addr[IPV6_ADDR_LEN];     // IPv6 address (16 bytes)
+} __attribute__((packed));
+
+// Keys of headend_v4_map / headend_v6_map and their owner maps: a trigger
+// prefix inside one VRF. instance comes first in the matched data, so the
+// VRF always matches in full before the address prefix is compared:
+// prefixlen = HEADEND_KEY_VRF_BITS + the prefix length of the address.
+#define HEADEND_KEY_VRF_BITS 32
+
+struct headend_v4_key {
+    __u32 prefixlen;              // 32 + IPv4 prefix length (32-64)
+    __u8 instance[4];             // vrf_id, big-endian (0 = global VRF)
+    __u8 addr[IPV4_ADDR_LEN];
+} __attribute__((packed));
+
+struct headend_v6_key {
+    __u32 prefixlen;              // 32 + IPv6 prefix length (32-160)
+    __u8 instance[4];             // vrf_id, big-endian (0 = global VRF)
+    __u8 addr[IPV6_ADDR_LEN];
 } __attribute__((packed));
 
 // Key for L2 headend map (port + VLAN)

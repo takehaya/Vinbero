@@ -339,22 +339,33 @@ func (m *MapOperations) ListMupUplinkV4Owners() (map[MupUplinkV4Key]OwnerTag, er
 	return listEntryOwners[MupUplinkV4Key](m.mupUplinkV4Owners)
 }
 
-// ListHeadendV4Owners includes reservations left after partial deletion.
+// ListHeadendV4Owners lists the owners of the global VRF (vrf_id 0) by
+// trigger prefix, including reservations left after partial deletion.
 func (m *MapOperations) ListHeadendV4Owners() (map[string]OwnerTag, error) {
-	owners, err := listEntryOwners[LpmKeyV4](m.headendV4Owners)
+	owners, err := listEntryOwners[HeadendV4Key](m.headendV4Owners)
 	result := make(map[string]OwnerTag, len(owners))
 	for key, owner := range owners {
-		result[lpmKeyV4ToString(&key)] = owner
+		if key.vrf() != HeadendLookupVRF {
+			continue
+		}
+		if prefix, ok := key.prefix(); ok {
+			result[prefix] = owner
+		}
 	}
 	return result, err
 }
 
 // ListHeadendV6Owners is the IPv6 counterpart of ListHeadendV4Owners.
 func (m *MapOperations) ListHeadendV6Owners() (map[string]OwnerTag, error) {
-	owners, err := listEntryOwners[LpmKeyV6](m.headendV6Owners)
+	owners, err := listEntryOwners[HeadendV6Key](m.headendV6Owners)
 	result := make(map[string]OwnerTag, len(owners))
 	for key, owner := range owners {
-		result[lpmKeyV6ToString(&key)] = owner
+		if key.vrf() != HeadendLookupVRF {
+			continue
+		}
+		if prefix, ok := key.prefix(); ok {
+			result[prefix] = owner
+		}
 	}
 	return result, err
 }

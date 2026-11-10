@@ -22,7 +22,7 @@ flowchart TD
     PKT --> FD
     FD --> Q
     Q -->|"IPv6 DA = local SID<br/>(vrf_id 0 の入口のみ)"| SIDT["sid_function_map (LPM)<br/>SID prefix → behavior + aux_index"]
-    Q -->|"encap 対象の IP"| HE["headend_v4/v6_map (LPM)<br/>prefix → H.Encaps エントリ / gate"]
+    Q -->|"encap 対象の IP"| HE["headend_v4/v6_map (LPM)<br/>{vrf_id 0, prefix} → H.Encaps エントリ / gate"]
     Q -->|"L2 frame"| L2["headend_l2_map / fdb_map"]
 
     SIDT --> AUX["sid_aux_map (aux_index)<br/>behavior ごとのパラメータ"]
@@ -40,7 +40,7 @@ flowchart TD
 
 `sid_function_map` を引くのは vrf_id 0 のパケットだけです。tenant VRF の access circuit から来た IPv6 パケットは、宛先がこのノードの local SID でも SID の表を引かずに headend の lookup へ進みます。このゲートが守る範囲と、kernel の VRF table が受け持つ残りは [vrf.md](vrf.md) の「local SID と AC」にあります。local SID 宛のパケットは `sid_function_map` で behavior を引き、`sid_aux_map` に置いた behavior ごとのパラメータで配送先が決まります。decap 系 (End.DT4/DT6/DT46) は aux の vrf_ifindex が指す kernel VRF へ渡し、そこからは kernel の per-VRF FIB が転送します。End.DT2/DT2M は bridge domain へ、End や End.X や GTP behavior は global の next hop へ向かいます。uSID の uN と uA も同じ `sid_function_map` に載りますが、これらは /128 でなく locator prefix (/48 と /64) のエントリで、DA を書き換えながら転送します。詳細は [usid.md](usid.md) を参照してください。
 
-encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。エントリが H.Encaps なら service SID へ encap し、color が付いていれば `sr_policy_map` を policy_id で引いて transport SID を前置します。エントリが MUP の gate なら、front door で決めた vrf_id を使って `mup_uplink_v4/v6_map` を {vrf_id, endpoint, TEID} で引いて direct SID を得ます。同じ N3 endpoint と TEID 空間を複数の VRF が共有しても、vrf_id がキーに入るので衝突しません。
+encap 対象のパケットは `headend_v4/v6_map` を {vrf_id, prefix} で引きます。key は vrf_id を持ちますが、entry はすべて vrf_id 0 に書かれ、lookup も入口の VRF に関係なく vrf_id 0 で行います。そのため headend の prefix はノード共通です。エントリが H.Encaps なら service SID へ encap し、color が付いていれば `sr_policy_map` を policy_id で引いて transport SID を前置します。エントリが MUP の gate なら、front door で決めた vrf_id を使って `mup_uplink_v4/v6_map` を {vrf_id, endpoint, TEID} で引いて direct SID を得ます。同じ N3 endpoint と TEID 空間を複数の VRF が共有しても、vrf_id がキーに入るので衝突しません。
 
 ## スコープ軸
 
@@ -70,7 +70,7 @@ encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。
 |------|------|------|------|------|------|
 | sid_function_map | IPv6 SID prefix (LPM) | behavior + aux_index | global | eBPF | SidFunctionService |
 | sid_aux_map | aux_index | behavior パラメータ (vrf_ifindex / bd / GTP args ほか) | global | eBPF | SidFunctionService |
-| headend_v4/v6_map | IP prefix (LPM) | H.Encaps エントリ / gate / policy_id / group_id | global | eBPF | Headend*Service / BGP applier |
+| headend_v4/v6_map | {vrf_id, IP prefix} (LPM、vrf_id は常に 0) | H.Encaps エントリ / gate / policy_id / group_id | global | eBPF | Headend*Service / BGP applier |
 | ecmp_group_map / ecmp_path_map | group_id / {group_id, path_index} | weight 付き path 集合 (headend_entry) | global | eBPF | control plane (ECMP group) |
 | ecmp_live_map | group_id | liveness bitmap | global | eBPF | prober |
 | sr_policy_map | policy_id | transport SID list | global | eBPF | SrPolicyService / BGP applier |

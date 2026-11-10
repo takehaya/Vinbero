@@ -20,6 +20,11 @@ Rebuild data-plane plugins that read the FDB against these headers.
 Use `fdb_read_forward()` for one coherent forwarding snapshot and the lookup key's BD ID for peer lookups; separate field loads can mix concurrent MAC-learning updates.
 The FDB map layout remains 32 bytes, so existing pinned maps do not need migration.
 
+`headend_v4_map` and `headend_v6_map` are keyed by `struct headend_v4_key` and `struct headend_v6_key`: `{prefixlen, instance, addr}`, where `instance` is the vrf_id in big-endian and `prefixlen` counts its 32 bits ahead of the address prefix.
+Every headend entry is in vrf_id 0, so a lookup on a packet's destination uses `prefixlen` 64 (IPv4) or 160 (IPv6) with `instance` 0.
+`<vinbero/maps.h>` declares every shared map, so build data-plane plugins against these headers (`VINBERO_SDK_VERSION` 5): registration refuses an ELF whose headend map key has another type or size.
+See [plugin-sdk.md](../docs/design/ja/plugin-sdk.md#headend-map-の-key) for a lookup example and the raw key layout.
+
 ## Slot ranges
 
 | Map              | Builtin | Reserved | Plugin     |

@@ -20,7 +20,7 @@ Vinbero は XDP メインから各処理ステージの PROG_ARRAY へ `bpf_tail
 |---|---|
 | `<vinbero/plugin.h>` | 主エントリ。`VINBERO_PLUGIN(name)`、`tailcall_ctx_read()`、`tailcall_epilogue()` |
 | `<vinbero/maps.h>`   | 共有eBPFマップ宣言 (`sid_function_map`, `fdb_map`, `stats_map`, ...) |
-| `<vinbero/types.h>`  | `sid_function_entry`、`headend_entry`、`sid_aux_entry` の公開型 |
+| `<vinbero/types.h>`  | `sid_function_entry`、`headend_entry`、`sid_aux_entry`、`headend_v4_key` / `headend_v6_key` の公開型 |
 | `<vinbero/helpers.h>` | verifier対策マクロ (`TAILCALL_BOUND_L3OFF`, `CALL_WITH_CONST_L3`, `TAILCALL_PARSE_SRH`, `TAILCALL_AUX_LOOKUP`) |
 
 `<vinbero/plugin.h>` は他の必要ヘッダを間接 include するので、普通は `<vinbero/plugin.h>` と `<vinbero/maps.h>` だけで十分です。
@@ -127,6 +127,33 @@ vinbero plugin validate --prog plugin.o --program my_plugin
 | **Read-Write** (13 本) | `scratch_map`, `stats_map`, `slot_stats_endpoint`, `slot_stats_headend_v4`, `slot_stats_headend_v6`, `slot_stats_headend_l2`, `slot_stats_service_return`, `sid_endpoint_progs`, `headend_v4_progs`, `headend_v6_progs`, `headend_l2_progs`, `ad_cache_map`, `service_return_progs` | 統計 / scratch / cache / PROG_ARRAY | 書き込み可 (ただし `slot_stats_*` は epilogue 経由、PROG_ARRAY は `bpf_tail_call` 専用) |
 
 プラグイン ELF が RO カテゴリのマップに write 命令 (`BPF_ST` / `BPF_STX` / `BPF_ATOMIC`) を含んでいると、Phase 2 の asm レベル静的検証 (`pkg/bpf/plugin_validate.go::checkROWrites`) が **load 前に検出**します。検査は `bpf_map_lookup_elem` の戻り値と register 間の移動に加え、BPF-to-BPF の helper 関数へ register 引数として直接渡した pointer を callee の straight-line code 内で追跡し、分岐先で追跡を止めます。entry body で書き込み先レジスタを解決できない場合は保守的に reject しますが、subprogram 内で未解決の書き込みは対象外です。CLI (`vbctl plugin validate`) は常に enforce で動き、サーバー側は段階導入のため `settings.validate.ro_enforce` で `warn` (audit ログのみ、デフォルト) と `enforce` (RPC 拒否) を切替できます。BPF stack (`R10` = frame pointer) への書き込みはローカル変数のためのもので map 書込ではないので除外されます。
+
+### headend map の key
+
+`headend_v4_map` / `headend_v6_map` は `{vrf_id, prefix}` を key にする LPM trie です。key の型は `struct headend_v4_key` (12 byte) と `struct headend_v6_key` (24 byte) です。
+
+```c
+struct headend_v4_key {
+    __u32 prefixlen;   // HEADEND_KEY_VRF_BITS (32) + IPv4 prefix 長
+    __u8 instance[4];  // vrf_id, big-endian
+    __u8 addr[4];
+} __attribute__((packed));
+// headend_v6_key は addr[16]、prefixlen は 32 + IPv6 prefix 長
+```
+
+LPM の比較対象は `instance` から始まるので、vrf_id の 32 bit が必ず先に完全一致し、その後で宛先の prefix を比べます。`/p` の entry は `prefixlen = 32 + p` で格納されます。全 entry は vrf_id 0 (global VRF) にあり、data plane も入口の VRF に関係なく vrf_id 0 で引きます。プラグインがパケットの宛先で引く場合も同じにします。
+
+```c
+struct headend_v4_key key = { .prefixlen = HEADEND_KEY_VRF_BITS + 32 };
+__u32 vrf = bpf_htonl(0);
+__builtin_memcpy(key.instance, &vrf, sizeof(key.instance));
+__builtin_memcpy(key.addr, &iph->daddr, sizeof(key.addr));
+struct headend_entry *he = bpf_map_lookup_elem(&headend_v4_map, &key);
+```
+
+`bpftool map dump` で見える raw key もこの形です。little-endian のホストで vrf_id 0 の `10.1.2.0/24` は `38 00 00 00 00 00 00 00 0a 01 02 00` (prefixlen 56)、`2001:db8::/64` は prefixlen 96 です。`vbctl headend-v4 list` などの API は prefix 長をそのまま (`/24`、`/64`) 表示します。
+
+この key は `VINBERO_SDK_VERSION` 5 の header で定義されています。登録時の検証は、プラグインが宣言した `headend_v4_map` / `headend_v6_map` の BTF key 型名が `headend_v4_key` / `headend_v6_key` であることを確かめ、違えば header の更新を促すエラーで拒否します。BTF の無い ELF でも、key サイズが合わなければロード時の map 差し替え (`MapReplacements`) が拒否します。`<vinbero/maps.h>` は共有マップをすべて宣言するので、これを include するプラグインは v5 の header でビルドし直してください。
 
 ### プラグイン固有マップ
 

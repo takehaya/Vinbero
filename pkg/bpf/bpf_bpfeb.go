@@ -193,6 +193,20 @@ type BpfHeadendL2Key struct {
 	Pad     [2]uint8
 }
 
+type BpfHeadendV4Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Instance  [4]uint8
+	Addr      [4]uint8
+}
+
+type BpfHeadendV6Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Instance  [4]uint8
+	Addr      [16]uint8
+}
+
 type BpfIngressAcKey struct {
 	_       structs.HostLayout
 	Ifindex uint32
@@ -206,12 +220,6 @@ type BpfIngressPolicy struct {
 	DefaultDeny uint8
 	DenyAction  uint8
 	Pad         uint8
-}
-
-type BpfLpmKeyV4 struct {
-	_         structs.HostLayout
-	Prefixlen uint32
-	Addr      [4]uint8
 }
 
 type BpfLpmKeyV6 struct {
