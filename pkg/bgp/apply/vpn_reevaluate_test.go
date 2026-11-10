@@ -64,17 +64,19 @@ func (r *fakeRIB) deliver(ev bgp.RouteEvent) {
 
 // replay is what the daemon hands the server as its loc-rib replay.
 func (r *fakeRIB) replay(families []bgp.Family) error {
-	err := r.a.ReplayAndReconcile(func() error {
+	err := r.a.ReplayAndReconcile(func(scope apply.ReplayScope) error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		for _, ev := range r.routes {
-			for _, fam := range families {
-				if ev.Family == fam {
-					r.a.Apply(ev)
+		return scope(func() error {
+			for _, ev := range r.routes {
+				for _, fam := range families {
+					if ev.Family == fam {
+						r.a.Apply(ev)
+					}
 				}
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	r.done <- struct{}{}
 	return err
@@ -227,6 +229,22 @@ func (l *vpnLab) addRT(vrf, rt string) {
 
 // programmed reports whether prefix is in the data plane, failing the test if
 // it is there with an encapsulation source other than wantSrc.
+// eventually waits for cond, read with the applier's locks held, so that a
+// retry running on the replayer's goroutine is not raced.
+func (l *vpnLab) eventually(what string, cond func() bool) {
+	l.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ok := false
+		l.rib.a.Locked(func() { ok = cond() })
+		if ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	l.t.Fatalf("timed out waiting: %s", what)
+}
+
 func (l *vpnLab) programmed(prefix string, wantSrc netip.Addr) bool {
 	l.t.Helper()
 	trigger, ok := l.dp.HeadendV4(prefix)
@@ -478,8 +496,8 @@ func TestEVPNRouteBeforeSourceLocator(t *testing.T) {
 }
 
 // A route write that fails when the source locator is registered is logged,
-// the RPC still succeeds, and the replay the registration requests retries
-// until the route is written.
+// the RPC still succeeds, and the tracked pass is retried until the route is
+// written. The route is tracked, so the retry does not read the loc-rib.
 func TestVPNSourceLocatorWriteFailureConverges(t *testing.T) {
 	l := newVPNLab(t)
 	l.rib.deliver(importedRoute)
@@ -489,9 +507,12 @@ func TestVPNSourceLocatorWriteFailureConverges(t *testing.T) {
 	if n := l.logs.FilterMessageSnippet("after the source locator was registered failed").Len(); n != 1 {
 		t.Errorf("failed write warnings = %d, want 1", n)
 	}
-	l.replayed() // the retry, after the replayer's backoff
-	if !l.programmed("10.1.0.0/24", loc2Src) {
-		t.Fatal("route not written after the retry")
+	// The retry is the tracked pass, after the replayer's backoff.
+	l.eventually("route written after the retry", func() bool { return l.programmed("10.1.0.0/24", loc2Src) })
+	select {
+	case <-l.rib.done:
+		t.Error("a failed tracked write replayed the loc-rib")
+	default:
 	}
 }
 

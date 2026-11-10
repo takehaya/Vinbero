@@ -71,7 +71,7 @@ func waitReplayerIdle(t *testing.T, r *vpnReplayer) {
 }
 
 func newTestReplayer(f *fakeVPNReplay) *vpnReplayer {
-	r := newVPNReplayer(f.replay, nil)
+	r := newVPNReplayer(f.replay, nil, nil)
 	r.retryMin, r.retryMax = time.Millisecond, 2*time.Millisecond
 	return r
 }

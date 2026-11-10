@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"go.uber.org/zap"
@@ -173,7 +174,8 @@ func checkEVPNSource(t *testing.T, fh *fakeHeadend, want netip.Addr) {
 func TestReconcileTrackedEVPNMoved(t *testing.T) {
 	a, fh, locs, fp, routes := evpnSourceLab(t)
 	before := snapshotDP(fh)
-	remote := maps.Clone(fh.bdPeerRemoteSrc)
+	reverse := maps.Clone(fh.reverse)
+	reverseWrites := fh.reverseWrites
 	esis := maps.Clone(fh.bdPeerESI)
 	registers := fp.registers
 
@@ -198,8 +200,11 @@ func TestReconcileTrackedEVPNMoved(t *testing.T) {
 			t.Errorf("%s was written again; a source change must not touch the FDB", key)
 		}
 	}
-	if !maps.Equal(remote, fh.bdPeerRemoteSrc) {
-		t.Errorf("reverse keys changed: %v, want %v", fh.bdPeerRemoteSrc, remote)
+	if !maps.Equal(reverse, fh.reverse) {
+		t.Errorf("reverse map changed: %v, want %v", fh.reverse, reverse)
+	}
+	if n := fh.reverseWrites - reverseWrites; n != 0 {
+		t.Errorf("source move wrote the reverse map %d times; nothing in it depends on the local source", n)
 	}
 	if !maps.Equal(esis, fh.bdPeerESI) {
 		t.Errorf("peer ESIs changed: %v, want %v", fh.bdPeerESI, esis)
@@ -228,11 +233,20 @@ func TestReconcileTrackedEVPNUnchanged(t *testing.T) {
 	}
 }
 
+// groupMembers lists the member SIDs of a group.
+func groupMembers(fh *fakeHeadend, group uint32) []string {
+	var out []string
+	for _, p := range fh.ecmpGroups[group] {
+		out = append(out, netip.AddrFrom16(p.Entry.Segments[0]).String())
+	}
+	slices.Sort(out)
+	return out
+}
+
 // While the source locator is gone, a membership change on an aliased
-// segment cannot be written. The segment keeps forwarding through the group
-// it has, with no error logged, and the change is written with the new
-// source once the locator is back.
-func TestEVPNAliasingKeptWhileSourceLocatorGone(t *testing.T) {
+// segment is still written, with the source the group already carries, and
+// without an error. Once the locator is back the group takes its source.
+func TestEVPNAliasingMemberAddedWhileSourceLocatorGone(t *testing.T) {
 	a, fh, locs, _, _ := evpnSourceLab(t)
 	core, logs := observer.New(zapcore.WarnLevel)
 	a.logger = zap.New(core)
@@ -244,9 +258,10 @@ func TestEVPNAliasingKeptWhileSourceLocatorGone(t *testing.T) {
 	}
 	a.Apply(perESAD("fd00::5", aliasESI, false))
 	a.Apply(perEVIAD("65000:100:5", "fd00::5", "fd00:5:5:ad::", aliasESI))
-	if n := len(fh.ecmpGroups[group]); n != 2 {
-		t.Errorf("group holds %d members while the locator is gone, want the 2 it had", n)
+	if got := groupMembers(fh, group); len(got) != 3 {
+		t.Errorf("group members while the locator is gone = %v, want 3", got)
 	}
+	checkEVPNSource(t, fh, netip.MustParseAddr("fd00:1:1::"))
 	if _, es := esPeerOf(t, fh); es.GroupId != group {
 		t.Errorf("ES peer points at group %d, want %d", es.GroupId, group)
 	}
@@ -259,10 +274,27 @@ func TestEVPNAliasingKeptWhileSourceLocatorGone(t *testing.T) {
 
 	addTestLocator(t, locs, "fd00:9:9::/48")
 	reconcileTracked(t, a)
-	if n := len(fh.ecmpGroups[group]); n != 3 {
-		t.Errorf("group holds %d members after the locator is back, want 3", n)
+	if got := groupMembers(fh, group); len(got) != 3 {
+		t.Errorf("group members after the locator is back = %v, want 3", got)
 	}
 	checkEVPNSource(t, fh, netip.MustParseAddr("fd00:9:9::"))
+}
+
+// A PE that leaves the segment while the source locator is gone is out of
+// the group at once: its share of the flows must not be sent to it until
+// the locator is registered again.
+func TestEVPNAliasingMemberRemovedWhileSourceLocatorGone(t *testing.T) {
+	a, fh, locs, _, _ := evpnSourceLab(t)
+	_, es := esPeerOf(t, fh)
+	group := es.GroupId
+	if err := locs.Delete("LOC1", false); err != nil {
+		t.Fatal(err)
+	}
+	a.Apply(withdrawn(perESAD("fd00::3", aliasESI, false)))
+	if got, want := groupMembers(fh, group), []string{"fd00:2:2:ad::"}; !slices.Equal(got, want) {
+		t.Errorf("group members after fd00::3 left with the locator gone = %v, want %v", got, want)
+	}
+	checkEVPNSource(t, fh, netip.MustParseAddr("fd00:1:1::"))
 }
 
 const (

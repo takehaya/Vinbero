@@ -20,6 +20,32 @@ func (f *fakeHeadend) CreateBdPeerOwned(bdID, index uint16, e *bpf.HeadendEntry,
 func (f *fakeHeadend) CreateBdPeerAtFreeIndexOwned(bdID uint16, e *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool, owner bpf.OwnerTag) (uint16, error) {
 	return f.CreateBdPeerAtFreeIndex(bdID, e, esi, remoteSrc, writeReverse)
 }
+
+// reverseKey / reverseVal model one bd_peer_reverse_map entry.
+type reverseKey struct {
+	bdID uint16
+	src  [bpf.IPv6AddrLen]byte
+}
+
+type reverseVal struct {
+	index uint16
+	esi   [bpf.ESILen]byte
+}
+
+func (f *fakeHeadend) UpdateBdPeersOwned(bdID uint16, updates []bpf.BdPeerUpdate, owner bpf.OwnerTag) []error {
+	f.bdPeerUpdateCalls[bdID]++
+	errs := make([]error, len(updates))
+	for i, u := range updates {
+		if _, ok := f.bdPeers[bdPeerKey{bdID, u.Index}]; !ok {
+			errs[i] = errors.New("bd peer not present")
+			continue
+		}
+		var noRemoteSrc [bpf.IPv6AddrLen]byte
+		errs[i] = f.CreateBdPeer(bdID, u.Index, u.Entry, u.ESI, noRemoteSrc, false)
+	}
+	return errs
+}
+
 func (f *fakeHeadend) DeleteBdPeerOwned(bdID, index uint16, owner bpf.OwnerTag) (bool, error) {
 	return f.DeleteBdPeer(bdID, index)
 }

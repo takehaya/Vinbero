@@ -37,3 +37,15 @@ func (f *fakeHeadend) HasFdb(bdID uint16, mac string) bool {
 	_, ok := f.fdb[fdbKey{bdID, mac}]
 	return ok
 }
+
+// Locked runs f with the applier's locks held, so a test can read the fake
+// data plane while a retry on another goroutine writes it.
+func (a *Applier) Locked(f func()) {
+	a.vpnMu.Lock()
+	defer a.vpnMu.Unlock()
+	a.mupMu.Lock()
+	defer a.mupMu.Unlock()
+	a.evpnMu.Lock()
+	defer a.evpnMu.Unlock()
+	f()
+}

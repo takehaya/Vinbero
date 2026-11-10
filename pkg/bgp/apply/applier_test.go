@@ -52,11 +52,17 @@ type fakeHeadend struct {
 	// bdPeerFailures does the same for bd_peer writes.
 	bdPeerFailures atomic.Int32
 
-	fdb                              map[fdbKey]*bpf.FdbEntry
-	bdPeers                          map[bdPeerKey]*bpf.HeadendEntry
-	bdPeerReverse                    map[bdPeerKey]bool // writeReverse flag passed per peer
-	bdPeerRemoteSrc                  map[bdPeerKey][bpf.IPv6AddrLen]byte
-	bdPeerESI                        map[bdPeerKey][bpf.ESILen]byte
+	fdb           map[fdbKey]*bpf.FdbEntry
+	bdPeers       map[bdPeerKey]*bpf.HeadendEntry
+	bdPeerReverse map[bdPeerKey]bool // writeReverse flag passed per peer
+	// reverse models bd_peer_reverse_map: keyed by {bd, remote PE source}
+	// and shared by every peer of the BD with that source, as in the real
+	// map. reverseWrites counts the writes to it.
+	reverse       map[reverseKey]reverseVal
+	reverseWrites int
+	bdPeerESI     map[bdPeerKey][bpf.ESILen]byte
+	// bdPeerUpdateCalls counts UpdateBdPeersOwned calls per bridge domain.
+	bdPeerUpdateCalls                map[uint16]int
 	bdPeerErr                        error
 	fdbErr                           error
 	fdbDelErr                        error
@@ -72,19 +78,20 @@ type fakeHeadend struct {
 
 func newFakeHeadend() *fakeHeadend {
 	return &fakeHeadend{
-		v4created:       map[string]*bpf.HeadendEntry{},
-		v6created:       map[string]*bpf.HeadendEntry{},
-		fdb:             map[fdbKey]*bpf.FdbEntry{},
-		bdPeers:         map[bdPeerKey]*bpf.HeadendEntry{},
-		bdPeerReverse:   map[bdPeerKey]bool{},
-		bdPeerRemoteSrc: map[bdPeerKey][bpf.IPv6AddrLen]byte{},
-		bdPeerESI:       map[bdPeerKey][bpf.ESILen]byte{},
-		esis:            map[[bpf.ESILen]byte]*bpf.EsiEntry{},
-		esPeers:         map[esPeerKey]struct{}{},
-		v4owners:        map[string]bpf.OwnerTag{},
-		v6owners:        map[string]bpf.OwnerTag{},
-		ecmpGroups:      map[uint32][]bpf.EcmpPath{},
-		ecmpOwners:      map[uint32]bpf.OwnerTag{},
+		v4created:         map[string]*bpf.HeadendEntry{},
+		v6created:         map[string]*bpf.HeadendEntry{},
+		fdb:               map[fdbKey]*bpf.FdbEntry{},
+		bdPeers:           map[bdPeerKey]*bpf.HeadendEntry{},
+		bdPeerReverse:     map[bdPeerKey]bool{},
+		reverse:           map[reverseKey]reverseVal{},
+		bdPeerESI:         map[bdPeerKey][bpf.ESILen]byte{},
+		bdPeerUpdateCalls: map[uint16]int{},
+		esis:              map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		esPeers:           map[esPeerKey]struct{}{},
+		v4owners:          map[string]bpf.OwnerTag{},
+		v6owners:          map[string]bpf.OwnerTag{},
+		ecmpGroups:        map[uint32][]bpf.EcmpPath{},
+		ecmpOwners:        map[uint32]bpf.OwnerTag{},
 	}
 }
 
@@ -114,7 +121,10 @@ func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, esi 
 	f.bdPeerFailures.Store(0)
 	f.bdPeers[bdPeerKey{bdID, index}] = e
 	f.bdPeerReverse[bdPeerKey{bdID, index}] = writeReverse
-	f.bdPeerRemoteSrc[bdPeerKey{bdID, index}] = remoteSrc
+	if writeReverse {
+		f.reverse[reverseKey{bdID, remoteSrc}] = reverseVal{index, esi}
+		f.reverseWrites++
+	}
 	f.bdPeerESI[bdPeerKey{bdID, index}] = esi
 	return nil
 }
@@ -138,6 +148,12 @@ func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) (bool, error) {
 		return false, nil
 	}
 	delete(f.bdPeers, bdPeerKey{bdID, index})
+	// Like the real delete: every reverse entry aimed at the slot goes.
+	for k, v := range f.reverse {
+		if k.bdID == bdID && v.index == index {
+			delete(f.reverse, k)
+		}
+	}
 	return true, nil
 }
 

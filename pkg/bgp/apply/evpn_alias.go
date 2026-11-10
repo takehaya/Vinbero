@@ -79,6 +79,11 @@ type esDest struct {
 	// source it was written with (see groupFingerprint's role in
 	// vpngroup.go).
 	installed []string
+	// src is the source the group's entries carry once hasSrc is set (the
+	// group has been written). Without the source locator a membership
+	// change is written with it.
+	src    [bpf.IPv6AddrLen]byte
+	hasSrc bool
 }
 
 // esNLRIKey is the stable identity of a per-ES Ethernet A-D NLRI
@@ -480,7 +485,7 @@ func (a *Applier) collectESMembers(dk esDestKey) []esMember {
 
 // reconcileESDestsForESI re-reconciles every bridge domain that has per-EVI
 // state for the segment: a per-ES A-D arriving or leaving changes member
-// eligibility in all of them.
+// eligibility in all of them. A failure is recorded by reconcileESKey.
 func (a *Applier) reconcileESDestsForESI(esi [bpf.ESILen]byte) {
 	seen := make(map[uint16]struct{})
 	for ak, st := range a.evpn.eviAD {
@@ -508,46 +513,87 @@ func (a *Applier) reconcileESDestsForESI(esi [bpf.ESILen]byte) {
 	}
 }
 
+// esOutcome is how one segment reconcile ended.
+type esOutcome int
+
+const (
+	esDone    esOutcome = iota // in line with the member set, or not to be aliased
+	esWaiting                  // cannot be formed until the source locator is registered
+	esFailed                   // a write or teardown failed
+)
+
 // reconcileESKey brings one {bd, ESI}'s programmed state in line with the
-// derived member set: group, ES peer, and -- on formation -- the FDB
-// pointers of the MACs already learned on the segment. Caller holds evpnMu.
-func (a *Applier) reconcileESKey(dk esDestKey) {
+// derived member set (see reconcileESKeyOnce). It reports false when a
+// write or teardown failed. A segment that failed or is waiting for the
+// source locator stays in esPending for the next ReconcileTracked, and a
+// failure is recorded for the retry. Caller holds evpnMu.
+func (a *Applier) reconcileESKey(dk esDestKey) bool {
+	switch a.reconcileESKeyOnce(dk) {
+	case esFailed:
+		a.evpn.esPending[dk] = struct{}{}
+		a.evpn.writeFailed = true
+		return false
+	case esWaiting:
+		a.evpn.esPending[dk] = struct{}{}
+	default:
+		delete(a.evpn.esPending, dk)
+	}
+	return true
+}
+
+// reconcileESKeyOnce does the work of reconcileESKey: group, ES peer, and
+// -- on formation -- the FDB pointers of the MACs already learned on the
+// segment. Caller holds evpnMu.
+func (a *Applier) reconcileESKeyOnce(dk esDestKey) esOutcome {
 	members := a.collectESMembers(dk)
 	d := a.evpn.esDests[dk]
 	if len(members) == 0 {
-		if d != nil {
-			a.dissolveESDest(dk, d)
+		if d != nil && !a.dissolveESDest(dk, d) {
+			return esFailed
 		}
-		return
+		return esDone
 	}
 	// One source for the whole write, recorded in the fingerprint, so a
 	// source locator registered again under another prefix rewrites the
 	// group and its ES peer, and an unchanged one writes nothing.
 	src, err := a.encapSource()
 	if err != nil {
-		// Without the source locator nothing can be written. A segment
-		// already aliased keeps forwarding with the source it has, one not
-		// yet aliased stays on per-PE forwarding, and ReconcileTracked
-		// writes either once the locator is back.
-		return
+		switch {
+		case d != nil && d.hasSrc:
+			// A membership change is never deferred: without the source
+			// locator the group is rewritten with the source its entries
+			// already carry, so a member that left is out of it now.
+			src = d.src
+		case d != nil && d.programmed:
+			// Programmed state whose source is unknown: unwind to per-PE
+			// forwarding, which carries its own sources.
+			if !a.dissolveESDest(dk, d) {
+				return esFailed
+			}
+			return esWaiting
+		default:
+			// Never formed: the segment stays on per-PE forwarding until
+			// the locator is registered.
+			return esWaiting
+		}
 	}
 	if d == nil {
 		if len(a.evpn.esDests) >= maxTrackedESDest {
 			a.logger.Warn("EVPN segment table full; not aliasing",
 				zap.Uint16("bd_id", dk.bdID), zap.Int("max", maxTrackedESDest))
-			return
+			return esDone
 		}
 		id, err := a.evpn.allocESGroupID()
 		if err != nil {
 			a.logger.Error("allocate EVPN ecmp group id", zap.Error(err))
-			return
+			return esDone
 		}
 		idx := a.freeESPeerIndex(dk.bdID)
 		if idx >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
 			a.logger.Error("EVPN ES peer range full in bridge domain; not aliasing",
 				zap.Uint16("bd_id", dk.bdID))
 			a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, id)
-			return
+			return esDone
 		}
 		d = &esDest{groupID: id, peerIdx: idx}
 		a.evpn.esDests[dk] = d
@@ -561,7 +607,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	}
 	fingerprint = append(fingerprint, "src="+netip.AddrFrom16(src).String())
 	if d.active && slices.Equal(fingerprint, d.installed) {
-		return
+		return esDone
 	}
 
 	// fail unwinds a half-done reconcile back to per-PE forwarding. The
@@ -572,8 +618,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	// by the next event; while any of its state resists removal the dest
 	// -- and its group id -- stay reserved (fingerprint cleared), so
 	// nothing else can be handed its index or id in the meantime.
-	fail := func() {
-		a.evpnWriteFailed()
+	fail := func() esOutcome {
 		d.active = false
 		// The registration describes the member layout this reconcile just
 		// tried to replace; against whatever half-written state remains,
@@ -584,11 +629,12 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 			d.installed = nil
 			a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for rebuild",
 				zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
-			return
+			return esFailed
 		}
 		a.prober.Unregister(d.groupID)
 		delete(a.evpn.esDests, dk)
 		a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
+		return esFailed
 	}
 
 	paths := make([]bpf.EcmpPath, 0, len(members))
@@ -597,8 +643,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		if err != nil {
 			a.logger.Error("build EVPN aliasing member",
 				zap.Uint16("bd_id", dk.bdID), zap.String("sid", m.sid), zap.Error(err))
-			fail()
-			return
+			return fail()
 		}
 		// Equal weights, like the VPN groups: BGP has no notion of relative
 		// capacity between the PEs.
@@ -607,10 +652,12 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	if err := a.ecmp.PutEcmpGroup(d.groupID, paths, a.esGroupOwner()); err != nil {
 		a.logger.Error("install EVPN aliasing group",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID), zap.Error(err))
-		fail()
-		return
+		return fail()
 	}
 	d.programmed = true
+	// The group's entries carry src from here on, whatever the rest of
+	// this reconcile manages.
+	d.src, d.hasSrc = src, true
 	// Register as soon as the group is written, mirroring the VPN side:
 	// PutEcmpGroup reset the liveness bitmap, and carrying the per-target
 	// down-states back in must not wait for the rest of the reconcile.
@@ -628,16 +675,14 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	if err != nil {
 		a.logger.Error("build EVPN ES peer entry",
 			zap.Uint16("bd_id", dk.bdID), zap.Error(err))
-		fail()
-		return
+		return fail()
 	}
 	trigger.GroupId = d.groupID
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
 	if err := a.fdbBd.CreateBdPeerOwned(dk.bdID, d.peerIdx, trigger, dk.esi, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 		a.logger.Error("install EVPN ES peer",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
-		fail()
-		return
+		return fail()
 	}
 	d.installed = fingerprint
 	if !d.active || d.needRepoint {
@@ -654,15 +699,17 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	a.logger.Info("EVPN segment aliased",
 		zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID),
 		zap.Int("members", len(members)))
+	return esDone
 }
 
 // dissolveESDest tears one {bd, ESI} back down to per-PE forwarding: the
 // segment's MACs get their terminal state (see sweepSegmentMacs), then the
 // ES peer and the group go. While anything resists removal the dest -- and
 // its group id -- stay reserved, so a later event retries the dissolve
-// (reconcileESDestsForESI visits leftover dests exactly for this).
-// Caller holds evpnMu.
-func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
+// (reconcileESDestsForESI visits leftover dests exactly for this, and
+// ReconcileTracked through esPending). It reports false when the dest had
+// to be kept. Caller holds evpnMu.
+func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) bool {
 	// Deactivate before the sweep: withdrawEVPNMac's survivor hand-off
 	// re-installs shared FDB entries through fdbTargetIndex, which must
 	// already resolve to the per-PE peers, not the ES peer being removed.
@@ -671,13 +718,14 @@ func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
 		d.installed = nil
 		a.logger.Error("EVPN segment dissolve incomplete; keeping dest for retry",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
-		return
+		return false
 	}
 	a.prober.Unregister(d.groupID)
 	delete(a.evpn.esDests, dk)
 	a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	a.logger.Info("EVPN segment aliasing dissolved",
 		zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
+	return true
 }
 
 // teardownESDest removes whatever programmed state the dest still holds:

@@ -442,6 +442,15 @@ func (d *Demux) RefreshBuiltinClaims() {
 // for a live handler to finish; GoBGP's management loop and watch queue satisfy
 // this contract. Call without holding any lock the applier's handler needs.
 func (d *Demux) ReplayBuiltin(name string, families []bgp.Family) error {
+	return d.ReplayBuiltinScoped(name, families, nil)
+}
+
+// ReplayBuiltinScoped is ReplayBuiltin with the delivery run inside scope,
+// which is called with the view lock held, so live events are held off for
+// all of it. The applier uses it to tell the failures of the replay's own
+// deliveries from those of live ones (apply.ReplayScope). A nil scope
+// delivers directly.
+func (d *Demux) ReplayBuiltinScoped(name string, families []bgp.Family, scope func(deliver func() error) error) error {
 	if d == nil {
 		return nil
 	}
@@ -462,11 +471,17 @@ func (d *Demux) ReplayBuiltin(name string, families []bgp.Family) error {
 	}
 	target.view.mu.Lock()
 	defer target.view.mu.Unlock()
-	return d.SnapshotTo(families, func(ev bgp.RouteEvent) {
-		if !ev.IsWithdraw && target.wants(ev.Family) {
-			target.view.handleLocked(ev, false)
-		}
-	})
+	deliver := func() error {
+		return d.SnapshotTo(families, func(ev bgp.RouteEvent) {
+			if !ev.IsWithdraw && target.wants(ev.Family) {
+				target.view.handleLocked(ev, false)
+			}
+		})
+	}
+	if scope == nil {
+		return deliver()
+	}
+	return scope(deliver)
 }
 
 // isClaimed decides whether a route belongs to a plugin rather than to the
