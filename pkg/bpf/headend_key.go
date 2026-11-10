@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+
+	"github.com/cilium/ebpf"
 )
 
 // headendKeyVRFBits is the length of the vrf_id field at the front of the
@@ -79,15 +81,137 @@ func BuildHeadendV6Key(vrfID uint32, cidr string) (*HeadendV6Key, error) {
 	return key, nil
 }
 
-// headendV4KeyPrefix splits a headend v4 key into its VRF and the trigger
-// prefix in CIDR form, the inverse of BuildHeadendV4Key.
-func headendV4KeyPrefix(key *HeadendV4Key) (uint32, string) {
-	return binary.BigEndian.Uint32(key.Instance[:]),
-		netip.PrefixFrom(netip.AddrFrom4(key.Addr), int(key.Prefixlen-headendKeyVRFBits)).String()
+// ErrMalformedHeadendKey reports a stored headend key whose prefix length
+// cannot belong to an entry: shorter than the vrf_id field, or longer than
+// the vrf_id and the whole address. No MapOperations writer produces one.
+var ErrMalformedHeadendKey = errors.New("malformed headend key")
+
+// vrf is the vrf_id of a headend v4 key.
+func (k *BpfHeadendV4Key) vrf() uint32 { return binary.BigEndian.Uint32(k.Instance[:]) }
+
+// prefix is the trigger prefix of a headend v4 key in CIDR form, the
+// inverse of BuildHeadendV4Key, or false for a malformed key.
+func (k *BpfHeadendV4Key) prefix() (string, bool) {
+	return headendKeyPrefix(k.Prefixlen, netip.AddrFrom4(k.Addr))
 }
 
-// headendV6KeyPrefix is the IPv6 counterpart of headendV4KeyPrefix.
-func headendV6KeyPrefix(key *HeadendV6Key) (uint32, string) {
-	return binary.BigEndian.Uint32(key.Instance[:]),
-		netip.PrefixFrom(netip.AddrFrom16(key.Addr), int(key.Prefixlen-headendKeyVRFBits)).String()
+// vrf is the vrf_id of a headend v6 key.
+func (k *BpfHeadendV6Key) vrf() uint32 { return binary.BigEndian.Uint32(k.Instance[:]) }
+
+// prefix is the IPv6 counterpart of BpfHeadendV4Key.prefix.
+func (k *BpfHeadendV6Key) prefix() (string, bool) {
+	return headendKeyPrefix(k.Prefixlen, netip.AddrFrom16(k.Addr))
+}
+
+func headendKeyPrefix(prefixlen uint32, addr netip.Addr) (string, bool) {
+	if prefixlen < headendKeyVRFBits || prefixlen-headendKeyVRFBits > uint32(addr.BitLen()) {
+		return "", false
+	}
+	return netip.PrefixFrom(addr, int(prefixlen-headendKeyVRFBits)).String(), true
+}
+
+// headendKey is a key of the headend maps: the methods above.
+type headendKey[K any] interface {
+	*K
+	vrf() uint32
+	prefix() (string, bool)
+}
+
+// deleteHeadendKey removes one headend entry and its owner record by key,
+// after checking that requester owns it unless force is set.
+func deleteHeadendKey(main *ebpf.Map, owners *entryOwnerMap, key any, requester OwnerTag, force bool, family string) error {
+	if !force {
+		if _, err := checkEntryOwner(owners, key, requester); err != nil {
+			return err
+		}
+	}
+	if err := deleteMapKey(main, key); err != nil {
+		return fmt.Errorf("failed to delete headend %s entry: %w", family, err)
+	}
+	if err := owners.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete headend %s owner: %w", family, err)
+	}
+	return nil
+}
+
+// flushHeadend empties one headend map of every VRF: the entries scope owns
+// (and those with no owner recorded), or every entry when force is set.
+// A malformed key is left in place and reported after the rest is done.
+func flushHeadend[K any, PK headendKey[K]](main *ebpf.Map, owners *entryOwnerMap, scope OwnerTag, force bool, family string) (uint32, error) {
+	var (
+		keys      []K
+		malformed int
+		key       K
+		entry     HeadendEntry
+	)
+	// Keys first: the iterator's behaviour while the map changes is not defined.
+	it := main.Iterate()
+	for it.Next(&key, &entry) {
+		if _, ok := PK(&key).prefix(); !ok {
+			malformed++
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if err := it.Err(); err != nil {
+		return 0, fmt.Errorf("flush headend_%s: iterate: %w", family, err)
+	}
+	var count uint32
+	for i := range keys {
+		err := deleteHeadendKey(main, owners, &keys[i], scope, force, family)
+		if errors.Is(err, ErrEntryOwnerMismatch) {
+			continue
+		}
+		if err != nil {
+			prefix, _ := PK(&keys[i]).prefix()
+			return count, fmt.Errorf("flush headend_%s: delete vrf %d %s: %w", family, PK(&keys[i]).vrf(), prefix, err)
+		}
+		count++
+	}
+	if malformed > 0 {
+		return count, fmt.Errorf("flush headend_%s: deleted %d, %w: %d left in place", family, count, ErrMalformedHeadendKey, malformed)
+	}
+	return count, nil
+}
+
+// pruneUnlistedHeadend removes what owner holds under the keys the
+// prefix-keyed API cannot name (a vrf_id other than the global one, or a
+// malformed prefix length): the entry and its owner record, or an owner
+// record left without its entry.
+func pruneUnlistedHeadend[K comparable, PK headendKey[K]](main *ebpf.Map, owners *entryOwnerMap, owner OwnerTag, family string) (int, error) {
+	if owner == "" {
+		return 0, ErrEmptyOwner
+	}
+	held, err := listEntryOwners[K](owners)
+	if err != nil {
+		return 0, err
+	}
+	var pruned int
+	for key, holder := range held {
+		if holder != owner {
+			continue
+		}
+		if _, ok := PK(&key).prefix(); ok && PK(&key).vrf() == headendLookupVRF {
+			continue
+		}
+		if err := deleteHeadendKey(main, owners, &key, owner, false, family); err != nil {
+			return pruned, fmt.Errorf("prune headend_%s owner %q: vrf %d: %w", family, owner, PK(&key).vrf(), err)
+		}
+		pruned++
+	}
+	return pruned, nil
+}
+
+// PruneUnlistedHeadendV4 removes what owner holds in headend_v4 under keys
+// ListHeadendV4Owners does not show: entries of a vrf_id other than the
+// global one, and malformed keys. The owner cleanup (headend.PruneOwner)
+// runs it after removing the owner's global entries, so an owner leaves
+// nothing behind in any VRF.
+func (m *MapOperations) PruneUnlistedHeadendV4(owner OwnerTag) (int, error) {
+	return pruneUnlistedHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, owner, "v4")
+}
+
+// PruneUnlistedHeadendV6 is the IPv6 counterpart of PruneUnlistedHeadendV4.
+func (m *MapOperations) PruneUnlistedHeadendV6(owner OwnerTag) (int, error) {
+	return pruneUnlistedHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, owner, "v6")
 }

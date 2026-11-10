@@ -121,8 +121,9 @@ func TestBuildHeadendV4Key(t *testing.T) {
 		if got := rawKey(t, key); !bytes.Equal(got, tc.raw) {
 			t.Errorf("%s vrf %#x: raw key % x, want % x", tc.cidr, tc.vrf, got, tc.raw)
 		}
-		vrf, prefix := headendV4KeyPrefix(key)
-		if vrf != tc.vrf || prefix != tc.prefix {
+		vrf := key.vrf()
+		prefix, ok := key.prefix()
+		if !ok || vrf != tc.vrf || prefix != tc.prefix {
 			t.Errorf("%s: reads back as vrf %#x %s, want vrf %#x %s", tc.cidr, vrf, prefix, tc.vrf, tc.prefix)
 		}
 	}
@@ -163,8 +164,9 @@ func TestBuildHeadendV6Key(t *testing.T) {
 			if !bytes.Equal(raw[8:], ipnet.IP.To16()) {
 				t.Errorf("%s: addr % x, want % x", tc.cidr, raw[8:], ipnet.IP.To16())
 			}
-			gotVRF, prefix := headendV6KeyPrefix(key)
-			if gotVRF != vrf || prefix != tc.prefix {
+			gotVRF := key.vrf()
+			prefix, ok := key.prefix()
+			if !ok || gotVRF != vrf || prefix != tc.prefix {
 				t.Errorf("%s: reads back as vrf %#x %s, want vrf %#x %s", tc.cidr, gotVRF, prefix, vrf, tc.prefix)
 			}
 		}
@@ -179,6 +181,32 @@ func TestBuildHeadendV6Key(t *testing.T) {
 	for _, bad := range []string{"", "nonsense", "fd00::/129", "10.0.0.0/8", "10.0.0.1", "0.0.0.0/0", "fe80::1%eth0"} {
 		if key, err := BuildHeadendV6Key(0, bad); err == nil || !errors.Is(err, ErrInvalidHeadendPrefix) {
 			t.Errorf("%q accepted as an IPv6 trigger prefix: %+v %v", bad, key, err)
+		}
+	}
+}
+
+// A stored key whose prefix length is shorter than the vrf_id field or
+// longer than vrf_id plus the address cannot be an entry. It reads back as
+// malformed rather than as a prefix string Delete would refuse.
+func TestHeadendKeyMalformedPrefixlen(t *testing.T) {
+	for _, pl := range []uint32{0, 31, 65, 0xffffffff} {
+		if p, ok := (&HeadendV4Key{Prefixlen: pl}).prefix(); ok {
+			t.Errorf("v4 prefixlen %d reads back as %q", pl, p)
+		}
+	}
+	for _, pl := range []uint32{0, 31, 161, 0xffffffff} {
+		if p, ok := (&HeadendV6Key{Prefixlen: pl}).prefix(); ok {
+			t.Errorf("v6 prefixlen %d reads back as %q", pl, p)
+		}
+	}
+	for pl, want := range map[uint32]string{32: "0.0.0.0/0", 64: "0.0.0.0/32"} {
+		if p, ok := (&HeadendV4Key{Prefixlen: pl}).prefix(); !ok || p != want {
+			t.Errorf("v4 prefixlen %d = %q %v, want %s", pl, p, ok, want)
+		}
+	}
+	for pl, want := range map[uint32]string{32: "::/0", 160: "::/128"} {
+		if p, ok := (&HeadendV6Key{Prefixlen: pl}).prefix(); !ok || p != want {
+			t.Errorf("v6 prefixlen %d = %q %v, want %s", pl, p, ok, want)
 		}
 	}
 }

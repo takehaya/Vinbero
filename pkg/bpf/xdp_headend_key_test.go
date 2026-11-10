@@ -27,6 +27,11 @@ type headendKeyFamily struct {
 	putRawOwner                 func(t *testing.T, vrf uint32, prefix string, owner OwnerTag)
 	rawPrefixlen                func(t *testing.T, vrf uint32, prefix string) uint32
 	rawCount                    func(t *testing.T) int
+	putMalformed                func(t *testing.T) func()
+	flush                       func(OwnerTag) (uint32, error)
+	forceFlush                  func() (uint32, error)
+	pruneUnlisted               func(OwnerTag) (int, error)
+	policyID                    uint32
 	packet                      func(t *testing.T, dst string) []byte
 }
 
@@ -39,6 +44,20 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			toCover: "10.1.9.9", toLonger: "10.1.2.3", toOther: "198.51.100.1",
 			create: m.CreateHeadendV4, remove: m.DeleteHeadendV4, list: m.ListHeadendV4,
 			owners: m.ListHeadendV4Owners, getOwner: m.GetHeadendV4Owner,
+			flush: m.FlushHeadendV4, forceFlush: m.ForceFlushHeadendV4, pruneUnlisted: m.PruneUnlistedHeadendV4,
+			policyID: 77,
+			putMalformed: func(t *testing.T) func() {
+				t.Helper()
+				key := &HeadendV4Key{Prefixlen: 8} // shorter than the vrf_id field
+				if err := h.objs.HeadendV4Map.Put(key, &HeadendEntry{}); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := h.objs.HeadendV4Map.Delete(key); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
 			putRaw: func(t *testing.T, vrf uint32, prefix string, e *HeadendEntry) {
 				t.Helper()
 				key, err := BuildHeadendV4Key(vrf, prefix)
@@ -104,6 +123,20 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			toCover: "fd00:1:9::9", toLonger: "fd00:1:2::3", toOther: "fd00:99::1",
 			create: m.CreateHeadendV6, remove: m.DeleteHeadendV6, list: m.ListHeadendV6,
 			owners: m.ListHeadendV6Owners, getOwner: m.GetHeadendV6Owner,
+			flush: m.FlushHeadendV6, forceFlush: m.ForceFlushHeadendV6, pruneUnlisted: m.PruneUnlistedHeadendV6,
+			policyID: 88,
+			putMalformed: func(t *testing.T) func() {
+				t.Helper()
+				key := &HeadendV6Key{Prefixlen: 8} // shorter than the vrf_id field
+				if err := h.objs.HeadendV6Map.Put(key, &HeadendEntry{}); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := h.objs.HeadendV6Map.Delete(key); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
 			putRaw: func(t *testing.T, vrf uint32, prefix string, e *HeadendEntry) {
 				t.Helper()
 				key, err := BuildHeadendV6Key(vrf, prefix)
@@ -257,7 +290,7 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			// nothing in vrf 0 covers, and the vrf 0 longer prefix again.
 			f.putRaw(t, 7, f.other, entryTo(t, segTenant))
 			tenantLonger := entryTo(t, segTenant)
-			tenantLonger.PolicyId = 77
+			tenantLonger.PolicyId = f.policyID
 			f.putRaw(t, 7, f.longer, tenantLonger)
 			f.putRawOwner(t, 7, f.other, OwnerPluginBundle("tenant"))
 			if n := f.rawCount(t); n != 4 {
@@ -289,9 +322,11 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			if owner, ok, err := f.getOwner(f.other); err != nil || ok {
 				t.Errorf("vrf 0 owner of %s = %q %v %v, want none", f.other, owner, ok, err)
 			}
-			// Startup policy-id recovery scans every VRF.
-			if id, err := h.mapOps.HighestSRPolicyIDInUse(); err != nil || id < 77 {
-				t.Errorf("HighestSRPolicyIDInUse = %d %v, want at least 77", id, err)
+			// Startup policy-id recovery scans every VRF. The other family's
+			// subtest leaves nothing behind (its force flush), so the only
+			// policy id in use is the tenant entry's.
+			if id, err := h.mapOps.HighestSRPolicyIDInUse(); err != nil || id != f.policyID {
+				t.Errorf("HighestSRPolicyIDInUse = %d %v, want %d", id, err, f.policyID)
 			}
 
 			// The tenant owner does not block a vrf 0 write of that prefix,
@@ -320,13 +355,49 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			expectEncap(t, f.toOther, 7, segDefault)
 			expectEncap(t, f.toLonger, 0, segLonger)
 
-			for _, p := range []string{f.cover, f.longer, f.deflt} {
-				if err := f.remove(p, OwnerRPC); err != nil {
-					t.Fatal(err)
-				}
+			// The owner cleanup reaches what an owner holds outside vrf 0,
+			// an owner record without its entry included, and nothing else.
+			gone := OwnerPluginBundle("gone")
+			f.putRaw(t, 9, f.cover, entryTo(t, segTenant))
+			f.putRawOwner(t, 9, f.cover, gone)
+			f.putRawOwner(t, 9, f.longer, gone)
+			if n, err := f.pruneUnlisted(gone); err != nil || n != 2 {
+				t.Errorf("prune unlisted = %d %v, want 2", n, err)
 			}
-			if n := f.rawCount(t); n != 2 {
-				t.Errorf("raw map holds %d entries after cleanup, want the 2 tenant ones", n)
+			if n := f.rawCount(t); n != 5 {
+				t.Errorf("raw map holds %d entries after the prune, want 5", n)
+			}
+			if owner, ok, err := f.getOwner(f.cover); err != nil || !ok || owner != OwnerRPC {
+				t.Errorf("vrf 0 owner of %s after the prune = %q %v %v", f.cover, owner, ok, err)
+			}
+
+			// The flushes empty every VRF under the rules they apply to vrf
+			// 0: the scoped one takes the scope's entries and unowned ones.
+			// A malformed key is skipped and reported; the rest still goes.
+			dropMalformed := f.putMalformed(t)
+			if entries, err := f.list(); err != nil || len(entries) != 3 {
+				t.Errorf("list with a malformed key = %v %v, want the 3 vrf 0 entries", keysOf(entries), err)
+			}
+			n, err := f.flush(OwnerPluginBundle("tenant"))
+			if n != 2 || !errors.Is(err, ErrMalformedHeadendKey) {
+				t.Errorf("scoped flush = %d %v, want 2 and ErrMalformedHeadendKey", n, err)
+			}
+			if n := f.rawCount(t); n != 4 {
+				t.Errorf("raw map holds %d entries after the scoped flush, want 4", n)
+			}
+			n, err = f.forceFlush()
+			if n != 3 || !errors.Is(err, ErrMalformedHeadendKey) {
+				t.Errorf("force flush = %d %v, want 3 and ErrMalformedHeadendKey", n, err)
+			}
+			dropMalformed()
+			if n, err := f.forceFlush(); n != 0 || err != nil {
+				t.Errorf("force flush of an empty map = %d %v", n, err)
+			}
+			if n := f.rawCount(t); n != 0 {
+				t.Errorf("raw map holds %d entries after the force flush, want 0", n)
+			}
+			if owners, err := f.owners(); err != nil || len(owners) != 0 {
+				t.Errorf("owners after the force flush = %v %v", owners, err)
 			}
 		})
 	}

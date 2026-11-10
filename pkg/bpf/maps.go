@@ -1770,18 +1770,7 @@ func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester 
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-	if !force {
-		if _, err := checkEntryOwner(m.headendV4Owners, key, requester); err != nil {
-			return err
-		}
-	}
-	if err := deleteMapKey(m.objs.HeadendV4Map, key); err != nil {
-		return fmt.Errorf("failed to delete headend v4 entry: %w", err)
-	}
-	if err := m.headendV4Owners.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete headend v4 owner: %w", err)
-	}
-	return nil
+	return deleteHeadendKey(m.objs.HeadendV4Map, m.headendV4Owners, key, requester, force, "v4")
 }
 
 // GetHeadendV4 retrieves a headend v4 entry from the map
@@ -1808,9 +1797,14 @@ func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
 	iter := m.objs.HeadendV4Map.Iterate()
 
 	for iter.Next(&key, &entry) {
-		vrfID, prefix := headendV4KeyPrefix(&key)
-		if vrfID != headendLookupVRF {
+		// The prefix-keyed API reads the global VRF only: it has no way to
+		// name another one. A per-VRF listing comes with naming the VRF.
+		if key.vrf() != headendLookupVRF {
 			continue
+		}
+		prefix, ok := key.prefix()
+		if !ok {
+			continue // ErrMalformedHeadendKey; the flushes report it
 		}
 		entryCopy := entry
 		result[prefix] = &entryCopy
@@ -2028,18 +2022,7 @@ func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester 
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-	if !force {
-		if _, err := checkEntryOwner(m.headendV6Owners, key, requester); err != nil {
-			return err
-		}
-	}
-	if err := deleteMapKey(m.objs.HeadendV6Map, key); err != nil {
-		return fmt.Errorf("failed to delete headend v6 entry: %w", err)
-	}
-	if err := m.headendV6Owners.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete headend v6 owner: %w", err)
-	}
-	return nil
+	return deleteHeadendKey(m.objs.HeadendV6Map, m.headendV6Owners, key, requester, force, "v6")
 }
 
 // GetHeadendV6 retrieves a headend v6 entry from the map
@@ -2065,9 +2048,14 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 	iter := m.objs.HeadendV6Map.Iterate()
 
 	for iter.Next(&key, &entry) {
-		vrfID, prefix := headendV6KeyPrefix(&key)
-		if vrfID != headendLookupVRF {
+		// The prefix-keyed API reads the global VRF only: it has no way to
+		// name another one. A per-VRF listing comes with naming the VRF.
+		if key.vrf() != headendLookupVRF {
 			continue
+		}
+		prefix, ok := key.prefix()
+		if !ok {
+			continue // ErrMalformedHeadendKey; the flushes report it
 		}
 		entryCopy := entry
 		result[prefix] = &entryCopy
@@ -3346,50 +3334,34 @@ func (m *MapOperations) ForceFlushSidFunctions() (uint32, error) {
 	return flushForce(entries, m.ForceDeleteSidFunction, "sid_function")
 }
 
-// FlushHeadendV4 removes headend_v4 entries whose owner matches scope.
-// scope must be non-empty; use ForceFlushHeadendV4 to drop every entry.
+// FlushHeadendV4 removes headend_v4 entries whose owner matches scope, in
+// every VRF. scope must be non-empty; use ForceFlushHeadendV4 to drop every
+// entry.
 func (m *MapOperations) FlushHeadendV4(scope OwnerTag) (uint32, error) {
 	if scope == "" {
 		return 0, fmt.Errorf("FlushHeadendV4: scope must be non-empty; use ForceFlushHeadendV4 for unconditional flush")
 	}
-	entries, err := m.ListHeadendV4()
-	if err != nil {
-		return 0, err
-	}
-	return flushScoped(entries, scope, m.DeleteHeadendV4, "headend_v4")
+	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, scope, false, "v4")
 }
 
-// ForceFlushHeadendV4 removes every headend_v4 entry of the global VRF
-// (vrf_id 0) regardless of owner.
+// ForceFlushHeadendV4 removes every headend_v4 entry regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV4() (uint32, error) {
-	entries, err := m.ListHeadendV4()
-	if err != nil {
-		return 0, err
-	}
-	return flushForce(entries, m.ForceDeleteHeadendV4, "headend_v4")
+	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, "", true, "v4")
 }
 
-// FlushHeadendV6 removes headend_v6 entries whose owner matches scope.
-// scope must be non-empty; use ForceFlushHeadendV6 to drop every entry.
+// FlushHeadendV6 removes headend_v6 entries whose owner matches scope, in
+// every VRF. scope must be non-empty; use ForceFlushHeadendV6 to drop every
+// entry.
 func (m *MapOperations) FlushHeadendV6(scope OwnerTag) (uint32, error) {
 	if scope == "" {
 		return 0, fmt.Errorf("FlushHeadendV6: scope must be non-empty; use ForceFlushHeadendV6 for unconditional flush")
 	}
-	entries, err := m.ListHeadendV6()
-	if err != nil {
-		return 0, err
-	}
-	return flushScoped(entries, scope, m.DeleteHeadendV6, "headend_v6")
+	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, scope, false, "v6")
 }
 
-// ForceFlushHeadendV6 removes every headend_v6 entry of the global VRF
-// (vrf_id 0) regardless of owner.
+// ForceFlushHeadendV6 removes every headend_v6 entry regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV6() (uint32, error) {
-	entries, err := m.ListHeadendV6()
-	if err != nil {
-		return 0, err
-	}
-	return flushForce(entries, m.ForceDeleteHeadendV6, "headend_v6")
+	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, "", true, "v6")
 }
 
 // FlushHeadendL2 removes every headend_l2 entry.
