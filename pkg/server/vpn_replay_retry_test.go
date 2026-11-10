@@ -90,6 +90,12 @@ func TestVPNReplayerBoundsRetries(t *testing.T) {
 	if n := len(f.snapshot()); n != vpnReplayMaxRetries+1 {
 		t.Errorf("replays = %d, want %d (one attempt and %d retries)", n, vpnReplayMaxRetries+1, vpnReplayMaxRetries)
 	}
+	// The worker stops before it logs the give-up.
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if logs.FilterLevelExact(zapcore.ErrorLevel).Len() > 0 {
+			break
+		}
+	}
 	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 1 {
 		t.Errorf("give-up errors = %d, want 1", n)
 	}
@@ -165,7 +171,9 @@ func TestVPNReplayerTrackedRequestBounded(t *testing.T) {
 // bounded series of passes: a failure-caused request joins the running
 // series instead of restarting it, and after the series gave up such
 // requests are ignored until the cool-down has passed. A request that is not
-// failure-caused starts a series at any time.
+// failure-caused starts a series at any time. The storm lands at whatever
+// points the scheduler gives it; TestVPNReplayerFailureAtGiveUpBounded pins
+// the request to the moment a series gives up.
 func TestVPNReplayerFailureStormBounded(t *testing.T) {
 	var calls atomic.Int32
 	tracked := func() error {
@@ -216,5 +224,122 @@ func TestVPNReplayerFailureStormBounded(t *testing.T) {
 	waitReplayerIdle(t, r)
 	if n := calls.Load(); n != 3*series {
 		t.Errorf("tracked passes after a binding change = %d, want %d", n, 3*series)
+	}
+}
+
+// onLog returns a logger that runs fn once, on the worker, when it logs at
+// level. The worker logs after releasing its lock and before it acts on what
+// it decided, so fn acts as a request arriving in between: at ErrorLevel
+// right after a series gave up, at InfoLevel right after a replay succeeded
+// and before the worker checks whether anything is left to do. done is
+// closed after fn returns.
+func onLog(level zapcore.Level, fn func()) (logger *zap.Logger, done <-chan struct{}) {
+	ch := make(chan struct{})
+	var once atomic.Bool
+	observed, _ := observer.New(level)
+	core := zapcore.RegisterHooks(observed, func(e zapcore.Entry) error {
+		if e.Level == level && once.CompareAndSwap(false, true) {
+			fn()
+			close(ch)
+		}
+		return nil
+	})
+	return zap.New(core), ch
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker did not log the line the test waits for")
+	}
+}
+
+// A failure-caused request that arrives right as a series gives up is under
+// the cool-down like any later one: it must not start another series.
+func TestVPNReplayerFailureAtGiveUpBounded(t *testing.T) {
+	var calls atomic.Int32
+	tracked := func() error {
+		calls.Add(1)
+		return &apply.TrackedWriteError{MUP: 1}
+	}
+	f := &fakeVPNReplay{seen: make(chan struct{}, 8)}
+	var r *vpnReplayer
+	logger, done := onLog(zapcore.ErrorLevel, func() { r.requestTrackedAfterFailure() })
+	r = newVPNReplayer(f.replay, tracked, logger)
+	r.retryMin, r.retryMax = time.Millisecond, 2*time.Millisecond
+
+	r.requestTrackedAfterFailure()
+	waitClosed(t, done)
+	waitReplayerIdle(t, r)
+	if n, want := calls.Load(), int32(vpnReplayMaxRetries+1); n != want {
+		t.Errorf("tracked passes = %d, want one series of %d", n, want)
+	}
+}
+
+// A request that is not failure-caused and arrives right as a series gives
+// up still runs, with a fresh series.
+func TestVPNReplayerRequestAtGiveUpRuns(t *testing.T) {
+	boom := errors.New("list failed")
+	errs := make([]error, 0, vpnReplayMaxRetries+1)
+	for range vpnReplayMaxRetries + 1 {
+		errs = append(errs, boom)
+	}
+	f := &fakeVPNReplay{errs: errs, seen: make(chan struct{}, 16)}
+	var r *vpnReplayer
+	logger, done := onLog(zapcore.ErrorLevel, func() { r.request([]bgp.Family{bgp.FamilyEVPN}) })
+	r = newVPNReplayer(f.replay, nil, logger)
+	r.retryMin, r.retryMax = time.Millisecond, 2*time.Millisecond
+
+	r.request([]bgp.Family{bgp.FamilyVPNv4})
+	for range vpnReplayMaxRetries + 1 {
+		waitReplay(t, f)
+	}
+	waitClosed(t, done)
+	waitReplay(t, f) // the request made at the give-up
+	waitReplayerIdle(t, r)
+	calls := f.snapshot()
+	if len(calls) != vpnReplayMaxRetries+2 || !slices.Equal(calls[len(calls)-1], []bgp.Family{bgp.FamilyEVPN}) {
+		t.Errorf("calls = %v, want %d failed vpnv4 replays and then evpn", calls, vpnReplayMaxRetries+1)
+	}
+}
+
+// Requests that arrive after a replay succeeded, just before the worker
+// would find nothing to do and stop, are not lost: either kind runs.
+func TestVPNReplayerRequestBeforeExitRuns(t *testing.T) {
+	f := &fakeVPNReplay{seen: make(chan struct{}, 8)}
+	var r *vpnReplayer
+	logger, done := onLog(zapcore.InfoLevel, func() { r.request([]bgp.Family{bgp.FamilyEVPN}) })
+	r = newVPNReplayer(f.replay, nil, logger)
+	r.retryMin, r.retryMax = time.Millisecond, 2*time.Millisecond
+
+	r.request([]bgp.Family{bgp.FamilyVPNv4})
+	waitReplay(t, f)
+	waitClosed(t, done)
+	waitReplay(t, f)
+	waitReplayerIdle(t, r)
+	calls := f.snapshot()
+	want := [][]bgp.Family{{bgp.FamilyVPNv4}, {bgp.FamilyEVPN}}
+	if !slices.EqualFunc(calls, want, slices.Equal[[]bgp.Family]) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestVPNReplayerFailureBeforeExitRuns(t *testing.T) {
+	f := &fakeVPNReplay{seen: make(chan struct{}, 8)}
+	tr := newScriptedTracked()
+	var r *vpnReplayer
+	logger, done := onLog(zapcore.InfoLevel, func() { r.requestTrackedAfterFailure() })
+	r = newVPNReplayer(f.replay, tr.run, logger)
+	r.retryMin, r.retryMax = time.Millisecond, 2*time.Millisecond
+
+	r.request([]bgp.Family{bgp.FamilyVPNv4})
+	waitReplay(t, f)
+	waitClosed(t, done)
+	waitTracked(t, tr)
+	waitReplayerIdle(t, r)
+	if n := tr.calls.Load(); n != 1 {
+		t.Errorf("tracked passes = %d, want 1", n)
 	}
 }
