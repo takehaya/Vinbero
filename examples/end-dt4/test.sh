@@ -183,7 +183,7 @@ ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 vrf ac-add \
 check_counters "host2 -> SID from the vrf100 AC (passed on, End.DT4 does not run)" \
   'dt4 == 0 && pass >= 3' send_untagged
 # A tag with no AC on a port whose untagged side is a tenant AC is not
-# underlay: the front door drops it.
+# underlay: with no circuit configured for it, it is dropped before L3.
 check_counters "host2 -> SID with an unknown VLAN tag (dropped, End.DT4 does not run)" \
   'dt4 == 0 && drop >= 3' send_tagged
 

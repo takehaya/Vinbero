@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
+	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
 // TestXDPProgSIDGateTenantIngress checks that only a packet from the global
@@ -159,12 +160,16 @@ func TestXDPProgSIDGateTenantIngress(t *testing.T) {
 
 // TestXDPProgIngressVrfUnknownTag checks how the front door classifies a
 // tagged frame whose {ifindex, vlan} has no AC. On a port whose untagged
-// side is a tenant AC the frame is dropped: otherwise a host on that AC
-// could add an unused tag, land in vrf 0 and reach a local SID. A trunk
-// whose untagged side is underlay keeps the plain miss behaviour (vrf 0).
+// side is a tenant AC the frame is never vrf 0: only a service-return or
+// L2 headend circuit configured for that {ifindex, vlan} may take it, and
+// without one it is dropped before L3. Otherwise a host on that AC could
+// add an unused tag, land in vrf 0 and reach a local SID. A trunk whose
+// untagged side is underlay keeps the plain miss behaviour (vrf 0). In
+// every case where the frame is not vrf 0 the SID must not run.
 func TestXDPProgIngressVrfUnknownTag(t *testing.T) {
 	h := newXDPTestHelperWithStats(t)
 	const ifidx = 1
+	const vlan = 5 // no AC for VLAN 5 in any case below
 	const endSID = "fd00:5a2::1"
 	const nextSeg = "fd00:5a2::99"
 	h.createSidFunction(endSID+"/128", actionEnd)
@@ -173,32 +178,69 @@ func TestXDPProgIngressVrfUnknownTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build End packet: %v", err)
 	}
-	tagged := withVlanTag(pkt, 5) // VLAN 5 has no AC in any case below
+	tagged := withVlanTag(pkt, vlan)
 
 	if err := h.mapOps.SetIngressPolicy(true, false, 0); err != nil {
 		t.Fatalf("SetIngressPolicy: %v", err)
 	}
 
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
+	l2Mode := uint32(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2)
+	addL2 := func(t *testing.T) {
+		h.createHeadendL2Entry(ifidx, vlan, srcAddr, segments, numSegments, 0)
+		t.Cleanup(func() { _ = h.mapOps.DeleteHeadendL2(ifidx, vlan) })
+	}
+	addSvc := func(t *testing.T) {
+		if _, err := h.mapOps.CreateServiceIngress(ifidx, vlan, &ServiceIngressEntry{
+			Behavior: SvcRetAS, InnerTypeMask: SvcInnerIPv6,
+			Encap: HeadendEntry{Mode: modeHEncaps, NumSegments: numSegments, SrcAddr: srcAddr, Segments: segments},
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		t.Cleanup(func() { _ = h.mapOps.DeleteServiceIngress(ifidx, vlan) })
+	}
+	tenantPort := map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 1}
+
 	for _, tc := range []struct {
 		name    string
 		acs     map[IngressACKey]uint32
-		wantRet uint32
+		circuit func(*testing.T)
+		wantRet uint32 // checked when the frame is not taken by a circuit
 		wantRun uint64
+		wantL2  uint64
+		wantSvc uint64
 	}{
-		{"untagged side is a tenant AC", map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 1}, XDP_DROP, 0},
-		{"untagged side is explicitly global", map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 0, {Ifindex: ifidx, VlanId: 100}: 1}, XDP_PASS, 1},
-		{"untagged side has no AC", map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 100}: 1}, XDP_PASS, 1},
+		{name: "tenant port, no circuit: dropped", acs: tenantPort, wantRet: XDP_DROP},
+		{name: "tenant port, L2 headend circuit: taken by L2", acs: tenantPort, circuit: addL2, wantL2: 1},
+		{name: "tenant port, service-return circuit: taken by service return", acs: tenantPort, circuit: addSvc, wantSvc: 1},
+		{name: "untagged side is explicitly global", acs: map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 0, {Ifindex: ifidx, VlanId: 100}: 1}, wantRet: XDP_PASS, wantRun: 1},
+		{name: "untagged side has no AC", acs: map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 100}: 1}, wantRet: XDP_PASS, wantRun: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := h.mapOps.SetIngressVrf(tc.acs); err != nil {
 				t.Fatalf("SetIngressVrf: %v", err)
 			}
-			ret, out, runs := h.runCountingSlot(t, tagged, ifidx, actionEnd)
-			if ret != tc.wantRet {
-				t.Errorf("ret = %d, want %d", ret, tc.wantRet)
+			if tc.circuit != nil {
+				tc.circuit(t)
 			}
+			l2Before := slotStatPackets(t, h.mapOps, MapTypeHeadendL2, l2Mode)
+			svcBefore := slotStatPackets(t, h.mapOps, MapTypeServiceReturn, SvcRetAS)
+			ret, out, runs := h.runCountingSlot(t, tagged, ifidx, actionEnd)
+			l2 := slotStatPackets(t, h.mapOps, MapTypeHeadendL2, l2Mode) - l2Before
+			svc := slotStatPackets(t, h.mapOps, MapTypeServiceReturn, SvcRetAS) - svcBefore
+
 			if runs != tc.wantRun {
 				t.Errorf("End slot ran %d times, want %d", runs, tc.wantRun)
+			}
+			if l2 != tc.wantL2 {
+				t.Errorf("L2 headend slot ran %d times, want %d", l2, tc.wantL2)
+			}
+			if svc != tc.wantSvc {
+				t.Errorf("service-return slot ran %d times, want %d", svc, tc.wantSvc)
+			}
+			if tc.circuit == nil && ret != tc.wantRet {
+				t.Errorf("ret = %d, want %d", ret, tc.wantRet)
 			}
 			if tc.wantRun == 1 {
 				if got := outerDA(out, ethHeaderLen+4); !got.Equal(net.ParseIP(nextSeg)) {

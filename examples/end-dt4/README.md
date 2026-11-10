@@ -42,8 +42,9 @@ which is why `vinbero_router3.yaml` sets `enable_stats`):
   a tenant AC: the SID is not looked up, End.DT4 does not run, and the
   packets go on to the headend lookup like any tenant packet and are
   passed to the kernel (the XDP_PASS counter rises)
-- the same packets with a VLAN 5 tag, which has no AC, are dropped at
-  the front door, because the untagged side of the port is a tenant AC
+- the same packets with a VLAN 5 tag, which has no AC and no configured
+  circuit, are dropped before any L3 or SID processing, because the
+  untagged side of the port is a tenant AC
 - host1 to host2 keeps working: router3's uplink has no AC, so its
   packets are still in the global VRF and reach the SID
 

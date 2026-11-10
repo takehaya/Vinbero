@@ -48,7 +48,10 @@ data plane は XDP 入口で ingress front door を 1 回だけ通します。`i
 - `VrfAcAdd` で足した AC の interface が後から消えた場合、reconcile は warning を出してその AC を飛ばします (pod の veth が AC の削除より先に消えても、他の AC の操作を止めないためです)。AC は `VrfAcRemove` まで残り、同じ名前の interface が戻れば再び効きます。config の `vrfs.entries[].acs` の AC は、interface が解決できなければ reconcile を失敗させます。
 - AC はちょうど 1 つの VRF に属します。別 VRF が持つ AC の追加は拒否されます (map の衝突キーを作らせない)。
 - default-deny を有効にすると、どの VRF にも分類されない AC のパケットを drop (または pass) します。underlay/control interface を通すには `global` VRF に AC を足します。
-- front door は {ifindex, vlan} を完全一致で引きます。tag 付きのフレームの {ifindex, vlan} に AC が無く、同じ port の untagged 側 ({ifindex, 0}) が tenant VRF の AC なら、そのフレームは drop します。tenant が未使用の VLAN tag を付けて vrf 0 に入るのを防ぐためです。untagged 側が underlay (AC が無いか `global` の AC) の trunk では、AC の無い tag は vrf 0 になります。逆に、VLAN の AC しか持たない port に届いた untagged のフレームも vrf 0 になるので、その port で同じ保証が要るときは default-deny を有効にします。
+- front door は {ifindex, vlan} を完全一致で引きます。AC の無い {ifindex, vlan} は、default-deny が有効なら `deny_action` に従います。以下は default-deny が無効な場合です。
+  - tag 付きのフレームの {ifindex, vlan} に AC が無く、同じ port の untagged 側 ({ifindex, 0}) が tenant VRF の AC なら、そのフレームは vrf 0 になりません。operator がその {ifindex, vlan} に設定した service proxy の戻り (IFACE-IN) か L2 headend の circuit だけが受け取れ、どちらも無ければ L3 や SID の処理の前に drop します。tenant が未使用の VLAN tag を付けて vrf 0 に入るのを防ぐためです
+  - untagged 側が underlay (AC が無いか `global` の AC) の trunk では、AC の無い tag は vrf 0 になります
+  - VLAN の AC しか持たない port に届いた untagged のフレームも vrf 0 になります。その port で同じ保証が要るときは default-deny を有効にします
 - `ingress_vrf_map` の writer は `vrf.Manager.Reconcile` だけです。
 
 詳細は [forwarding_model.md](forwarding_model.md) の VRF axis を参照してください。

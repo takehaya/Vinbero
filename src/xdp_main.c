@@ -82,8 +82,10 @@ int vinbero_main(struct xdp_md *ctx)
         // unmapped ACs under default-deny, and stash vrf_id for all downstream
         // paths (L2 / SID / headend / MUP). Runs before try_l2_headend so the
         // policy covers every ingress path.
+        // INGRESS_VRF_CIRCUIT_ONLY (a tag with no AC on a tenant port) still
+        // runs the two circuit lookups below and is dropped after them.
         int vrf_verdict = resolve_ingress_vrf(ctx, vlan_id, &vrf_id);
-        if (vrf_verdict != INGRESS_VRF_CONTINUE) {
+        if (vrf_verdict >= 0) {
             action = vrf_verdict;
             goto out;
         }
@@ -102,6 +104,12 @@ int vinbero_main(struct xdp_md *ctx)
         int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, vlan_id, pkt_len);
         if (l2_action >= 0) {
             action = l2_action;
+            goto out;
+        }
+
+        // No configured circuit took the unknown tag: it never reaches L3.
+        if (vrf_verdict == INGRESS_VRF_CIRCUIT_ONLY) {
+            action = XDP_DROP;
             goto out;
         }
 
