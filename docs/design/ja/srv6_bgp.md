@@ -85,6 +85,15 @@ flowchart LR
 
 XDP の data plane は、受信が headend エントリを引いて H.Encaps し、egress 側は service SID (End.DT4/DT6) で decap して VRF の table へ渡します。BGP は何を install するかを決め、XDP がそれを高速に実行する、という分担です。
 
+### binding と locator の変更による再評価
+
+受信経路の取り込み可否は、届いた時点で 1 度だけ判定します。gobgp の watch は同じ経路を送り直さないので、判定の材料が後から変わったときは、applier が gobgp の loc-rib にある受信済みの VPN 経路を受け取り直して評価し直します。結果は新しく届いた場合と同じになるので、取り込みと撤去の両方が起きます。
+
+- binding の変更: vpnv4 / vpnv6 の RT を持つ binding が 1 つも無い family は、受信した経路をすべて取り込みます (default-allow)。binding の作成、更新、削除、RT や family の追加と削除でその family の import 判定が変わると、評価し直します。import RT が増えれば、それまで落としていた経路が入ります。RT や binding が減れば、どの VRF も import しなくなった経路が data plane から消えます。最初の binding で default-allow は終わり、最後の binding を消すと default-allow に戻って受信済みの経路がすべて入ります。別の VRF が既に import している RT を足すなど、判定が変わらない変更では評価し直しません。
+- source locator の登録: headend エントリの送信元は `bgp.global.source_locator` の locator から取るので、この locator が無い間に届いた経路は、取り込んでも書き込めません。`vbctl locator create` でこの locator を登録した時点で評価し直し、書き込みます。別の prefix で登録し直した場合は、書き込み済みの経路の送信元も新しい prefix に置き換わります。
+
+評価し直しは RPC とは別の goroutine で非同期に行い、RPC はその完了を待ちません。実行中に届いた要求は次の 1 回にまとめます。失敗した場合は log に残し、1 秒から 30 秒の間隔で成功するまで再試行します。評価し直しで落とした経路は、経路ごとではなく件数で 1 行だけ log に出します。locator の登録で評価し直すのは L3VPN の経路だけです。source locator より先に届いた EVPN と MUP の経路は、この登録では書き込まれません。
+
 ### service SID の運び方 (transposition)
 
 service SID は RFC 9252 §4 の transposition で運ばれ、SID の一部が MPLS label フィールドに転置されます。Vinbero は受信時に transposition を戻し、full SID を組み立ててから install します。これにより、egress PE がどんな割り当てで service SID を出しても、ingress 側は正しい full SID へ encap できます。

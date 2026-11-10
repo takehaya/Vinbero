@@ -569,6 +569,39 @@ func (m *Manager) EmptyForFamily(fam bgp.Family) bool {
 	return true
 }
 
+// ImportFilterKey summarizes everything the L3VPN import filter decides
+// from for fam: whether EmptyForFamily still default-allows, and the set of
+// import RTs across all bindings. Two calls that return the same key accept
+// and drop exactly the same routes, which is all an L3VPN receive path needs
+// to know, since the VRF a route matches does not change what it installs.
+// A caller compares keys taken before and after a binding change to decide
+// whether routes already received have to be evaluated again.
+func (m *Manager) ImportFilterKey(fam bgp.Family) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	gated := false
+	var rts []string
+	for _, b := range m.bindings {
+		fp, has := b.Families[fam]
+		if !has {
+			continue
+		}
+		if len(fp.RouteTargets) > 0 {
+			gated = true
+		}
+		for _, rt := range fp.RouteTargets {
+			if rt.Direction.Has(DirectionImport) {
+				rts = append(rts, rt.RT)
+			}
+		}
+	}
+	if !gated {
+		return "allow"
+	}
+	slices.Sort(rts)
+	return "import:" + strings.Join(slices.Compact(rts), ",")
+}
+
 // MatchImport is the legacy L3VPN helper, retained as a thin wrapper over
 // MatchImportForFamily. It checks VPNv4 then VPNv6 so a binding declared on
 // only one of the two L3VPN families (e.g. via `vbctl vrf-bgp family add

@@ -44,7 +44,7 @@ type Server struct {
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	mupSrc       MupBindingReconciler       // MUP binding-state reconcile hook; nil when BGP is off
 	evpnReplay   func()                     // EVPN loc-rib replay (import-surface widened); nil when BGP is off
-	vpnReplay    func([]bgp.Family) error   // VPN loc-rib replay after a binding adds import RTs; nil when BGP is off
+	vpnReplay    func([]bgp.Family) error   // VPN loc-rib replay (import filter or source locator changed); nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -157,7 +157,13 @@ func (s *Server) Setup() {
 	// facet<->binding cross-checks are check-then-act across two managers.
 	vrfMu := &sync.Mutex{}
 	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, s.evpnReplay, vrfMu)
-	vrfBgpServer.SetVPNReplay(s.vpnReplay, s.logger)
+	// One replayer serves both triggers, so a binding change and a locator
+	// registration close together merge into one pass over the loc-rib.
+	var requestVPNReplay func([]bgp.Family)
+	if s.vpnReplay != nil {
+		requestVPNReplay = newVPNReplayer(s.vpnReplay, s.logger).request
+	}
+	vrfBgpServer.SetVPNReplay(requestVPNReplay)
 	vrfBgpServer.SetCplaneManager(s.cplaneMgr)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
@@ -201,7 +207,8 @@ func (s *Server) Setup() {
 	// newly added locators to reconcile uA claims against.
 	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
 
-	locatorServer := NewLocatorServer(s.locatorMgr, sidFunctionServer.AddLocatorAndClaim, sidFunctionServer.DeleteLocatorGuarded)
+	addLocator := replayOnSourceLocator(sidFunctionServer.AddLocatorAndClaim, s.cfg.BGP.Global.SourceLocator, requestVPNReplay)
+	locatorServer := NewLocatorServer(s.locatorMgr, addLocator, sidFunctionServer.DeleteLocatorGuarded)
 	path, handler := vinberov1connect.NewLocatorServiceHandler(locatorServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered LocatorService", zap.String("path", path))

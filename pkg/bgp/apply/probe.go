@@ -103,7 +103,7 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 		if !steered {
 			continue
 		}
-		if !slices.Equal(memberFingerprint(ms), d.installed) {
+		if !slices.Equal(a.groupFingerprint(ms), d.installed) {
 			// The desired members have drifted from what the data plane
 			// holds (a reconcile retry is owed, e.g. an earlier reconcile
 			// bailed before writing). The standing registration matches the

@@ -3,6 +3,7 @@ package apply
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 
 	"go.uber.org/zap"
@@ -61,7 +62,7 @@ type vpnDest struct {
 	paths   map[vpnPathKey]*vpnPath
 	// installed is the member SID list last written, used to skip
 	// reconciles that would rewrite an unchanged group.
-	installed []string // memberFingerprint of the last write
+	installed []string // groupFingerprint of the last write
 	// probed reports whether the prober currently holds a registration
 	// that matches the group's actual data-plane layout. It turns false
 	// when a group write fails (reconcile unregisters and the group is
@@ -254,7 +255,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		a.retireVPNGroup(dk, d)
 		return
 	}
-	fingerprint := memberFingerprint(ms)
+	fingerprint := a.groupFingerprint(ms)
 	if slices.Equal(fingerprint, d.installed) {
 		return
 	}
@@ -324,6 +325,20 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	a.logger.Info("VPN prefix programmed",
 		zap.String("prefix", dk.prefix), zap.Int("paths", len(ms)),
 		zap.Uint32("group_id", d.groupID))
+}
+
+// groupFingerprint is what reconcileVPNGroup records as installed: the
+// member set, plus the encapsulation source every member entry carries. With
+// the source in it, a source locator re-registered under another prefix
+// rewrites each group on the next reconcile instead of matching the old
+// write and keeping the stale source.
+func (a *Applier) groupFingerprint(ms []*vpnPath) []string {
+	fp := memberFingerprint(ms)
+	src, err := a.encapSource()
+	if err != nil {
+		return append(fp, "src=none")
+	}
+	return append(fp, "src="+netip.AddrFrom16(src).String())
 }
 
 // retireVPNGroup tears down a destination whose last path went away and

@@ -8,8 +8,6 @@ import (
 	"sync"
 
 	"connectrpc.com/connect"
-	"go.uber.org/zap"
-
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
@@ -54,14 +52,17 @@ type VrfBgpServer struct {
 	// re-delivers anyway).
 	evpnReplay func()
 	// requestVPNReplay schedules a re-evaluation of the VPN loc-rib for the
-	// given families, off the RPC path; nil when BGP is off. A VRF bound at
-	// runtime (a CNI network configuration carrying rd/rts, for example) can
-	// miss routes that arrived before its import RTs existed: those were
-	// dropped fail-closed and the watch stream never re-delivers them.
+	// given families, off the RPC path; nil when BGP is off. The import-RT
+	// filter decides a route once, when it arrives, and the watch stream
+	// never re-delivers it. A VRF bound at runtime (a CNI network
+	// configuration carrying rd/rts, for example) would otherwise miss every
+	// route that arrived before its import RTs existed, and a route whose
+	// last importing RT was removed would stay in the data plane.
 	requestVPNReplay func([]bgp.Family)
-	// vpnReplayPending collects, under mu, the families whose import RTs
-	// grew since the handler's last flushVPNReplay.
-	vpnReplayPending map[bgp.Family]struct{}
+	// vpnFilterKeys holds, under mu, the vrfbgp.Manager.ImportFilterKey of
+	// each L3VPN family as of the last replay request: the filter the
+	// installed routes were last evaluated against.
+	vpnFilterKeys map[bgp.Family]string
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
@@ -90,28 +91,48 @@ func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordi
 	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, evpnReplay: evpnReplay, mu: mu}
 }
 
-// SetVPNReplay installs the VPN loc-rib replay run after a binding adds import
-// RTs. replay is called off the RPC path with the families to re-evaluate. Set
-// once at wiring time, before the server handles RPCs; nil leaves it off.
-func (s *VrfBgpServer) SetVPNReplay(replay func([]bgp.Family) error, logger *zap.Logger) {
-	if replay == nil {
+// SetVPNReplay installs the request hook for the VPN loc-rib replay run after
+// a binding change alters what the import-RT filter accepts. request must
+// return without waiting for the replay (see vpnReplayer). Set once at wiring
+// time, after the configured bindings are loaded and before the server
+// handles RPCs; nil leaves it off.
+func (s *VrfBgpServer) SetVPNReplay(request func([]bgp.Family)) {
+	if request == nil {
 		return
 	}
-	s.requestVPNReplay = newVPNReplayer(replay, logger).request
+	s.requestVPNReplay = request
+	s.vpnFilterKeys = make(map[bgp.Family]string, len(vpnFamilies))
+	for _, fam := range vpnFamilies {
+		s.vpnFilterKeys[fam] = s.mgr.ImportFilterKey(fam)
+	}
 }
 
-// flushVPNReplay hands the families commitBinding collected to the replayer.
-// Handlers call it after releasing s.mu.
+// vpnFamilies are the families the VPN loc-rib replay re-evaluates.
+var vpnFamilies = []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6}
+
+// flushVPNReplay requests a replay of each L3VPN family whose import filter
+// changed since the last request. Every binding mutation handler calls it
+// after releasing s.mu, once per RPC, so a batch replays once.
+//
+// The replay gives every route the result a fresh delivery would get, in
+// both directions: an added import RT brings in routes that were dropped,
+// a removed RT or binding takes out routes no VRF imports any more, the first
+// binding declaring a family ends its default-allow, and removing the last
+// one restores it. An edit that leaves the filter unchanged, such as
+// importing an RT another VRF already imports, requests nothing.
 func (s *VrfBgpServer) flushVPNReplay() {
 	if s.requestVPNReplay == nil {
 		return
 	}
+	var families []bgp.Family
 	s.mu.Lock()
-	families := make([]bgp.Family, 0, len(s.vpnReplayPending))
-	for fam := range s.vpnReplayPending {
-		families = append(families, fam)
+	for _, fam := range vpnFamilies {
+		key := s.mgr.ImportFilterKey(fam)
+		if key != s.vpnFilterKeys[fam] {
+			s.vpnFilterKeys[fam] = key
+			families = append(families, fam)
+		}
 	}
-	clear(s.vpnReplayPending)
 	s.mu.Unlock()
 	s.requestVPNReplay(families)
 }
@@ -287,22 +308,6 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 	if s.evpnReplay != nil && hasNewImportRT(prev, updated, bgp.FamilyEVPN) {
 		if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil {
 			s.evpnReplay()
-		}
-	}
-	// Re-evaluate the loc-rib of each L3VPN family that gained an import RT.
-	// A route that arrived before the RT existed was dropped fail-closed and
-	// the watch stream will not resend it. The replay gives every route the
-	// result a fresh delivery would get, so it can also remove routes: the
-	// first binding importing a family ends that family's default-allow, and
-	// installed routes no VRF imports are withdrawn.
-	if s.requestVPNReplay != nil {
-		for _, fam := range []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6} {
-			if hasNewImportRT(prev, updated, fam) {
-				if s.vpnReplayPending == nil {
-					s.vpnReplayPending = make(map[bgp.Family]struct{})
-				}
-				s.vpnReplayPending[fam] = struct{}{}
-			}
 		}
 	}
 	if s.mupSrc != nil && mupGTP4SrcFieldsChanged(existed, prev, updated) {
@@ -513,6 +518,7 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 	// the batch rather than per VRF: the reconcile walks every plugin's
 	// whole set either way.
 	unbound := false
+	defer s.flushVPNReplay()
 	for _, name := range req.Msg.VrfNames {
 		// Hold s.mu across the manager Unbind + exporter/EVPN teardown so
 		// a concurrent same-VRF bind cannot interleave; capture the prior

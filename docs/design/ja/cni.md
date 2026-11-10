@@ -63,7 +63,7 @@ binding の扱いは次のとおりです。
 - `rd` / `rts` / `locator` を書くと、ADD は VRF に binding が無ければ `redistribute: [static]` 付きで作ります
 - binding が既にあれば書き換えません。RD、locator、NAD に書いた family の route target、(指定があれば) `maxPrefixes` が一致し、`static` を redistribute していることを確かめ、違えば ADD を失敗させます。binding の持ち主は vinberod の config か別の NAD かもしれないためです
 - 書かなければ binding には触れません。vinberod の config で VRF と binding を宣言する使い方です
-- vpnv4 / vpnv6 を import する binding が 1 つも無い間、その family の VPN 経路はすべて受け入れられます。binding が import RT を増やすと、vinberod はその family の受信済み経路を評価し直します。最初の binding の時点でこの全受け入れは終わるので、どの VRF も import しない経路は data plane から消えます。評価は ADD の RPC とは別に非同期で行い、失敗すれば log に残して再試行します
+- vpnv4 / vpnv6 の RT を持つ binding が 1 つも無い間、その family の VPN 経路はすべて受け入れられます。binding の作成や削除でその family の import 判定が変わると、vinberod はその family の受信済み経路を評価し直します。最初の binding の時点でこの全受け入れは終わるので、どの VRF も import しない経路は data plane から消えます。評価は ADD の RPC とは別に非同期で行い、失敗すれば log に残して再試行します ([srv6_bgp.md](srv6_bgp.md#binding-と-locator-の変更による再評価))
 
 ## ADD / DEL / CHECK
 

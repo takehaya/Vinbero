@@ -425,3 +425,54 @@ func TestBind_EnsuresVRF(t *testing.T) {
 		t.Errorf("after Unbind, VRF a id = %d,%t want stable %d,true", id2, ok, id)
 	}
 }
+
+// ImportFilterKey changes exactly when the L3VPN import filter would decide
+// some route differently: default-allow ending or returning, or the union of
+// import RTs growing or shrinking. Which VRF imports an RT does not matter.
+func TestImportFilterKey(t *testing.T) {
+	m := NewManager()
+	fam := bgp.FamilyVPNv4
+	bind := func(vrf string, rts ...RouteTarget) {
+		t.Helper()
+		if err := m.Bind(Binding{VRFName: vrf, Families: map[bgp.Family]FamilyPolicy{fam: {RouteTargets: rts}}}); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+	}
+	imp := func(rt string) RouteTarget { return RouteTarget{RT: rt, Direction: DirectionImport} }
+	exp := func(rt string) RouteTarget { return RouteTarget{RT: rt, Direction: DirectionExport} }
+
+	keys := []string{m.ImportFilterKey(fam)}
+	step := func(what string, changed bool) {
+		t.Helper()
+		key := m.ImportFilterKey(fam)
+		if got := key != keys[len(keys)-1]; got != changed {
+			t.Errorf("%s: key %q -> %q, changed = %v, want %v", what, keys[len(keys)-1], key, got, changed)
+		}
+		keys = append(keys, key)
+	}
+
+	bind("vrf-a")
+	step("family declared with no RT", false)
+	bind("vrf-a", exp("65000:1"))
+	step("export-only RT ends default-allow", true)
+	bind("vrf-a", exp("65000:1"), imp("65000:2"))
+	step("import RT added", true)
+	bind("vrf-b", imp("65000:2"))
+	step("RT another VRF already imports", false)
+	if err := m.Unbind("vrf-a"); err != nil {
+		t.Fatal(err)
+	}
+	step("binding removed, its RT still imported elsewhere", false)
+	bind("vrf-b", exp("65000:2"))
+	step("import RT removed", true)
+	if err := m.Unbind("vrf-b"); err != nil {
+		t.Fatal(err)
+	}
+	step("last binding removed", true)
+	if keys[len(keys)-1] != keys[0] {
+		t.Errorf("default-allow key = %q, want %q as on a fresh manager", keys[len(keys)-1], keys[0])
+	}
+	if m.ImportFilterKey(bgp.FamilyVPNv6) != keys[0] {
+		t.Error("vpnv6 key moved with vpnv4 bindings")
+	}
+}

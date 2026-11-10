@@ -58,7 +58,7 @@ encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。
 - kernel routing: main table が default、named VRF が explicit です。
 - VRF 分類: global VRF (vrf_id 0) が default、`vbctl vrf ac-add` で access circuit を宣言した named VRF が explicit です。どの VRF にも分類されない access circuit は vrf_id 0 に落ち、default-deny を有効にすると drop します。default-deny 下で underlay や control 用の interface を通したいときは、予約名 `global` の VRF に AC を足して明示的に vrf_id 0 へ分類します。`global` は予約名で、tenant VRF には使えず id も常に 0 です。
 - SR Policy steering: color 0 が default で service SID へ直行し、color が付くと SR Policy へ steering します。
-- RT import: binding が無い family は default の挙動 (MUP は default-allow、L3VPN/EVPN は該当 bd/VRF が要るので drop)、binding を宣言すると explicit に import を絞ります。
+- RT import: binding が無い family は default の挙動 (L3VPN と MUP は default-allow、EVPN は bd が要るので drop)、binding を宣言すると explicit に import を絞ります。L3VPN では binding の変更で import が変わると受信済みの経路を評価し直すので、default-allow で入った経路も最初の binding で外れます。
 
 このパターンを意識すると、新しいサービスを足すときに default をどう定義するか、explicit な tenant を何で分類するかの 2 点を決めればよい、と見通せます。
 
