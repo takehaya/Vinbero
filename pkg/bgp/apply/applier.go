@@ -397,6 +397,13 @@ func (a *Applier) buildHeadendEntry(sid string, reduced bool) (*bpf.HeadendEntry
 	if err != nil {
 		return nil, err
 	}
+	return buildHeadendEntryFrom(src, sid, reduced)
+}
+
+// buildHeadendEntryFrom is buildHeadendEntry with the encapsulation source
+// already resolved, for a caller that writes several entries and records
+// which source it wrote them with.
+func buildHeadendEntryFrom(src [16]byte, sid string, reduced bool) (*bpf.HeadendEntry, error) {
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {
 		return nil, fmt.Errorf("parse SRv6 SID %q: %w", sid, err)

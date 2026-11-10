@@ -8,7 +8,6 @@ import (
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
-	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/locator"
 )
 
@@ -32,29 +31,6 @@ type LocatorServer struct {
 
 func NewLocatorServer(mgr *locator.Manager, add func(*locator.Locator) error, del func(string, bool) error) *LocatorServer {
 	return &LocatorServer{mgr: mgr, add: add, del: del}
-}
-
-// replayOnSourceLocator wraps add so that registering the BGP source locator
-// requests a replay of the VPN loc-rib. Every VPN headend entry takes its
-// encapsulation source from that locator, so a route received while it was
-// missing is tracked but never programmed, and nothing re-delivers it. The
-// locator is often created over RPC after the daemon, and so its BGP
-// sessions, are already up. The replay also rewrites installed routes when
-// the locator comes back with a different prefix. add is returned unchanged
-// when BGP or the source locator is not configured.
-func replayOnSourceLocator(add func(*locator.Locator) error, source string, request func([]bgp.Family)) func(*locator.Locator) error {
-	if add == nil || source == "" || request == nil {
-		return add
-	}
-	return func(loc *locator.Locator) error {
-		if err := add(loc); err != nil {
-			return err
-		}
-		if loc.Name == source {
-			request(vpnFamilies)
-		}
-		return nil
-	}
 }
 
 func (s *LocatorServer) deleteLocator(name string, force bool) error {

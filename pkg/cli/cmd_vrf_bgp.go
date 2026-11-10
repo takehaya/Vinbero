@@ -93,11 +93,19 @@ func vrfBgpBindCommand() *cli.Command {
 	}
 }
 
+// vpnImportRemovalNote is the help text of the commands that can take a
+// vpnv4 / vpnv6 import away.
+const vpnImportRemovalNote = "Received vpnv4 / vpnv6 routes are evaluated again after the change:\n" +
+	"routes no VRF imports any more are removed from the data plane.\n" +
+	"When no binding declares an RT under the family any more, the family is\n" +
+	"default-allow again and every received route of it is installed."
+
 func vrfBgpUnbindCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "unbind",
-		Usage: "Remove a VRF's BGP binding",
-		Flags: []cli.Flag{&cli.StringFlag{Name: "vrf", Required: true}},
+		Name:        "unbind",
+		Usage:       "Remove a VRF's BGP binding",
+		Description: vpnImportRemovalNote,
+		Flags:       []cli.Flag{&cli.StringFlag{Name: "vrf", Required: true}},
 		Action: func(c *cli.Context) error {
 			clients := clientsFromContext(c)
 			resp, err := clients.VrfBgp.VrfBgpUnbind(context.Background(),
@@ -265,8 +273,9 @@ func vrfBgpRTCommand() *cli.Command {
 				},
 			},
 			{
-				Name:  "remove",
-				Usage: "Remove one RT (or one direction bit of it) from a family",
+				Name:        "remove",
+				Usage:       "Remove one RT (or one direction bit of it) from a family",
+				Description: vpnImportRemovalNote,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "vrf", Required: true},
 					&cli.StringFlag{Name: "family", Required: true},
@@ -381,8 +390,9 @@ func vrfBgpFamilyCommand() *cli.Command {
 				},
 			},
 			{
-				Name:  "remove",
-				Usage: "Remove a family entry from a binding",
+				Name:        "remove",
+				Usage:       "Remove a family entry from a binding",
+				Description: vpnImportRemovalNote,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "vrf", Required: true},
 					&cli.StringFlag{Name: "family", Required: true},

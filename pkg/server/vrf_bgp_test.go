@@ -1472,24 +1472,19 @@ func TestVrfBgpBindAndUnbindReconcilePluginAdvertisements(t *testing.T) {
 	}
 }
 
-// vpnReplayRecorder is a VrfBgpServer whose VPN replay requests are recorded.
-// Every request must come after the handler released the mutation mutex.
+// vpnReplayRecorder is a VrfBgpServer whose binding manager reports import
+// filter changes through the daemon's hook, with the VPN replay requests
+// recorded.
 func vpnReplayRecorder(t *testing.T) (*VrfBgpServer, *[][]bgp.Family) {
 	t.Helper()
-	s := NewVrfBgpServer(newEvpnTestMgr(t, nil), nil, nil, nil, nil, nil)
+	mgr := newEvpnTestMgr(t, nil)
+	s := NewVrfBgpServer(mgr, nil, nil, nil, nil, nil)
 	var got [][]bgp.Family
-	s.SetVPNReplay(func(families []bgp.Family) {
-		if !s.mu.TryLock() {
-			t.Error("replay requested while holding the mutation mutex")
-		} else {
-			s.mu.Unlock()
-		}
-		if len(families) > 0 {
-			families = slices.Clone(families)
-			slices.Sort(families)
-			got = append(got, families)
-		}
-	})
+	mgr.SetImportFilterHook(vpnImportFilterHook(func(families []bgp.Family) {
+		families = slices.Clone(families)
+		slices.Sort(families)
+		got = append(got, families)
+	}, zap.NewNop()))
 	return s, &got
 }
 
@@ -1520,7 +1515,7 @@ func wantReplays(t *testing.T, what string, got [][]bgp.Family, want ...[]bgp.Fa
 }
 
 // A binding change that widens what the import-RT filter accepts requests a
-// replay of exactly the families affected, once per RPC. A route received
+// replay of exactly the families affected. A route received
 // before a runtime binding exists is dropped by the filter and never
 // re-delivered by the watch stream, so without the replay a VRF bound at
 // runtime misses every route that arrived before it.
@@ -1557,13 +1552,14 @@ func TestVrfBgpBind_RequestsVpnReplayForWidenedFamilies(t *testing.T) {
 	vpnTestBind(t, s, vpnTestBinding("evi", map[string]*v1.VrfBgpFamily{"vpnv6": vpnTestRT("65000:100", "both")}))
 	wantReplays(t, "vpnv6 bind", *got, []bgp.Family{bgp.FamilyVPNv6})
 
-	// A batch requests one replay covering every affected family.
+	// In a batch each binding that changes the filter requests its own
+	// replay; the replayer merges the requests that arrive while one runs.
 	s, got = vpnReplayRecorder(t)
 	vpnTestBind(t, s,
 		vpnTestBinding("evi", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "both")}),
 		vpnTestBinding("evi2", map[string]*v1.VrfBgpFamily{"vpnv6": vpnTestRT("65000:200", "both")}),
 	)
-	wantReplays(t, "batch", *got, []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6})
+	wantReplays(t, "batch", *got, []bgp.Family{bgp.FamilyVPNv4}, []bgp.Family{bgp.FamilyVPNv6})
 }
 
 // A binding change that narrows the filter requests a replay too, so routes no
@@ -1643,6 +1639,6 @@ func TestVrfBgpServer_RequestsVpnReplayWhenImportsShrink(t *testing.T) {
 	t.Run("UnbindBatch", func(t *testing.T) {
 		s, got := setup(t)
 		unbind(t, s, "vrf-a", "vrf-b", "missing")
-		wantReplays(t, "batch unbind", *got, v4)
+		wantReplays(t, "batch unbind", *got, v4, v4)
 	})
 }

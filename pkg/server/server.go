@@ -44,7 +44,8 @@ type Server struct {
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	mupSrc       MupBindingReconciler       // MUP binding-state reconcile hook; nil when BGP is off
 	evpnReplay   func()                     // EVPN loc-rib replay (import-surface widened); nil when BGP is off
-	vpnReplay    func([]bgp.Family) error   // VPN loc-rib replay (import filter or source locator changed); nil when BGP is off
+	srcLocator   SourceLocatorReconciler    // rewrites tracked routes after the source locator is registered; nil when BGP is off
+	vpnReplay    func([]bgp.Family) error   // VPN loc-rib replay after the import filter changed; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -92,6 +93,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		s.srPolicyCtrl = srPolicyApplier
 		s.esReElectDF = srPolicyApplier.ReelectDF
 		s.mupSrc = srPolicyApplier
+		s.srcLocator = srPolicyApplier
 	}
 	return s
 }
@@ -157,13 +159,11 @@ func (s *Server) Setup() {
 	// facet<->binding cross-checks are check-then-act across two managers.
 	vrfMu := &sync.Mutex{}
 	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, s.evpnReplay, vrfMu)
-	// One replayer serves both triggers, so a binding change and a locator
-	// registration close together merge into one pass over the loc-rib.
-	var requestVPNReplay func([]bgp.Family)
 	if s.vpnReplay != nil {
-		requestVPNReplay = newVPNReplayer(s.vpnReplay, s.logger).request
+		// The manager reports every binding mutation that changed what the
+		// import-RT filter accepts, whichever path made it.
+		s.vrfBgpMgr.SetImportFilterHook(vpnImportFilterHook(newVPNReplayer(s.vpnReplay, s.logger).request, s.logger))
 	}
-	vrfBgpServer.SetVPNReplay(requestVPNReplay)
 	vrfBgpServer.SetCplaneManager(s.cplaneMgr)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
@@ -207,8 +207,8 @@ func (s *Server) Setup() {
 	// newly added locators to reconcile uA claims against.
 	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
 
-	addLocator := replayOnSourceLocator(sidFunctionServer.AddLocatorAndClaim, s.cfg.BGP.Global.SourceLocator, requestVPNReplay)
-	locatorServer := NewLocatorServer(s.locatorMgr, addLocator, sidFunctionServer.DeleteLocatorGuarded)
+	addLocator, delLocator := s.sourceLocatorHooks(sidFunctionServer.AddLocatorAndClaim, sidFunctionServer.DeleteLocatorGuarded)
+	locatorServer := NewLocatorServer(s.locatorMgr, addLocator, delLocator)
 	path, handler := vinberov1connect.NewLocatorServiceHandler(locatorServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered LocatorService", zap.String("path", path))

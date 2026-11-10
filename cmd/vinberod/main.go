@@ -329,7 +329,7 @@ func run(cliCtx *cli.Context) error {
 		// Re-evaluates the L3VPN loc-rib after a runtime binding change
 		// alters what the import-RT filter accepts (a CNI ADD binding a VRF
 		// after the peer's routes were already in the loc-rib, an RT or
-		// binding removed), and after the source locator is registered.
+		// binding removed).
 		vpnReplay = func(families []bgp.Family) error {
 			return applier.QuietVPNDenials(func() error {
 				return routeDemux.ReplayBuiltin("applier", families)

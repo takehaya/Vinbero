@@ -12,6 +12,8 @@ import (
 
 	"connectrpc.com/connect"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
@@ -20,12 +22,16 @@ import (
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/server"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // These tests run the applier behind the daemon's RPC server, with a fake
 // loc-rib standing in for GoBGP: the server requests replays, the loc-rib
-// re-delivers what it holds, and the assertions read the data plane.
+// re-delivers what it holds, and the assertions read the data plane. A
+// binding change reaches the applier through a VPN loc-rib replay on the
+// replayer's goroutine; a source locator registration is handled within
+// the LocatorCreate RPC.
 
 const sourceLocator = "LOC2"
 
@@ -41,7 +47,13 @@ type fakeRIB struct {
 func (r *fakeRIB) deliver(ev bgp.RouteEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := ev.VPN.Prefix + "|" + ev.VPN.RD
+	var key string
+	switch {
+	case ev.VPN != nil:
+		key = ev.VPN.Prefix + "|" + ev.VPN.RD
+	case ev.EVPN != nil:
+		key = ev.EVPN.MAC + "|" + ev.EVPN.RD
+	}
 	if ev.IsWithdraw {
 		delete(r.routes, key)
 	} else {
@@ -68,12 +80,25 @@ func (r *fakeRIB) replay(families []bgp.Family) error {
 	return err
 }
 
+// evpnReplay is what the daemon hands the server as its EVPN replay.
+func (r *fakeRIB) evpnReplay() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ev := range r.routes {
+		if ev.Family == bgp.FamilyEVPN {
+			r.a.Apply(ev)
+		}
+	}
+}
+
 type vpnLab struct {
-	t       *testing.T
-	dp      *apply.FakeDataPlane
-	rib     *fakeRIB
-	locator vinberov1connect.LocatorServiceClient
-	vrfBgp  vinberov1connect.VrfBgpServiceClient
+	t        *testing.T
+	dp       *apply.FakeDataPlane
+	rib      *fakeRIB
+	bindings *vrfbgp.Manager
+	logs     *observer.ObservedLogs
+	locator  vinberov1connect.LocatorServiceClient
+	vrfBgp   vinberov1connect.VrfBgpServiceClient
 }
 
 func newVPNLab(t *testing.T) *vpnLab {
@@ -81,21 +106,25 @@ func newVPNLab(t *testing.T) *vpnLab {
 	dp := apply.NewFakeDataPlane()
 	locs := locator.NewManager()
 	bindings := vrfbgp.NewManager()
-	a := apply.NewApplier(dp, locs, bindings, apply.NewFakeFib(), sourceLocator, 65100, zap.NewNop())
+	core, logs := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+	a := apply.NewApplier(dp, locs, bindings, apply.NewFakeFib(), sourceLocator, 65100, logger)
 	rib := &fakeRIB{a: a, routes: map[string]bgp.RouteEvent{}, done: make(chan struct{}, 16)}
 
 	cfg := &config.Config{}
 	cfg.BGP.Global.SourceLocator = sourceLocator
-	srv := server.NewServer(cfg, nil, nil, nil, locs, bindings, nil, nil, nil, nil, nil, nil, nil, nil, nil, rib.replay, zap.NewNop())
+	srv := server.NewServer(cfg, nil, nil, nil, locs, bindings, nil, nil, nil, nil, a, nil, nil, nil, rib.evpnReplay, rib.replay, logger)
 	srv.Setup()
 	ts := httptest.NewServer(srv.Mux())
 	t.Cleanup(ts.Close)
 	return &vpnLab{
-		t:       t,
-		dp:      dp,
-		rib:     rib,
-		locator: vinberov1connect.NewLocatorServiceClient(http.DefaultClient, ts.URL),
-		vrfBgp:  vinberov1connect.NewVrfBgpServiceClient(http.DefaultClient, ts.URL),
+		t:        t,
+		dp:       dp,
+		rib:      rib,
+		bindings: bindings,
+		logs:     logs,
+		locator:  vinberov1connect.NewLocatorServiceClient(http.DefaultClient, ts.URL),
+		vrfBgp:   vinberov1connect.NewVrfBgpServiceClient(http.DefaultClient, ts.URL),
 	}
 }
 
@@ -237,7 +266,6 @@ func TestVPNRouteBeforeSourceLocator(t *testing.T) {
 	}
 
 	l.createLocator("fd00:200::/48")
-	l.replayed()
 	if !l.programmed("10.1.0.0/24", loc2Src) {
 		t.Fatal("route never programmed after the source locator was registered")
 	}
@@ -258,7 +286,6 @@ func TestVPNReevaluationEveryOrder(t *testing.T) {
 		},
 		"locator": func(l *vpnLab) {
 			l.createLocator("fd00:200::/48")
-			l.replayed()
 		},
 	}
 	orders := [][3]string{
@@ -290,7 +317,6 @@ func TestVPNReevaluationEveryOrder(t *testing.T) {
 func TestVPNReevaluationRTAdded(t *testing.T) {
 	l := newVPNLab(t)
 	l.createLocator("fd00:200::/48")
-	l.replayed()
 	l.bind("vrf-cust", "65000:100")
 	l.replayed()
 	l.rib.deliver(importedRoute)
@@ -312,7 +338,6 @@ func TestVPNReevaluationRetract(t *testing.T) {
 	setup := func(t *testing.T) *vpnLab {
 		l := newVPNLab(t)
 		l.createLocator("fd00:200::/48")
-		l.replayed()
 		l.bind("vrf-a", "65000:200")
 		l.replayed()
 		l.bind("vrf-b", "65000:900")
@@ -327,6 +352,7 @@ func TestVPNReevaluationRetract(t *testing.T) {
 
 	t.Run("RT removed", func(t *testing.T) {
 		l := setup(t)
+		l.logs.TakeAll()
 		l.removeRT("vrf-b", "65000:900")
 		l.replayed()
 		if l.programmed("10.9.0.0/24", loc2Src) {
@@ -334,6 +360,9 @@ func TestVPNReevaluationRetract(t *testing.T) {
 		}
 		if !l.programmed("10.1.0.0/24", loc2Src) {
 			t.Error("route still imported by vrf-a was removed")
+		}
+		if n := l.logs.FilterMessageSnippet("default-allow again").Len(); n != 0 {
+			t.Errorf("a removal that leaves the family gated warned about default-allow %d times", n)
 		}
 	})
 
@@ -348,10 +377,14 @@ func TestVPNReevaluationRetract(t *testing.T) {
 			t.Error("route still imported by vrf-a was removed")
 		}
 
+		l.logs.TakeAll()
 		l.unbind("vrf-a")
 		l.replayed()
 		if !l.programmed("10.1.0.0/24", loc2Src) || !l.programmed("10.9.0.0/24", loc2Src) {
 			t.Error("removing the last binding did not restore default-allow")
+		}
+		if n := l.logs.FilterMessageSnippet("default-allow again").Len(); n != 1 {
+			t.Errorf("default-allow warnings = %d, want 1", n)
 		}
 	})
 }
@@ -361,15 +394,84 @@ func TestVPNReevaluationRetract(t *testing.T) {
 func TestVPNReevaluationSourceLocatorMoved(t *testing.T) {
 	l := newVPNLab(t)
 	l.createLocator("fd00:200::/48")
-	l.replayed()
 	l.rib.deliver(importedRoute)
 	if !l.programmed("10.1.0.0/24", loc2Src) {
 		t.Fatal("route not programmed")
 	}
 	l.deleteLocator()
 	l.createLocator("fd00:300::/48")
-	l.replayed()
 	if !l.programmed("10.1.0.0/24", netip.MustParseAddr("fd00:300::")) {
 		t.Fatal("route gone after the locator moved")
+	}
+}
+
+// Deleting the source locator leaves installed routes forwarding with the
+// source they have and logs one warning. A replay meanwhile neither rewrites
+// them nor logs per prefix, a route received meanwhile waits with one
+// warning, and registering the locator again under another prefix writes
+// them all with the new source.
+func TestVPNSourceLocatorDeleted(t *testing.T) {
+	l := newVPNLab(t)
+	l.createLocator("fd00:200::/48")
+	l.bind("vrf-a", "65000:200", "65000:900")
+	l.replayed()
+	l.rib.deliver(importedRoute)
+	if !l.programmed("10.1.0.0/24", loc2Src) {
+		t.Fatal("route not programmed")
+	}
+
+	l.logs.TakeAll()
+	l.deleteLocator()
+	l.removeRT("vrf-a", "65000:900") // a replay while the locator is gone
+	l.replayed()
+	l.rib.deliver(otherRoute) // no VRF imports it now
+	l.addRT("vrf-a", "65000:900")
+	l.replayed()
+	if !l.programmed("10.1.0.0/24", loc2Src) {
+		t.Error("deleting the source locator removed an installed route")
+	}
+	if l.programmed("10.9.0.0/24", loc2Src) {
+		t.Error("route programmed without a source locator")
+	}
+	if errs := l.logs.FilterLevelExact(zapcore.ErrorLevel).All(); len(errs) != 0 {
+		t.Errorf("logged %d errors while the source locator was gone: %+v", len(errs), errs)
+	}
+	warns := l.logs.FilterLevelExact(zapcore.WarnLevel)
+	if n := warns.FilterMessageSnippet("source locator deleted").Len(); n != 1 {
+		t.Errorf("deletion warnings = %d, want 1", n)
+	}
+	if n := warns.FilterMessageSnippet("not installed until the source locator").Len(); n != 1 {
+		t.Errorf("waiting-prefix warnings = %d, want 1 (for 10.9.0.0/24)", n)
+	}
+
+	l.createLocator("fd00:300::/48")
+	moved := netip.MustParseAddr("fd00:300::")
+	if !l.programmed("10.1.0.0/24", moved) || !l.programmed("10.9.0.0/24", moved) {
+		t.Error("routes not written after the source locator was registered again")
+	}
+}
+
+// An EVPN RT2 received before the source locator cannot be written either.
+// Registering the locator replays the EVPN loc-rib, which writes it.
+func TestEVPNRouteBeforeSourceLocator(t *testing.T) {
+	l := newVPNLab(t)
+	if _, err := l.bindings.VRF().SetBridge("evi-100", vrf.Bridge{Name: "br100", BdID: 100, Ifindex: 5}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	if err := l.bindings.Bind(vrfbgp.Binding{VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionImport}}},
+	}}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	l.rib.deliver(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: &bgp.EVPNRoute{
+		Type: bgp.EVPNRouteTypeMACIP, RD: "65000:100", RTs: []string{"65000:100"},
+		MAC: "aa:bb:cc:00:00:01", SRv6SID: "fd00:100:0:d2::",
+	}})
+	if l.dp.HasFdb(100, "aa:bb:cc:00:00:01") {
+		t.Fatal("RT2 written without a source locator")
+	}
+	l.createLocator("fd00:200::/48")
+	if !l.dp.HasFdb(100, "aa:bb:cc:00:00:01") {
+		t.Fatal("RT2 not written after the source locator was registered")
 	}
 }

@@ -363,7 +363,21 @@ type Manager struct {
 	mu       sync.RWMutex
 	bindings map[string]Binding
 	vrf      *vrf.Manager
+	// onImportFilterChange, set once before use and read under mu, is told
+	// about every Bind or Unbind that changed a family's ImportFilterKey.
+	onImportFilterChange func([]ImportFilterChange)
 }
+
+// ImportFilterChange reports that one Bind or Unbind changed the
+// ImportFilterKey of Family from Before to After.
+type ImportFilterChange struct {
+	Family        bgp.Family
+	Before, After string
+}
+
+// ImportFilterDefaultAllow is the ImportFilterKey of a family no binding
+// declares: every received route of it is accepted.
+const ImportFilterDefaultAllow = "allow"
 
 // NewManager returns an empty Manager with a fresh vrf.Manager.
 func NewManager() *Manager {
@@ -392,9 +406,10 @@ func (m *Manager) Bind(b Binding) error {
 		return ErrEmptyVRFName
 	}
 	m.vrf.Ensure(b.VRFName) // VRF identity is independent of the binding's lifetime
+	b = b.Normalize()
 	m.mu.Lock()
-	m.bindings[b.VRFName] = b.Normalize()
-	m.mu.Unlock()
+	prev := m.bindings[b.VRFName]
+	m.mutateLocked(func() { m.bindings[b.VRFName] = b }, prev, b)
 	return nil
 }
 
@@ -403,12 +418,61 @@ func (m *Manager) Bind(b Binding) error {
 // is an explicit VrfService / config operation.
 func (m *Manager) Unbind(vrfName string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.bindings[vrfName]; !ok {
+	prev, ok := m.bindings[vrfName]
+	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrBindingNotFound, vrfName)
 	}
-	delete(m.bindings, vrfName)
+	m.mutateLocked(func() { delete(m.bindings, vrfName) }, prev)
 	return nil
+}
+
+// SetImportFilterHook installs fn, called after every Bind or Unbind that
+// changed the ImportFilterKey of some family, with each change. Every
+// mutation is compared on its own, under the lock, so a change that a later
+// call undoes is still reported. fn runs on the mutating goroutine after the
+// lock is released and must not block. Set it once, before the manager is
+// shared.
+func (m *Manager) SetImportFilterHook(fn func([]ImportFilterChange)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onImportFilterChange = fn
+}
+
+// mutateLocked applies mutate, which may only change the families declared
+// by the affected bindings, and reports the import filter changes it caused.
+// The caller holds m.mu for writing; mutateLocked releases it.
+func (m *Manager) mutateLocked(mutate func(), affected ...Binding) {
+	hook := m.onImportFilterChange
+	if hook == nil {
+		mutate()
+		m.mu.Unlock()
+		return
+	}
+	var families []bgp.Family
+	for _, b := range affected {
+		for fam := range b.Families {
+			if !slices.Contains(families, fam) {
+				families = append(families, fam)
+			}
+		}
+	}
+	slices.Sort(families)
+	before := make([]string, len(families))
+	for i, fam := range families {
+		before[i] = m.importFilterKeyLocked(fam)
+	}
+	mutate()
+	var changes []ImportFilterChange
+	for i, fam := range families {
+		if after := m.importFilterKeyLocked(fam); after != before[i] {
+			changes = append(changes, ImportFilterChange{Family: fam, Before: before[i], After: after})
+		}
+	}
+	m.mu.Unlock()
+	if len(changes) > 0 {
+		hook(changes)
+	}
 }
 
 // Get returns the binding for vrfName and ok=false if none is registered.
@@ -494,7 +558,7 @@ func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName st
 			continue
 		}
 		for _, rt := range fp.RouteTargets {
-			if rt.Direction.Has(DirectionImport) && slices.Contains(rts, rt.RT) {
+			if rt.imports() && slices.Contains(rts, rt.RT) {
 				var facetBD uint16
 				if fam == bgp.FamilyEVPN {
 					v, exists := m.vrf.Get(b.VRFName)
@@ -561,6 +625,10 @@ func (m *Manager) ExportRTsForFamily(vrfName string, fam bgp.Family) []string {
 func (m *Manager) EmptyForFamily(fam bgp.Family) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.emptyForFamilyLocked(fam)
+}
+
+func (m *Manager) emptyForFamilyLocked(fam bgp.Family) bool {
 	for _, b := range m.bindings {
 		if fp, has := b.Families[fam]; has && len(fp.RouteTargets) > 0 {
 			return false
@@ -579,28 +647,30 @@ func (m *Manager) EmptyForFamily(fam bgp.Family) bool {
 func (m *Manager) ImportFilterKey(fam bgp.Family) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	gated := false
+	return m.importFilterKeyLocked(fam)
+}
+
+// importFilterKeyLocked is ImportFilterKey under a held m.mu. It decides
+// default-allow with emptyForFamilyLocked and collects RTs with imports, the
+// same predicates EmptyForFamily and MatchImportForFamily apply.
+func (m *Manager) importFilterKeyLocked(fam bgp.Family) string {
+	if m.emptyForFamilyLocked(fam) {
+		return ImportFilterDefaultAllow
+	}
 	var rts []string
 	for _, b := range m.bindings {
-		fp, has := b.Families[fam]
-		if !has {
-			continue
-		}
-		if len(fp.RouteTargets) > 0 {
-			gated = true
-		}
-		for _, rt := range fp.RouteTargets {
-			if rt.Direction.Has(DirectionImport) {
+		for _, rt := range b.Families[fam].RouteTargets {
+			if rt.imports() {
 				rts = append(rts, rt.RT)
 			}
 		}
 	}
-	if !gated {
-		return "allow"
-	}
 	slices.Sort(rts)
 	return "import:" + strings.Join(slices.Compact(rts), ",")
 }
+
+// imports reports whether rt applies in the import direction.
+func (rt RouteTarget) imports() bool { return rt.Direction.Has(DirectionImport) }
 
 // MatchImport is the legacy L3VPN helper, retained as a thin wrapper over
 // MatchImportForFamily. It checks VPNv4 then VPNv6 so a binding declared on

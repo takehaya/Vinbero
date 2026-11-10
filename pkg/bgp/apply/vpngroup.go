@@ -63,6 +63,10 @@ type vpnDest struct {
 	// installed is the member SID list last written, used to skip
 	// reconciles that would rewrite an unchanged group.
 	installed []string // groupFingerprint of the last write
+	// awaitingSource records that the group could not be written for lack
+	// of the source locator and that this was logged, so a replay does not
+	// log it again for every such prefix.
+	awaitingSource bool
 	// probed reports whether the prober currently holds a registration
 	// that matches the group's actual data-plane layout. It turns false
 	// when a group write fails (reconcile unregisters and the group is
@@ -255,7 +259,23 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		a.retireVPNGroup(dk, d)
 		return
 	}
-	fingerprint := a.groupFingerprint(ms)
+	// One source for the whole write, so the fingerprint records the
+	// source the entries actually carry.
+	src, err := a.encapSource()
+	if err != nil {
+		// Without the source locator nothing can be written. An installed
+		// group keeps forwarding with the source it has (deleting the
+		// locator logs that once); one never written waits, logged once, and
+		// ReconcileSourceLocator writes both when the locator is back.
+		if d.installed == nil && !d.awaitingSource {
+			d.awaitingSource = true
+			a.logger.Warn("VPN prefix not installed until the source locator is registered",
+				zap.String("prefix", dk.prefix), zap.Error(err))
+		}
+		return
+	}
+	d.awaitingSource = false
+	fingerprint := groupFingerprint(ms, src)
 	if slices.Equal(fingerprint, d.installed) {
 		return
 	}
@@ -265,7 +285,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	// different SR Policies stay steered after aggregation.
 	paths := make([]bpf.EcmpPath, 0, len(ms))
 	for _, m := range ms {
-		entry, err := a.buildHeadendEntry(m.sid, m.reduced)
+		entry, err := buildHeadendEntryFrom(src, m.sid, m.reduced)
 		if err != nil {
 			a.logger.Error("build ECMP member",
 				zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))
@@ -306,7 +326,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 
 	// The trigger mirrors the first member so the fallback forwards the same
 	// way the group's first path would, steering included.
-	trigger, err := a.buildHeadendEntry(ms[0].sid, ms[0].reduced)
+	trigger, err := buildHeadendEntryFrom(src, ms[0].sid, ms[0].reduced)
 	if err != nil {
 		a.logger.Error("build ECMP trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
@@ -328,17 +348,35 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 }
 
 // groupFingerprint is what reconcileVPNGroup records as installed: the
-// member set, plus the encapsulation source every member entry carries. With
-// the source in it, a source locator re-registered under another prefix
-// rewrites each group on the next reconcile instead of matching the old
-// write and keeping the stale source.
-func (a *Applier) groupFingerprint(ms []*vpnPath) []string {
-	fp := memberFingerprint(ms)
-	src, err := a.encapSource()
-	if err != nil {
-		return append(fp, "src=none")
+// member set, plus the encapsulation source src every entry was written
+// with. With the source in it, a source locator re-registered under another
+// prefix rewrites each group on the next reconcile instead of matching the
+// old write and keeping the stale source.
+func groupFingerprint(ms []*vpnPath, src [16]byte) []string {
+	return append(memberFingerprint(ms), "src="+netip.AddrFrom16(src).String())
+}
+
+// ReconcileSourceLocator writes what the applier tracks again after the
+// source locator is registered. A VPN prefix or MUP session received while
+// it was missing is tracked but could not be written, and nothing else
+// would deliver it again; one written earlier takes the locator's new prefix
+// if it changed. Unchanged entries are left alone. Safe to call from RPC
+// goroutines.
+func (a *Applier) ReconcileSourceLocator() {
+	a.vpnMu.Lock()
+	for dk, d := range a.vpnGroups.dests {
+		a.reconcileVPNGroup(dk, d)
 	}
-	return append(fp, "src="+netip.AddrFrom16(src).String())
+	a.vpnMu.Unlock()
+
+	a.mupMu.Lock()
+	defer a.mupMu.Unlock()
+	for k := range a.mupT1ST {
+		a.reconcileMUPT1ST(k)
+	}
+	for k := range a.mupT2ST {
+		a.reconcileMUPT2ST(k)
+	}
 }
 
 // retireVPNGroup tears down a destination whose last path went away and

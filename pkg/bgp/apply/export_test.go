@@ -25,3 +25,9 @@ func (f *fakeHeadend) HeadendV4(prefix string) (*bpf.HeadendEntry, bool) {
 func (f *fakeHeadend) EcmpGroup(id uint32) []bpf.EcmpPath {
 	return f.ecmpGroups[id]
 }
+
+// HasFdb reports whether an FDB entry is installed for mac in bdID.
+func (f *fakeHeadend) HasFdb(bdID uint16, mac string) bool {
+	_, ok := f.fdb[fdbKey{bdID, mac}]
+	return ok
+}

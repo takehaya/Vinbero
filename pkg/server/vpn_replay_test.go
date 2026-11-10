@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -9,11 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
-
-	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
-	"github.com/takehaya/vinbero/pkg/locator"
 )
 
 // fakeVPNReplay records calls and returns scripted errors, then nil.
@@ -137,66 +132,5 @@ func TestVPNReplayerMergesRequests(t *testing.T) {
 	want := [][]bgp.Family{{bgp.FamilyVPNv4}, {bgp.FamilyVPNv4, bgp.FamilyVPNv6}}
 	if !slices.EqualFunc(calls, want, slices.Equal[[]bgp.Family]) {
 		t.Errorf("calls = %v, want %v", calls, want)
-	}
-}
-
-// Registering the BGP source locator requests a VPN replay. A VPN route that
-// arrives first is tracked but cannot be programmed, since every headend entry
-// takes its encapsulation source from that locator, and nothing else would
-// deliver the route again. Other locators and failed registrations request
-// nothing.
-func TestLocatorCreate_SourceLocatorRequestsVpnReplay(t *testing.T) {
-	mgr := locator.NewManager()
-	var got [][]bgp.Family
-	request := func(families []bgp.Family) {
-		got = append(got, slices.Clone(families))
-	}
-	srv := NewLocatorServer(mgr, replayOnSourceLocator(mgr.Add, "LOC2", request), nil)
-	create := func(name, prefix string) {
-		t.Helper()
-		if _, err := srv.LocatorCreate(context.Background(), connect.NewRequest(&v1.LocatorCreateRequest{
-			Locators: []*v1.Locator{{
-				Name: name, Prefix: prefix,
-				BlockLen: 32, NodeLen: 16, FunctionLen: 16, ArgumentLen: 64,
-				Behavior: v1.LocatorBehaviorMode_LOCATOR_BEHAVIOR_MODE_CLASSIC,
-			}},
-		})); err != nil {
-			t.Fatalf("LocatorCreate: %v", err)
-		}
-	}
-
-	create("LOC1", "fd00:100::/48")
-	if len(got) != 0 {
-		t.Fatalf("another locator requested a replay: %v", got)
-	}
-	create("LOC2", "fd00:100::/48") // prefix taken: the add fails
-	if len(got) != 0 {
-		t.Fatalf("a failed registration requested a replay: %v", got)
-	}
-	create("LOC2", "fd00:200::/48")
-	want := [][]bgp.Family{{bgp.FamilyVPNv4, bgp.FamilyVPNv6}}
-	if !slices.EqualFunc(got, want, slices.Equal[[]bgp.Family]) {
-		t.Errorf("source locator: replays = %v, want %v", got, want)
-	}
-	if _, ok := mgr.Get("LOC2"); !ok {
-		t.Error("source locator was not registered")
-	}
-}
-
-// Without BGP or a configured source locator the add is passed through as is.
-func TestReplayOnSourceLocatorPassThrough(t *testing.T) {
-	add := func(*locator.Locator) error { return nil }
-	request := func([]bgp.Family) { t.Error("unexpected replay request") }
-	for _, tc := range []struct {
-		source  string
-		request func([]bgp.Family)
-	}{{"", request}, {"LOC2", nil}} {
-		wrapped := replayOnSourceLocator(add, tc.source, tc.request)
-		if err := wrapped(&locator.Locator{Name: "LOC2"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if replayOnSourceLocator(nil, "LOC2", request) != nil {
-		t.Error("a nil add was wrapped")
 	}
 }
