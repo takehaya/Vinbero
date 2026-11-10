@@ -250,6 +250,14 @@ func (s *Server) Setup() {
 
 	// HeadendL2 service
 	headendL2Server := NewHeadendL2Server(s.mapOps)
+	headendL2Server.SetClosedVRFCheck(func(ifindex uint32) (string, bool, error) {
+		links, err := vrf.SnapshotLinks()
+		if err != nil {
+			return "", false, err
+		}
+		name, closed := s.vrfBgpMgr.VRF().ClosedVRFOfPort(links, ifindex)
+		return name, closed, nil
+	}, vrfMu)
 	path, handler = vinberov1connect.NewHeadendL2ServiceHandler(headendL2Server)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered HeadendL2Service", zap.String("path", path))
@@ -296,6 +304,8 @@ func (s *Server) Setup() {
 	}
 	s.vrfBgpMgr.VRF().SetLogger(s.logger)
 	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu, grantLease)
+	vrfServer.SetLogger(s.logger)
+	vrfServer.SetL2CircuitPorts(s.mapOps.HeadendL2Ports)
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

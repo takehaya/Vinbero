@@ -87,7 +87,8 @@ static __always_inline int do_h_encaps_impl(
     __u8 inner_proto,
     __u16 inner_total_len,
     __u16 l3_offset,
-    bool reduced)
+    bool reduced,
+    __u32 vrf_id)
 {
     bool no_srh = reduced && (entry->num_segments == 1);
     int srh_entries = 0;
@@ -156,7 +157,7 @@ static __always_inline int do_h_encaps_impl(
 
     // FIB lookup and redirect
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, vrf_id);
     return fib_result_to_xdp_action(fib_result, ifindex);
 }
 
@@ -166,6 +167,7 @@ struct h_encaps_args {
     bool reduced;
     __u16 inner_total_len;
     __u16 l3_offset;
+    __u32 vrf_id;    // ingress VRF, for the outer lookup (srv6_fib_v6_params_set)
 };
 
 // Noinline subprogram to limit verifier scope.
@@ -176,23 +178,25 @@ static __noinline int __do_h_encaps_subprog(
     struct h_encaps_args *args)
 {
     return do_h_encaps_impl(ctx, saved_eth, entry, args->inner_proto,
-                            args->inner_total_len, args->l3_offset, args->reduced);
+                            args->inner_total_len, args->l3_offset, args->reduced,
+                            args->vrf_id);
 }
 
-// Inline wrappers preserving existing 6-arg signatures for callers
+// Inline wrappers. vrf_id is the packet's ingress VRF (0 for End.B6.Encaps,
+// which only runs for the global VRF).
 static __always_inline int do_h_encaps_core(
     struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
-    __u8 inner_proto, __u16 inner_total_len, __u16 l3_offset)
+    __u8 inner_proto, __u16 inner_total_len, __u32 vrf_id, __u16 l3_offset)
 {
-    struct h_encaps_args args = { inner_proto, false, inner_total_len, l3_offset };
+    struct h_encaps_args args = { inner_proto, false, inner_total_len, l3_offset, vrf_id };
     return __do_h_encaps_subprog(ctx, saved_eth, entry, &args);
 }
 
 static __always_inline int do_h_encaps_red_core(
     struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
-    __u8 inner_proto, __u16 inner_total_len, __u16 l3_offset)
+    __u8 inner_proto, __u16 inner_total_len, __u32 vrf_id, __u16 l3_offset)
 {
-    struct h_encaps_args args = { inner_proto, true, inner_total_len, l3_offset };
+    struct h_encaps_args args = { inner_proto, true, inner_total_len, l3_offset, vrf_id };
     return __do_h_encaps_subprog(ctx, saved_eth, entry, &args);
 }
 
@@ -203,7 +207,7 @@ static __always_inline int do_h_encaps_red_core(
 // H.Encaps for IPv4 (RFC 8986 Section 5.1)
 static __always_inline int do_h_encaps_v4(
     struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph,
-    struct headend_entry *entry, __u16 l3_offset)
+    struct headend_entry *entry, __u32 vrf_id, __u16 l3_offset)
 {
     struct headend_entry composed;
     entry = resolve_sr_policy(entry, &composed);
@@ -213,13 +217,13 @@ static __always_inline int do_h_encaps_v4(
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
     return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPIP,
-                            bpf_ntohs(iph->tot_len), l3_offset);
+                            bpf_ntohs(iph->tot_len), vrf_id, l3_offset);
 }
 
 // H.Encaps for IPv6 (RFC 8986 Section 5.1)
 static __always_inline int do_h_encaps_v6(
     struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hdr *inner_ip6h,
-    struct headend_entry *entry, __u16 l3_offset)
+    struct headend_entry *entry, __u32 vrf_id, __u16 l3_offset)
 {
     struct headend_entry composed;
     entry = resolve_sr_policy(entry, &composed);
@@ -229,13 +233,13 @@ static __always_inline int do_h_encaps_v6(
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
     return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPV6,
-                            40 + bpf_ntohs(inner_ip6h->payload_len), l3_offset);
+                            40 + bpf_ntohs(inner_ip6h->payload_len), vrf_id, l3_offset);
 }
 
 // H.Encaps.Red for IPv4 (RFC 8986 Section 5.1.1)
 static __always_inline int do_h_encaps_red_v4(
     struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph,
-    struct headend_entry *entry, __u16 l3_offset)
+    struct headend_entry *entry, __u32 vrf_id, __u16 l3_offset)
 {
     struct headend_entry composed;
     entry = resolve_sr_policy(entry, &composed);
@@ -245,13 +249,13 @@ static __always_inline int do_h_encaps_red_v4(
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
     return do_h_encaps_red_core(ctx, &saved_eth, entry, IPPROTO_IPIP,
-                                bpf_ntohs(iph->tot_len), l3_offset);
+                                bpf_ntohs(iph->tot_len), vrf_id, l3_offset);
 }
 
 // H.Encaps.Red for IPv6 (RFC 8986 Section 5.1.1)
 static __always_inline int do_h_encaps_red_v6(
     struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hdr *inner_ip6h,
-    struct headend_entry *entry, __u16 l3_offset)
+    struct headend_entry *entry, __u32 vrf_id, __u16 l3_offset)
 {
     struct headend_entry composed;
     entry = resolve_sr_policy(entry, &composed);
@@ -261,7 +265,7 @@ static __always_inline int do_h_encaps_red_v6(
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
     return do_h_encaps_red_core(ctx, &saved_eth, entry, IPPROTO_IPV6,
-                                40 + bpf_ntohs(inner_ip6h->payload_len), l3_offset);
+                                40 + bpf_ntohs(inner_ip6h->payload_len), vrf_id, l3_offset);
 }
 
 #endif // SRV6_ENCAPS_H

@@ -31,7 +31,7 @@ several customer networks stay separated per VRF.
 ## SIDs and tenant ACs
 
 Only packets that enter on the global VRF (vrf_id 0) look up local SIDs.
-`test.sh` checks this in its last phase. host2 encapsulates its traffic
+`test.sh` checks this in its third phase. host2 encapsulates its traffic
 to host1 straight to the End.DT4 SID `fc00:3::3`, and the test reads
 router3's End.DT4 slot counter (`vbctl stats slot show --type endpoint`,
 which is why `vinbero_router3.yaml` sets `enable_stats`):
@@ -47,6 +47,40 @@ which is why `vinbero_router3.yaml` sets `enable_stats`):
   untagged side of the port is a tenant AC
 - host1 to host2 keeps working: router3's uplink has no AC, so its
   packets are still in the global VRF and reach the SID
+
+## The kernel VRF table
+
+What XDP passes on from a tenant port is looked up in the kernel's VRF
+table. `setup.sh` makes vrf100 with `ip link add`, so its table has no
+route of last resort and a miss goes on to the main table. The fourth
+phase of `test.sh` shows the difference once Vinbero manages the VRF:
+
+- host2 encapsulates its traffic to host1 to router1's End.DX4 SID
+  `fc00:1::1`, a remote PE's SID that router3 has only in its main table.
+  Before Vinbero manages vrf100, the packets fall through to the main
+  table and reach host1
+- `vbctl vrf create --name vrf100 --table-id 100` adopts the device and
+  adds an IPv4 and an IPv6 `unreachable default` to table 100. The same
+  packets now stop in the VRF table
+- the kernel seg6 route in table 100 that carried host2 to host1 needs the
+  main table for its outer header too, so Vinbero takes over:
+  `vbctl hv4 create` encapsulates the packets from the vrf100 AC, and
+  their outer header is looked up in the main table
+- host1 to host2 (End.DT4 into vrf100) keeps working
+- router3 keeps the encapsulation's underlay next hop (router2, reached
+  through a static route) as a managed neighbour. The test deletes that
+  neighbour entry and sends only host2's pings: they get through again
+  without any other traffic. It then moves the route to another address
+  of router2, whose entry does not exist yet, and the pings get through
+  again
+
+The fifth phase restarts vinberod with `internal.bpf.fib_lookup_tbid: "off"`,
+which makes it behave as on a kernel whose `bpf_fib_lookup` lacks
+`BPF_FIB_LOOKUP_TBID`: every encapsulation takes the ingress lookup, so the
+VRF tables stay open. The restart gives back the unreachable defaults of
+table 100, host2 to host1 is encapsulated again (its outer header reaches
+the main table through the open table), and host2's packets to the remote
+SID get through the kernel again.
 
 ## Quick start
 

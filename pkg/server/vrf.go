@@ -15,6 +15,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
+	"go.uber.org/zap"
 )
 
 // SidLister is the SID-table surface the VRF delete reference check reads.
@@ -70,6 +71,15 @@ type VrfServer struct {
 	// routes dropped fail-closed before the attach are rescued. Failures
 	// are logged inside the hook (best-effort).
 	evpnReplay func()
+	// links reads the host's interfaces for the member check
+	// (vrf.Manager.MembersWithoutAC); l2Ports lists the ports that carry
+	// an L2 headend circuit, which a create refuses to enslave into a
+	// closed VRF (nil checks nothing); logger receives the warnings.
+	// Defaults: the kernel, nil and a no-op logger (SetLogger,
+	// SetL2CircuitPorts).
+	links   func() (vrf.Links, error)
+	l2Ports func() ([]uint32, error)
+	logger  *zap.Logger
 	// mu serializes the mutation handlers' mutate+reconcile(+rollback)
 	// sequence and the device / bridge create+delete flows. SetIngressVrf /
 	// SetIngressPolicy replace the maps with a snapshot-then-rollback strategy
@@ -107,7 +117,21 @@ func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu, grantLease: grantLease}
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu, grantLease: grantLease,
+		links: vrf.SnapshotLinks, logger: zap.NewNop()}
+}
+
+// SetL2CircuitPorts installs the lister of the ports that carry an L2
+// headend circuit.
+func (s *VrfServer) SetL2CircuitPorts(fn func() ([]uint32, error)) {
+	s.l2Ports = fn
+}
+
+// SetLogger sets where the server's warnings go.
+func (s *VrfServer) SetLogger(lg *zap.Logger) {
+	if lg != nil {
+		s.logger = lg
+	}
 }
 
 func (s *VrfServer) reconcile() error {
@@ -199,10 +223,14 @@ func (s *VrfServer) createOne(in *v1.Vrf) (*vrf.VRF, *v1.OperationError) {
 	if in.GetVrfId() != 0 || in.GetIfindex() != 0 {
 		return fail("vrf_id and ifindex are server-assigned and must be unset")
 	}
+	if err := s.refuseL2CircuitMembers(in); err != nil {
+		return fail(err.Error())
+	}
 	created, err := s.mgr.CreateDevice(in.GetName(), vrf.Device{
-		TableID:          in.GetTableId(),
-		Members:          in.GetMembers(),
-		EnableL3mdevRule: in.GetEnableL3MdevRule(),
+		TableID:              in.GetTableId(),
+		Members:              in.GetMembers(),
+		EnableL3mdevRule:     in.GetEnableL3MdevRule(),
+		NoUnreachableDefault: in.GetNoUnreachableDefault(),
 	}, s.dev)
 	if err != nil {
 		return fail(err.Error())
@@ -211,6 +239,61 @@ func (s *VrfServer) createOne(in *v1.Vrf) (*vrf.VRF, *v1.OperationError) {
 		return &created, &v1.OperationError{TriggerPrefix: in.GetName(), Reason: notSaved("created", err).Error()}
 	}
 	return &created, nil
+}
+
+// refuseL2CircuitMembers refuses a create that would put a port carrying an
+// L2 headend circuit into a VRF whose table ends in the unreachable default:
+// the circuit's encapsulations and BUM copies are looked up on the port, so
+// they would go to that table and stop there. The ports checked are the
+// requested members and, for an adopt, every port the kernel already has in
+// the device; when the create closes a table that was open, also every port
+// of every VRF device on that table, managed or not. The table counts as
+// closed when the request asks for the routes or another managed VRF on the
+// table has them.
+func (s *VrfServer) refuseL2CircuitMembers(in *v1.Vrf) error {
+	if s.l2Ports == nil || !s.mgr.TableClosedAfterCreate(in.GetTableId(), in.GetNoUnreachableDefault()) {
+		return nil
+	}
+	ports, err := s.l2Ports()
+	if err != nil {
+		return fmt.Errorf("list the L2 headend circuits: %w", err)
+	}
+	if len(ports) == 0 {
+		return nil
+	}
+	candidates := map[uint32]string{}
+	for _, member := range in.GetMembers() {
+		if ifindex, err := s.resolve(member); err == nil {
+			candidates[ifindex] = member
+		} // a missing member is reported by the create itself
+	}
+	links, err := s.links()
+	if err != nil {
+		return fmt.Errorf("list the ports of VRF %q: %w", in.GetName(), err)
+	}
+	closesTable := !s.mgr.TableClosed(in.GetTableId())
+	for ifindex, l := range links {
+		if !l.IsVrf {
+			continue
+		}
+		sharesTable := closesTable && l.VrfTable == in.GetTableId()
+		if l.Name != in.GetName() && !sharesTable {
+			continue
+		}
+		for port, pl := range links {
+			if pl.Master == ifindex {
+				candidates[port] = pl.Name
+			}
+		}
+	}
+	for ifindex, name := range candidates {
+		if slices.Contains(ports, ifindex) {
+			return fmt.Errorf("port %q carries an L2 headend circuit: in VRF %q, whose table ends in the unreachable default, "+
+				"its encapsulations and BUM copies would be dropped (delete the circuit first, or create the VRF with no_unreachable_default)",
+				name, in.GetName())
+		}
+	}
+	return nil
 }
 
 // VrfDelete removes whole VRF objects. It refuses while anything still
@@ -690,6 +773,15 @@ func (s *VrfServer) VrfAcRemove(
 	if err := s.mgr.Save(); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, notSaved("ac removed", err))
 	}
+	// The removal can leave a member port of the VRF without an AC, whose
+	// encapsulation the unreachable default then drops: name it.
+	if removed {
+		if links, err := s.links(); err != nil {
+			s.logger.Warn("cannot check the VRF's member ports after the AC removal", zap.Error(err))
+		} else {
+			s.mgr.WarnMembersWithoutAC(links, name, s.logger)
+		}
+	}
 	return connect.NewResponse(&v1.VrfAcRemoveResponse{}), nil
 }
 
@@ -719,9 +811,23 @@ func (s *VrfServer) VrfShow(
 	_ *connect.Request[v1.VrfShowRequest],
 ) (*connect.Response[v1.VrfShowResponse], error) {
 	vrfs := s.mgr.List()
+	// One read of the host's interfaces covers every VRF's member check.
+	uncovered := map[string][]string{}
+	if links, err := s.links(); err != nil {
+		s.logger.Warn("cannot check the VRF member ports for VrfShow", zap.Error(err))
+	} else {
+		for _, m := range s.mgr.MembersWithoutAC(links, "") {
+			uncovered[m.VRF] = append(uncovered[m.VRF], m.Interface)
+		}
+	}
 	out := make([]*v1.Vrf, 0, len(vrfs))
 	for _, v := range vrfs {
-		out = append(out, vrfToProto(v))
+		pv := vrfToProto(v)
+		pv.MembersWithoutAc = uncovered[v.Name]
+		if v.Device != nil && !v.Device.NoUnreachableDefault {
+			pv.TableHeldOpen = s.mgr.TableHeldOpen(v.Device.TableID)
+		}
+		out = append(out, pv)
 	}
 	pol := s.mgr.Policy()
 	return connect.NewResponse(&v1.VrfShowResponse{
@@ -742,6 +848,7 @@ func vrfToProto(v vrf.VRF) *v1.Vrf {
 		out.TableId = v.Device.TableID
 		out.Members = v.Device.Members
 		out.EnableL3MdevRule = v.Device.EnableL3mdevRule
+		out.NoUnreachableDefault = v.Device.NoUnreachableDefault
 		out.Ifindex = v.Device.Ifindex
 	}
 	if v.Bridge != nil {

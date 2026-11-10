@@ -13,12 +13,13 @@ Linux VRFの `bpf_fib_lookup(params.ifindex=VRF)` を活用します。
 VRFデバイスの作成は `VrfService/VrfCreate` APIで行います。device は一級 VRF オブジェクトの kernel facet として作られ (vrf_id も同時に割り当てられる)、SID登録時に `vrf_name` から ifindex を解決します。VRF オブジェクトの全体像は [vrf.md](vrf.md) を参照してください。
 
 ```
-VrfCreate API → netlink: VRF作成 (+ vrf_id 割り当て)
+VrfCreate API → netlink: VRF作成 + table の unreachable default (+ vrf_id 割り当て)
 SidFunctionCreate API → vrf_name → ifindex解決 → BPF map書き込み
 
 パケット処理:
   SRv6パケット → SID照合 → sid_aux_entry.l3vrf.vrf_ifindex
     → デカプセル → bpf_fib_lookup(ifindex=VRF) → redirect
+      (VRF table に無い宛先は unreachable default に当たり drop)
 ```
 
 ## L2VPN (End.DT2 + H.Encaps.L2)

@@ -95,11 +95,11 @@ static __noinline int end_b6_insert_core(
     // Dispatch based on policy mode
     if (policy->mode == SRV6_HEADEND_BEHAVIOR_H_INSERT_RED) {
         DEBUG_PRINT("End.B6.Insert.Red: Inserting reduced policy SRH\n");
-        return do_h_insert_red_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, l3_offset);
+        return do_h_insert_red_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, 0, l3_offset);
     }
 
     DEBUG_PRINT("End.B6.Insert: Inserting policy SRH\n");
-    return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, l3_offset);
+    return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, 0, l3_offset);
 }
 
 static __always_inline int process_end_b6_insert(
@@ -181,11 +181,11 @@ static __noinline int end_b6_encaps_core(
     // Dispatch based on policy mode
     if (policy->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED) {
         DEBUG_PRINT("End.B6.Encaps.Red: Encapsulating with reduced SRH\n");
-        return do_h_encaps_red_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, l3_offset);
+        return do_h_encaps_red_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, 0, l3_offset);
     }
 
     DEBUG_PRINT("End.B6.Encaps: Encapsulating with outer IPv6+SRH\n");
-    return do_h_encaps_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, l3_offset);
+    return do_h_encaps_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, 0, l3_offset);
 }
 
 static __always_inline int process_end_b6_encaps(

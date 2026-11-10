@@ -56,7 +56,7 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         void *data = (void *)(long)ctx->data;
         void *data_end = (void *)(long)ctx->data_end;
         __u16 l2_frame_len = (__u16)(data_end - data);
-        int action = do_h_encaps_l2(ctx, entry, l2_frame_len);
+        int action = do_h_encaps_l2(ctx, entry, l2_frame_len, tctx->vrf_id);
         TAILCALL_RETURN(ctx, action);
     }
 
@@ -103,7 +103,7 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         if (claimed < sizeof(struct iphdr) || claimed > wire_len)
             TAILCALL_RETURN(ctx, XDP_DROP);
         action = CALL_WITH_CONST_L3(l3_off, do_h_encaps_core, ctx,
-                                    &saved_eth, entry, IPPROTO_IPIP, claimed);
+                                    &saved_eth, entry, IPPROTO_IPIP, claimed, tctx->vrf_id);
     } else if (ver == 6) {
         struct ipv6hdr *inner_ip6h = (struct ipv6hdr *)l3;
         if ((void *)(inner_ip6h + 1) > data_end)
@@ -113,7 +113,7 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         if (claimed < sizeof(struct ipv6hdr) || claimed > wire_len)
             TAILCALL_RETURN(ctx, XDP_DROP);
         action = CALL_WITH_CONST_L3(l3_off, do_h_encaps_core, ctx,
-                                    &saved_eth, entry, IPPROTO_IPV6, claimed);
+                                    &saved_eth, entry, IPPROTO_IPV6, claimed, tctx->vrf_id);
     } else {
         action = XDP_DROP;
     }
@@ -241,7 +241,7 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         TAILCALL_RETURN(ctx, XDP_DROP);
-    int action = srv6_fib_redirect(ctx, outer, eth, ctx->ingress_ifindex);
+    int action = srv6_fib_redirect_encap(ctx, outer, eth, tctx->vrf_id);
     // Fail closed on a FIB miss. A proxy IFACE-IN is a dedicated circuit
     // whose only destination is the chain's next segment, so handing a
     // freshly assembled SR-encapsulated packet to the service-side kernel
@@ -295,7 +295,7 @@ int tailcall_service_return_am(struct xdp_md *ctx)
     if (copy_segment_by_index(&ip6h->daddr, seg_base, data_end, sl) != 0)
         TAILCALL_RETURN(ctx, XDP_DROP);
 
-    int action = srv6_fib_redirect(ctx, ip6h, eth, ctx->ingress_ifindex);
+    int action = srv6_fib_redirect_encap(ctx, ip6h, eth, tctx->vrf_id);
     TAILCALL_RETURN(ctx, action);
 }
 

@@ -118,7 +118,7 @@ sequenceDiagram
     Note over Op,R3: Phase 1: VRF作成 (VrfService)
 
     Op->>R3: VrfCreate<br/>{name: "vrf100", table_id: 100,<br/>members: ["eth0"], enable_l3mdev_rule: true}
-    R3-->>R3: netlink: VRF作成 + member enslave + l3mdev rule<br/>+ vrf_id 割り当て (一級 VRF オブジェクト)
+    R3-->>R3: netlink: VRF作成 + unreachable default + member enslave<br/>+ l3mdev rule + vrf_id 割り当て (一級 VRF オブジェクト)
     R3-->>Op: Created {vrf_id, ifindex}
 
     Note over Op,R3: Phase 2: SID登録

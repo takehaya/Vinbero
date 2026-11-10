@@ -39,16 +39,18 @@ func vrfCommand() *cli.Command {
 					&cli.UintFlag{Name: "table-id", Required: true, Usage: "Routing table ID"},
 					&cli.StringFlag{Name: "members", Usage: "Member interfaces (comma-separated)"},
 					&cli.BoolFlag{Name: "enable-l3mdev-rule", Usage: "Add l3mdev routing rule"},
+					&cli.BoolFlag{Name: "no-unreachable-default", Usage: "Do not add the unreachable default routes to the table (a miss then goes on to the main table)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					members := splitMembers(c.String("members"))
 					resp, err := clients.Vrf.VrfCreate(context.Background(),
 						connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{
-							Name:             c.String("name"),
-							TableId:          uint32(c.Uint("table-id")),
-							Members:          members,
-							EnableL3MdevRule: c.Bool("enable-l3mdev-rule"),
+							Name:                 c.String("name"),
+							TableId:              uint32(c.Uint("table-id")),
+							Members:              members,
+							EnableL3MdevRule:     c.Bool("enable-l3mdev-rule"),
+							NoUnreachableDefault: c.Bool("no-unreachable-default"),
 						}}}))
 					if err != nil {
 						return err
@@ -281,6 +283,16 @@ func vrfCommand() *cli.Command {
 						}
 					}
 					printTable(headers, rows)
+					for _, v := range resp.Msg.Vrfs {
+						if c := v.GetTableHeldOpen(); c != "" {
+							fmt.Printf("vrf %s: table %d is open, without the unreachable default, for the %s; "+
+								"delete the circuit and restart to close it, or opt the VRFs on the table out to keep it open\n", v.GetName(), v.GetTableId(), c)
+						}
+						if m := v.GetMembersWithoutAc(); len(m) > 0 {
+							fmt.Printf("vrf %s: member ports without an AC, whose encapsulation the VRF table drops: %s\n",
+								v.GetName(), strings.Join(m, ", "))
+						}
+					}
 					return nil
 				},
 			},

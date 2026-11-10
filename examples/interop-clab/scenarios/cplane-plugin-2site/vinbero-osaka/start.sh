@@ -91,6 +91,11 @@ ip link set eth2 master vrf-cust
 ip addr add 10.2.0.1/24 dev eth2 2>/dev/null || true
 ip link set eth2 up
 ip route replace 10.2.0.0/24 dev eth2 table 100
+# eth2 is in the VRF, so it is also the VRF's access circuit: ce-osaka's
+# packets are encapsulated as tenant packets, with the outer header looked
+# up in the main table. vrf-cust's table ends in an unreachable default, so
+# the lookup through eth2 would stop there.
+/usr/local/bin/vbctl vrf ac-add --vrf vrf-cust --interface eth2 || true
 
 # The eBPF half of the custom behavior, in endpoint slot 32. The
 # control-plane plugin allocates a SID pointing at this slot, so traffic

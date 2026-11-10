@@ -13,37 +13,50 @@ import (
 
 // CreateVrf creates (or idempotently adopts) the kernel VRF device and
 // persists it. On a persist failure the kernel device and the in-memory
-// record are NOT rolled back: the error is returned so the caller sees the
-// divergence, a retry re-adopts and converges, and the next successful
-// persist writes the whole state anyway.
-func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error) {
+// record are NOT rolled back: the error is returned with the device's
+// ifindex so the caller sees the divergence and still knows the device is
+// there, a retry re-adopts and converges, and the next successful persist
+// writes the whole state anyway.
+//
+// Unless noUnreachableDefault is set, the VRF's table gets an unreachable
+// default for IPv4 and IPv6 (see ensureUnreachableDefault), on a fresh create
+// and on an adopt alike. The setting of a tracked VRF is not changed here: a
+// request that asks for the other one is refused (see
+// checkUnreachableDefault).
+func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, error) {
+	if err := m.checkUnreachableDefault(name, noUnreachableDefault); err != nil {
+		return 0, err
+	}
+	records := m.ListVrfs()
 	if existing, err := netlink.LinkByName(name); err == nil {
-		ifindex, err := adoptVrfDevice(existing, name, tableID, members, enableL3mdevRule)
+		ifindex, added, err := m.adoptVrfDevice(records, existing, name, tableID, members, enableL3mdevRule, noUnreachableDefault)
 		if err != nil {
 			return 0, err
 		}
-		m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
+		m.ensureVrfInState(name, tableID, members, enableL3mdevRule, noUnreachableDefault, added, ifindex)
 		if err := m.persist(); err != nil {
-			return 0, fmt.Errorf("persist state after adopting VRF %s: %w", name, err)
+			return ifindex, fmt.Errorf("persist state after adopting VRF %s: %w", name, err)
 		}
+		m.warnSharedOptOut(name)
 		return ifindex, nil
 	}
 
-	ifindex, err := createVrfNetlink(name, tableID, members, enableL3mdevRule)
+	ifindex, added, err := m.createVrfNetlink(records, name, tableID, members, enableL3mdevRule, noUnreachableDefault)
 	if err != nil {
 		return 0, err
 	}
 
 	// A fresh create cannot collide with an existing name (createVrfNetlink
 	// would have failed on LinkAdd), so the upsert takes its append branch.
-	m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
+	m.ensureVrfInState(name, tableID, members, enableL3mdevRule, noUnreachableDefault, added, ifindex)
 
 	if err := m.persist(); err != nil {
-		return 0, fmt.Errorf("persist state after creating VRF %s: %w", name, err)
+		return ifindex, fmt.Errorf("persist state after creating VRF %s: %w", name, err)
 	}
 
 	m.logger.Info("Created VRF",
 		zap.String("name", name), zap.Uint32("table_id", tableID), zap.Uint32("ifindex", ifindex))
+	m.warnSharedOptOut(name)
 	return ifindex, nil
 }
 
@@ -55,29 +68,47 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 // admin-DOWN device would blackhole End.DT* decap behind a successful
 // create), missing members enslaved (LinkSetMaster is idempotent) and the
 // l3mdev rule added when asked, so an adopt is not silently weaker than a
-// fresh create. Reconcile adopts state entries through the same path.
-func adoptVrfDevice(link netlink.Link, name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error) {
+// fresh create. The table gets its unreachable default before any member is
+// enslaved, so no member's traffic falls through to main in between; a
+// failure after that removes the routes this call added. It returns the
+// families whose route this call added. Reconcile adopts state entries
+// through the same path. records are the tracked VRFs (checkTable).
+func (m *ResourceManager) adoptVrfDevice(records []ManagedVrf, link netlink.Link, name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, []string, error) {
 	vrfLink, ok := link.(*netlink.Vrf)
 	if !ok {
-		return 0, fmt.Errorf("link %s exists but is %s, not a VRF device", name, link.Type())
+		return 0, nil, fmt.Errorf("link %s exists but is %s, not a VRF device", name, link.Type())
 	}
 	if vrfLink.Table != tableID {
-		return 0, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
+		return 0, nil, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
+	}
+	mayClose, err := m.checkTable(records, name, tableID, members, noUnreachableDefault)
+	if err != nil {
+		return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
+	}
+	var added []string
+	if !noUnreachableDefault && mayClose {
+		if added, err = m.ensureUnreachableDefault(tableID); err != nil {
+			return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
+		}
+	}
+	fail := func(err error) (uint32, []string, error) {
+		_ = m.removeUnreachableFamilies(tableID, added) // a failure is logged there
+		return 0, nil, err
 	}
 	if err := netlink.LinkSetUp(link); err != nil {
-		return 0, fmt.Errorf("set VRF %s up: %w", name, err)
+		return fail(fmt.Errorf("set VRF %s up: %w", name, err))
 	}
 	for _, member := range members {
 		if err := enslaveInterface(member, link); err != nil {
-			return 0, err
+			return fail(err)
 		}
 	}
 	if enableL3mdevRule {
 		if err := ensureL3mdevRule(); err != nil {
-			return 0, fmt.Errorf("add l3mdev rule: %w", err)
+			return fail(fmt.Errorf("add l3mdev rule: %w", err))
 		}
 	}
-	return uint32(link.Attrs().Index), nil
+	return uint32(link.Attrs().Index), added, nil
 }
 
 func (m *ResourceManager) DeleteVrf(name string) error {
@@ -105,7 +136,17 @@ func (m *ResourceManager) DeleteVrf(name string) error {
 		return fmt.Errorf("VRF %s lookup: %w", name, err)
 	}
 
+	// The unreachable default stays in the table after the device is gone,
+	// so the routes this VRF added are released here, before the state entry
+	// that records them goes: a failed removal is retried by the next delete.
 	m.mu.Lock()
+	idx := slices.IndexFunc(m.state.VRFs, func(v ManagedVrf) bool { return v.Name == name })
+	if idx >= 0 {
+		if err := m.releaseUnreachableLocked(idx); err != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("VRF %s: %w", name, err)
+		}
+	}
 	filtered := m.state.VRFs[:0]
 	for _, v := range m.state.VRFs {
 		if v.Name != name {
@@ -132,9 +173,10 @@ func (m *ResourceManager) ListVrfs() []ManagedVrf {
 	result := make([]ManagedVrf, len(m.state.VRFs))
 	copy(result, m.state.VRFs)
 	for i := range result {
-		// Deep-copy Members: the shallow struct copy would alias the
-		// state-owned backing array, which ensureVrfInState appends to.
+		// Deep-copy the slices: the shallow struct copy would alias the
+		// state-owned backing arrays, which ensureVrfInState appends to.
 		result[i].Members = slices.Clone(result[i].Members)
+		result[i].UnreachableDefaultAdded = slices.Clone(result[i].UnreachableDefaultAdded)
 	}
 	return result
 }
@@ -145,8 +187,10 @@ func (m *ResourceManager) ListVrfs() []ManagedVrf {
 // rule — never unenslave or remove), so the state must record the union or an
 // adopt with unspecified members/l3mdev (the CLI defaults) would silently
 // weaken what Reconcile recreates after a reboot. Shrinking a device is a
-// delete + recreate, same as changing its table.
-func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members []string, enableL3mdevRule bool, ifindex uint32) {
+// delete + recreate, same as changing its table. The unreachable-default
+// setting is recorded as given (CreateVrf refuses one that differs from a
+// tracked VRF's), and added joins the families whose route Vinbero added.
+func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool, added []string, ifindex uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.state.VRFs {
@@ -157,51 +201,85 @@ func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members 
 		e.TableID = tableID // verified against the live device by the adopt check
 		e.Ifindex = ifindex
 		e.EnableL3mdevRule = e.EnableL3mdevRule || enableL3mdevRule
+		e.setNoUnreachableDefault(noUnreachableDefault)
+		e.addUnreachableFamilies(added)
 		for _, member := range members {
 			if !slices.Contains(e.Members, member) {
 				e.Members = append(e.Members, member)
 			}
 		}
+		m.openHeldTablesLocked()
 		return
 	}
-	m.state.VRFs = append(m.state.VRFs, ManagedVrf{
+	v := ManagedVrf{
 		Name: name, TableID: tableID, Members: slices.Clone(members),
 		EnableL3mdevRule: enableL3mdevRule, Ifindex: ifindex,
-	})
+	}
+	v.setNoUnreachableDefault(noUnreachableDefault)
+	v.addUnreachableFamilies(added)
+	m.state.VRFs = append(m.state.VRFs, v)
+	m.openHeldTablesLocked()
 }
 
-// createVrfNetlink creates a VRF and enslaves members via netlink.
-func createVrfNetlink(name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error) {
+// createVrfNetlink creates a VRF and enslaves members via netlink. Like the
+// adopt, it adds the unreachable default before enslaving any member. A
+// failure after the device exists removes the routes this call added and the
+// device itself, so a failed create leaves nothing behind. It returns the
+// families whose route it added. records are the tracked VRFs
+// (checkTable, which runs before the device is made).
+func (m *ResourceManager) createVrfNetlink(records []ManagedVrf, name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, []string, error) {
+	mayClose, err := m.checkTable(records, name, tableID, members, noUnreachableDefault)
+	if err != nil {
+		return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
+	}
 	vrf := &netlink.Vrf{
 		LinkAttrs: netlink.LinkAttrs{Name: name},
 		Table:     tableID,
 	}
 	if err := netlink.LinkAdd(vrf); err != nil {
-		return 0, fmt.Errorf("create VRF %s: %w", name, err)
+		return 0, nil, fmt.Errorf("create VRF %s: %w", name, err)
+	}
+
+	var added []string
+	fail := func(err error) (uint32, []string, error) {
+		_ = m.removeUnreachableFamilies(tableID, added) // a failure is logged there
+		if link, lerr := netlink.LinkByName(name); lerr == nil {
+			if derr := netlink.LinkDel(link); derr != nil {
+				m.logger.Warn("cannot remove the VRF device of a failed create",
+					zap.String("name", name), zap.Error(derr))
+			}
+		}
+		return 0, nil, err
 	}
 
 	link, err := netlink.LinkByName(name)
 	if err != nil {
-		return 0, fmt.Errorf("find created VRF %s: %w", name, err)
+		return fail(fmt.Errorf("find created VRF %s: %w", name, err))
+	}
+
+	if !noUnreachableDefault && mayClose {
+		if added, err = m.ensureUnreachableDefault(tableID); err != nil {
+			return fail(fmt.Errorf("VRF %s: %w", name, err))
+		}
 	}
 
 	if err := netlink.LinkSetUp(link); err != nil {
-		return 0, fmt.Errorf("set VRF %s up: %w", name, err)
+		return fail(fmt.Errorf("set VRF %s up: %w", name, err))
 	}
 
 	for _, member := range members {
 		if err := enslaveInterface(member, link); err != nil {
-			return 0, err
+			return fail(err)
 		}
 	}
 
 	if enableL3mdevRule {
 		if err := ensureL3mdevRule(); err != nil {
-			return 0, fmt.Errorf("add l3mdev rule: %w", err)
+			return fail(fmt.Errorf("add l3mdev rule: %w", err))
 		}
 	}
 
-	return uint32(link.Attrs().Index), nil
+	return uint32(link.Attrs().Index), added, nil
 }
 
 // l3mdevRulePriority is where the l3mdev rule is installed: after the local

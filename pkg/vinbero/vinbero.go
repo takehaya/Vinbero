@@ -53,6 +53,10 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 		}
 	}
 
+	if err := resolveFibLookupTBID(&cfg.InternalConfig.BpfOptions, bpf.ProbeFibLookupTBID, logger); err != nil {
+		return nil, err
+	}
+
 	obj, err := bpf.ReadCollection(cfg.BpfConstants(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
@@ -144,6 +148,43 @@ func bumXDPUnavailable(probe func(time.Duration) (bool, error)) string {
 	return ""
 }
 
+// resolveFibLookupTBID decides, before the programs load, how the outer
+// header of a tenant AC's encapsulation is looked up (FibLookupTBIDOff
+// sets the program's fib_lookup_tbid). With BPF_FIB_LOOKUP_TBID (Linux 6.5,
+// or a stable kernel with it) the lookup goes to the main table directly and
+// the VRF tables are closed with an unreachable default. Without it, or with
+// internal.bpf.fib_lookup_tbid "off", every packet takes the ingress-device
+// lookup and the tables stay open, so an encapsulation from an enslaved port
+// still reaches the underlay through the main table; that is logged once
+// here.
+func resolveFibLookupTBID(opts *config.BpfConfig, probe func() (bool, error), logger *zap.Logger) error {
+	switch opts.FibLookupTBID {
+	case "", "auto":
+	case "off":
+		opts.FibLookupTBIDOff = true
+		logger.Warn("internal.bpf.fib_lookup_tbid is off: tenant encapsulations look the outer header up on the ingress device, and VRF tables are not closed with an unreachable default")
+		return nil
+	default:
+		return fmt.Errorf(`internal.bpf.fib_lookup_tbid %q: want "auto" or "off"`, opts.FibLookupTBID)
+	}
+	ok, err := probe()
+	switch {
+	case err != nil:
+		opts.FibLookupTBIDOff = true
+		logger.Warn("cannot check whether bpf_fib_lookup accepts BPF_FIB_LOOKUP_TBID; tenant encapsulations look the outer header up on the ingress device, and VRF tables are not closed with an unreachable default", zap.Error(err))
+	case !ok:
+		opts.FibLookupTBIDOff = true
+		logger.Warn("this kernel's bpf_fib_lookup does not accept BPF_FIB_LOOKUP_TBID (Linux 6.5): tenant encapsulations look the outer header up on the ingress device, and VRF tables are not closed with an unreachable default (a closed table would drop the encapsulations from enslaved ports)")
+	}
+	return nil
+}
+
+// FibLookupTBID reports whether tenant encapsulations look the outer header
+// up in the main table directly, which is what lets VRF tables be closed.
+func (v *Vinbero) FibLookupTBID() bool {
+	return !v.cfg.InternalConfig.BpfOptions.FibLookupTBIDOff
+}
+
 // kernelRealtimePath reads "1" on a PREEMPT_RT kernel.
 const kernelRealtimePath = "/sys/kernel/realtime"
 
@@ -173,7 +214,41 @@ func (v *Vinbero) StartBumRouteWatch(ctx context.Context) error {
 
 const bumRouteDebounce = 200 * time.Millisecond
 
+// StartEncapNeighKeeper keeps the underlay next hop of every encapsulation a
+// managed neighbour (bpf.EncapNeighKeeper), so an encapsulation never waits
+// for other traffic to resolve it. It sweeps once before returning and keeps
+// following map writes, route changes and deleted neighbour entries.
+func (v *Vinbero) StartEncapNeighKeeper(ctx context.Context) error {
+	k := bpf.NewEncapNeighKeeper(v.mapOps, v.logger)
+	v.mapOps.SetEncapChangeHook(k.Notify)
+	return k.Run(ctx)
+}
+
 const defaultStatePath = "/var/lib/vinbero/state.json"
+
+// configNoUnreachableDefault is the config's no_unreachable_default for each
+// VRF it declares with a kernel device (table_id), by name.
+func configNoUnreachableDefault(cfg *config.Config) map[string]bool {
+	out := make(map[string]bool)
+	for _, e := range cfg.VRFs.Entries {
+		if e.TableID != 0 {
+			out[e.Name] = e.NoUnreachableDefault
+		}
+	}
+	return out
+}
+
+// configVrfDevices returns the config's VRF devices: their members count
+// for their table's L2 circuit check from the start of the boot.
+func configVrfDevices(cfg *config.Config) []netresource.ConfigVrfDevice {
+	var out []netresource.ConfigVrfDevice
+	for _, e := range cfg.VRFs.Entries {
+		if e.TableID != 0 {
+			out = append(out, netresource.ConfigVrfDevice{Name: e.Name, TableID: e.TableID, Members: e.Members})
+		}
+	}
+	return out
+}
 
 // InitResourceManager initializes the resource manager and reconciles state.
 func (v *Vinbero) InitResourceManager() error {
@@ -186,6 +261,18 @@ func (v *Vinbero) InitResourceManager() error {
 	if err != nil {
 		return fmt.Errorf("init resource manager: %w", err)
 	}
+
+	// The config's no_unreachable_default wins over the state file's, from
+	// the first start after it is set: Reconcile applies it before it adds
+	// any route.
+	resMgr.SetConfigUnreachableDefault(configNoUnreachableDefault(v.cfg))
+	// Without the main-table lookup a closed table would drop the
+	// encapsulations from enslaved ports, so the tables stay open.
+	resMgr.SetTablesClosed(v.FibLookupTBID())
+	// No unreachable default cuts off an L2 headend circuit: the boot holds
+	// such a table open, and after it the create is refused.
+	resMgr.SetTableCloseGuard(v.tableCloseGuard)
+	resMgr.SetConfigVrfDevices(configVrfDevices(v.cfg))
 
 	// Fail-closed: a state entry that cannot be materialized aborts the boot
 	// (the error carries a repair hint). Continuing with a phantom entry

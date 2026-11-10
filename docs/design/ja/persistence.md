@@ -35,7 +35,8 @@ entry を再作成します。aux index と VRF ifindex はその時点で求め
 `pkg/netresource/manager.go` の ResourceManager が:
 1. 起動時に `state.json` を読み込み、記録されていた Bridge / VRF デバイスを netlink で確認
 2. 欠けていれば再作成 (`ip link add` 相当)
-3. 存在するものは Create と同じ検証と収束で adopt する (link 種別の確認、up、不足 member の enslave、ifindex の更新)
+3. 存在するものは Create と同じ検証と収束で adopt する (link 種別の確認、up、不足 member の enslave、VRF table の unreachable default、ifindex の更新)
+   - VRF の record は unreachable default の設定 (`no_unreachable_default`) と、Vinbero が自分で足した経路の family (`unreachable_default_added`) を持ちます。設定の無い古い record は未決定として扱い、起動時に config の値 (宣言が無ければ既定) で決めて書き戻します
 4. 稼働中に `vinbero vrf create` や `vinbero vrf bridge-attach` で変更があれば都度 disk に flush (VRF device も bridge も VrfService 経由で、vrf_id を持つ一級 VRF object の facet として管理される。bridge の state record は owning VRF 名も持つ)
 
 これにより、`sudo reboot` した後でも `vinbero vrf show` の BRIDGE / BD_ID 列に以前と同じ Bridge が見えます (daemon が自動で restore する)。

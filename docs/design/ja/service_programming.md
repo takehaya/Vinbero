@@ -81,7 +81,7 @@ inner はサービス由来で信頼境界の外側です。この変更前は l
 
 往路は SL を減算して DA を Segment List[0] (最終 segment) に書き換え、SRH を残したままサービスへ渡します。inner は L3 のみです。配送は静的 MAC 必須です。masquerade 後の DA は chain の最終宛先を指すため、FIB lookup するとサービスを素通りするためです。
 
-復路は in-packet の SRH から DA を Segment List[SL] に復元して FIB へ渡します。SL は変更しません。書き換え前に DA が Segment List[0] であることを確認します。往路の masquerade が必ず DA = Segment List[0] を書くので、それ以外の DA を持つパケットはこの proxy を通っていません。検証を省くと、IFACE-IN にパケットを置ける者による任意宛先注入 primitive になります。
+復路は in-packet の SRH から DA を Segment List[SL] に復元して FIB へ渡します。SL は変更しません。復元後の DA はパケットごとに SRH から決まり、どの map にもありません。そのため vinberod は、この DA の underlay の next hop を managed の neighbour にできません ([vrf.md](vrf.md#encap-の-next-hop-の-neighbour))。IFACE-IN が閉じた VRF table の VRF device に enslave されていると、neighbour が未解決のパケットは kernel に渡っても VRF table で止まります。その next hop の neighbour は、ほかの通信で解決されている必要があります。書き換え前に DA が Segment List[0] であることを確認します。往路の masquerade が必ず DA = Segment List[0] を書くので、それ以外の DA を持つパケットはこの proxy を通っていません。検証を省くと、IFACE-IN にパケットを置ける者による任意宛先注入 primitive になります。
 
 ## fail-closed 方針
 

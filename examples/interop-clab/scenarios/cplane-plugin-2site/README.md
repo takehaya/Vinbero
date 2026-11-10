@@ -117,6 +117,11 @@ grant existed -- would find nothing and drop. The test asserts that split
 directly, so the customer ping completing proves the grant is what carried
 the traffic into the VRF.
 
+The customer interface is also `vrf-cust`'s access circuit (`vbctl vrf
+ac-add`). Vinbero ends the VRF's table in an unreachable default, so the
+reply from ce-osaka is encapsulated as a tenant packet: its outer header is
+looked up in the main table, not through the enslaved interface.
+
 ## Run
 
 ```sh

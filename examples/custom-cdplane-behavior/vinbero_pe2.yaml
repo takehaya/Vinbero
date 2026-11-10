@@ -21,6 +21,12 @@ vrfs:
       table_id: 100
       members: [eth2]
       enable_l3mdev_rule: true
+      # eth2 is in the VRF, so it is also the VRF's access circuit: the
+      # host's packets are encapsulated as tenant packets, with the outer
+      # header looked up in the main table (the VRF table ends in an
+      # unreachable default).
+      acs:
+        - interface: eth2
 bgp:
   global:
     local_asn: 65100

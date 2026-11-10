@@ -14,7 +14,7 @@
     void *data = (void *)(long)ctx->data;                                     \
     void *data_end = (void *)(long)ctx->data_end;                             \
     __u16 l2_frame_len = (__u16)(data_end - data);                            \
-    int action = fn_name(ctx, &tctx->headend, l2_frame_len);                  \
+    int action = fn_name(ctx, &tctx->headend, l2_frame_len, tctx->vrf_id);    \
     TAILCALL_RETURN(ctx, action)
 
 SEC("xdp")

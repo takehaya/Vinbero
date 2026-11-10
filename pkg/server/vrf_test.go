@@ -18,6 +18,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeProgrammer captures the last ingress_vrf_map / policy write so a
@@ -62,13 +63,19 @@ type fakeVrfDeviceOps struct {
 	deleted    []string
 	next       uint32
 	deleteHook func() // when set, runs inside DeleteVrf
+	// noUnreachable is the noUnreachableDefault of the last create, by name.
+	noUnreachable map[string]bool
 }
 
-func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev bool) (uint32, error) {
+func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev, noUnreachable bool) (uint32, error) {
 	if f.createErr != nil {
 		return 0, f.createErr
 	}
 	f.created = append(f.created, name)
+	if f.noUnreachable == nil {
+		f.noUnreachable = map[string]bool{}
+	}
+	f.noUnreachable[name] = noUnreachable
 	f.next++
 	return 99 + f.next, nil
 }
@@ -557,6 +564,35 @@ func TestVrfServer_Create(t *testing.T) {
 	}
 	if len(dev.created) != 1 {
 		t.Errorf("rejected creates still hit DeviceOps: %v", dev.created)
+	}
+}
+
+// no_unreachable_default reaches DeviceOps and VrfShow; unset, the device is
+// created with the unreachable default.
+func TestVrfServer_CreateNoUnreachableDefault(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	resp, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{
+			{Name: "vrf-open", TableId: 100, NoUnreachableDefault: true},
+			{Name: "vrf-closed", TableId: 200},
+		},
+	}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Fatalf("VrfCreate: %v %v", err, resp.Msg.GetErrors())
+	}
+	if !dev.noUnreachable["vrf-open"] || dev.noUnreachable["vrf-closed"] {
+		t.Errorf("DeviceOps saw %v, want vrf-open opted out and vrf-closed not", dev.noUnreachable)
+	}
+	show, err := s.VrfShow(context.Background(), connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		t.Fatalf("VrfShow: %v", err)
+	}
+	got := map[string]bool{}
+	for _, v := range show.Msg.GetVrfs() {
+		got[v.GetName()] = v.GetNoUnreachableDefault()
+	}
+	if !got["vrf-open"] || got["vrf-closed"] {
+		t.Errorf("VrfShow no_unreachable_default = %v, want vrf-open only", got)
 	}
 }
 
@@ -1294,4 +1330,172 @@ func mustEnsure(t *testing.T, m *vrf.Manager, name string) vrf.VRF {
 		t.Fatalf("Ensure(%q): %v", name, err)
 	}
 	return v
+}
+
+// The member check: the normal sequence (create with members, then add the
+// AC) warns nothing; VrfShow lists the uncovered member meanwhile; an AC
+// removal that leaves the attached member uncovered warns once, naming it.
+func TestVrfServer_MemberChecks(t *testing.T) {
+	s, _, _ := newTestVrfServerFull()
+	// The first create gets device ifindex 100; eth1 (ifindex 11) is its
+	// attached member.
+	s.links = func() (vrf.Links, error) {
+		return vrf.Links{11: {Name: "eth1", XDP: true, Master: 100}, 100: {Name: "vrf-cust", IsVrf: true, VrfTable: 100}}, nil
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	s.SetLogger(zap.New(core))
+	ctx := context.Background()
+	if _, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100, Members: []string{"eth1"}}},
+	})); err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	show := func() []string {
+		t.Helper()
+		resp, err := s.VrfShow(ctx, connect.NewRequest(&v1.VrfShowRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range resp.Msg.GetVrfs() {
+			if v.GetName() == "vrf-cust" {
+				return v.GetMembersWithoutAc()
+			}
+		}
+		return nil
+	}
+	if got := show(); !slices.Equal(got, []string{"eth1"}) {
+		t.Errorf("VrfShow before the AC: members_without_ac = %v, want [eth1]", got)
+	}
+	if _, err := s.VrfAcAdd(ctx, connect.NewRequest(&v1.VrfAcAddRequest{Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth1"}})); err != nil {
+		t.Fatalf("VrfAcAdd: %v", err)
+	}
+	if got := show(); len(got) != 0 {
+		t.Errorf("VrfShow with the AC: members_without_ac = %v, want none", got)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("create then ac-add warned: %v", logs.All())
+	}
+	if _, err := s.VrfAcRemove(ctx, connect.NewRequest(&v1.VrfAcRemoveRequest{Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth1"}})); err != nil {
+		t.Fatalf("VrfAcRemove: %v", err)
+	}
+	got := logs.FilterMessageSnippet("is not an access circuit of its VRF").All()
+	if len(got) != 1 || got[0].ContextMap()["interface"] != "eth1" || got[0].ContextMap()["vrf"] != "vrf-cust" {
+		t.Errorf("warnings after the removal = %v, want one for vrf-cust / eth1", logs.All())
+	}
+}
+
+// A create refuses to enslave a port that carries an L2 headend circuit
+// into a VRF whose table ends in the unreachable default; with the opt-out,
+// or with the tables open, it goes ahead.
+func TestVrfServer_CreateRefusesL2CircuitMember(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{10}, nil }) // eth0
+	ctx := context.Background()
+	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-a", TableId: 100, Members: []string{"eth0"}}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, "carries an L2 headend circuit") || len(dev.created) != 0 {
+		t.Errorf("errors = %v, created = %v; want the L2-circuit refusal before any device", resp.Msg.Errors, dev.created)
+	}
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-b", TableId: 200, Members: []string{"eth0"}, NoUnreachableDefault: true}},
+	}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Errorf("opted-out create: %v %v", err, resp.Msg.GetErrors())
+	}
+	s.mgr.SetTablesClosed(false)
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-c", TableId: 300, Members: []string{"eth0"}}},
+	}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Errorf("create with open tables: %v %v", err, resp.Msg.GetErrors())
+	}
+}
+
+// The L2 guard also covers an adopt: a port the kernel already has in the
+// device carries a circuit, the request names no members. And an opted-out
+// VRF on a table another managed VRF closes is closed too.
+func TestVrfServer_CreateRefusesL2CircuitOnExistingPort(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{51}, nil })
+	s.links = func() (vrf.Links, error) {
+		return vrf.Links{50: {Name: "vrf-u", IsVrf: true, VrfTable: 100}, 51: {Name: "eth5", Master: 50}}, nil
+	}
+	ctx := context.Background()
+	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-u", TableId: 100}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, `port "eth5" carries an L2 headend circuit`) || len(dev.created) != 0 {
+		t.Errorf("adopt: errors %v, created %v; want the refusal for eth5", resp.Msg.Errors, dev.created)
+	}
+
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{10}, nil }) // eth0
+	if resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-closed", TableId: 600}}})); err != nil || len(resp.Msg.Errors) != 0 {
+		t.Fatalf("VrfCreate vrf-closed: %v %v", err, resp.Msg.GetErrors())
+	}
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{
+		Name: "vrf-shared", TableId: 600, Members: []string{"eth0"}, NoUnreachableDefault: true,
+	}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, "carries an L2 headend circuit") {
+		t.Errorf("opted-out VRF on a closed table: errors %v, want the refusal", resp.Msg.Errors)
+	}
+}
+
+// Closing a table checks the ports of every VRF device on it: vrf-a (here a
+// device Vinbero does not manage, or one that opted out) on table 600 has a
+// circuit on eth6, and vrf-b on the same table without the opt-out would
+// close the table under that circuit.
+func TestVrfServer_CreateRefusesClosingSharedTable(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{61}, nil })
+	s.links = func() (vrf.Links, error) {
+		return vrf.Links{
+			60: {Name: "vrf-a", IsVrf: true, VrfTable: 600},
+			61: {Name: "eth6", Master: 60},
+		}, nil
+	}
+	ctx := context.Background()
+	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-b", TableId: 600}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, `port "eth6" carries an L2 headend circuit`) || len(dev.created) != 0 {
+		t.Errorf("errors %v, created %v; want the refusal for vrf-a's eth6", resp.Msg.Errors, dev.created)
+	}
+	// With the opt-out the table stays open: allowed.
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-c", TableId: 600, NoUnreachableDefault: true}}}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Errorf("opted-out create: %v %v", err, resp.Msg.GetErrors())
+	}
+}
+
+// VrfShow reports a table the boot held open for an L2 headend circuit on
+// the VRFs that ask for the unreachable default.
+func TestVrfServer_ShowTableHeldOpen(t *testing.T) {
+	s, _, _ := newTestVrfServerFull()
+	ctx := context.Background()
+	for _, v := range []*v1.Vrf{{Name: "vrf-a", TableId: 600}, {Name: "vrf-o", TableId: 600, NoUnreachableDefault: true}} {
+		if resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{v}})); err != nil || len(resp.Msg.Errors) != 0 {
+			t.Fatalf("VrfCreate %s: %v %v", v.Name, err, resp.Msg.GetErrors())
+		}
+	}
+	s.mgr.SetTablesHeldOpen(func() map[uint32]string { return map[uint32]string{600: "L2 headend circuit {eth6, vlan 0} on a port of VRF vrf-a"} })
+	resp, err := s.VrfShow(ctx, connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, v := range resp.Msg.Vrfs {
+		got[v.Name] = v.TableHeldOpen
+	}
+	if !strings.Contains(got["vrf-a"], "{eth6, vlan 0}") || got["vrf-o"] != "" {
+		t.Errorf("table_held_open = %v, want the circuit on vrf-a only", got)
+	}
 }

@@ -486,8 +486,9 @@ message EsClearDfResponse {
 }
 
 // Vrf is the VRF object: one identity carrying every facet. The kernel-device
-// facet (table_id, members, enable_l3mdev_rule, ifindex) is the Linux VRF
-// device End.DT4/DT6/DT46 use for VRF-aware FIB lookup. The ingress facet
+// facet (table_id, members, enable_l3mdev_rule, no_unreachable_default,
+// ifindex) is the Linux VRF device End.DT4/DT6/DT46 use for VRF-aware FIB
+// lookup. The ingress facet
 // (vrf_id, acs) classifies packets at the XDP entry: vrf_id is the data-plane
 // id (0 = global/default VRF, the underlay) and acs is the ingress
 // {interface, VLAN} membership. The L2 facet (bridge) is the bridge domain
@@ -503,10 +504,26 @@ message Vrf {
   repeated VrfAc acs = 6; // ingress access-circuit membership
   uint32 ifindex = 7; // kernel VRF device ifindex, server-assigned (0 = deviceless)
   Bridge bridge = 8; // L2 bridge-domain facet; unset = none
+  // The device's table gets an IPv4 and an IPv6 "unreachable default" at the
+  // lowest preference, so a lookup that matches no route in the table stops
+  // there instead of going on to the main table. Set to leave them out
+  // (kernel-device facet).
+  bool no_unreachable_default = 9;
+  // Member ports of the device the data plane runs on that are not an AC of
+  // this VRF ("eth2", or "eth2.100" for a VLAN subinterface without its
+  // {parent, VLAN} AC): their packets are in the global VRF, and with the
+  // unreachable default their encapsulation is dropped at the VRF table.
+  // Server-reported (VrfShow).
+  repeated string members_without_ac = 10;
+  // Set when the device's table has no unreachable default although this
+  // VRF asks for it, because the daemon's start found an L2 headend circuit
+  // the route would cut off: that circuit. The table stays open until a
+  // start that finds none. Server-reported (VrfShow).
+  string table_held_open = 11;
 }
 
 message VrfCreateRequest {
-  repeated Vrf vrfs = 1; // kernel-device facet only (name + table_id + members + l3mdev); acs / vrf_id / ifindex / bridge must be unset
+  repeated Vrf vrfs = 1; // kernel-device facet only (name + table_id + members + l3mdev + no_unreachable_default); acs / vrf_id / ifindex / bridge must be unset
 }
 message VrfCreateResponse {
   repeated Vrf created = 1; // server state after the create (carries vrf_id and ifindex)

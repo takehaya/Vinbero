@@ -35,7 +35,8 @@ static __always_inline int do_h_insert_impl(
     struct ipv6hdr *saved_ip6h,
     struct headend_entry *entry,
     __u16 l3_offset,
-    bool reduced)
+    bool reduced,
+    __u32 vrf_id)
 {
     int srh_entries = reduced ? entry->num_segments : entry->num_segments + 1;
     if (srh_entries > MAX_SEGMENTS)
@@ -96,7 +97,7 @@ static __always_inline int do_h_insert_impl(
 
     // FIB lookup and redirect
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, new_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, new_ip6h, new_eth, &ifindex, vrf_id);
     return fib_result_to_xdp_action(fib_result, ifindex);
 }
 
@@ -107,9 +108,10 @@ static __always_inline int do_h_insert_core(
     __u32 *saved_vlan,
     struct ipv6hdr *saved_ip6h,
     struct headend_entry *entry,
+    __u32 vrf_id,
     __u16 l3_offset)
 {
-    return do_h_insert_impl(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset, false);
+    return do_h_insert_impl(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset, false, vrf_id);
 }
 
 // H.Insert.Red (reduced)
@@ -120,15 +122,16 @@ static __always_inline int do_h_insert_red_core(
     __u32 *saved_vlan,
     struct ipv6hdr *saved_ip6h,
     struct headend_entry *entry,
+    __u32 vrf_id,
     __u16 l3_offset)
 {
     if (entry->num_segments == 1)
-        return do_h_insert_impl(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset, false);
+        return do_h_insert_impl(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset, false, vrf_id);
 
     if (entry->num_segments < 2 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
 
-    return do_h_insert_impl(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset, true);
+    return do_h_insert_impl(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset, true, vrf_id);
 }
 
 // ========================================================================
@@ -141,6 +144,7 @@ static __always_inline int do_h_insert_v6(
     struct ethhdr *eth,
     struct ipv6hdr *ip6h,
     struct headend_entry *entry,
+    __u32 vrf_id,
     __u16 l3_offset)
 {
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS - 1)
@@ -153,7 +157,7 @@ static __always_inline int do_h_insert_v6(
     struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_ip6h, ip6h, sizeof(struct ipv6hdr));
 
-    return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, entry, l3_offset);
+    return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, entry, vrf_id, l3_offset);
 }
 
 // H.Insert.Red for IPv6 (RFC 8986 Section 4.1 + Reduced)
@@ -162,6 +166,7 @@ static __always_inline int do_h_insert_red_v6(
     struct ethhdr *eth,
     struct ipv6hdr *ip6h,
     struct headend_entry *entry,
+    __u32 vrf_id,
     __u16 l3_offset)
 {
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
@@ -174,7 +179,7 @@ static __always_inline int do_h_insert_red_v6(
     struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_ip6h, ip6h, sizeof(struct ipv6hdr));
 
-    return do_h_insert_red_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, entry, l3_offset);
+    return do_h_insert_red_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, entry, vrf_id, l3_offset);
 }
 
 #endif // SRV6_INSERT_H

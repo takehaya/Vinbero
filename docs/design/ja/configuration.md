@@ -33,6 +33,7 @@ internal:
 | `device_mode` | enum | `driver` | XDP attach mode。`generic` / `driver` / `offload` |
 | `verifier_log_level` | int | `0` | eBPF verifier のログレベル。0 で無効、1 で branch、2 で命令単位 |
 | `verifier_log_size` | uint32 | `0` | verifier log バッファの初期サイズ。0 で cilium/ebpf の既定に任せ、上限は 64 MiB |
+| `fib_lookup_tbid` | string | `auto` | tenant VRF の AC から来たパケットの encap の外側の引き方。`auto` は kernel の `bpf_fib_lookup` が `BPF_FIB_LOOKUP_TBID` を受け付ければ main table を直接引き、VRF の table を unreachable default で閉じる。`off` は受け付けない kernel と同じく入口の interface で引き、VRF の table を閉じない ([vrf.md](vrf.md#encap-の外側の経路)) |
 
 ```yaml
 internal:
@@ -191,6 +192,7 @@ VRF オブジェクトを boot 時に宣言します (設計は [vrf.md](vrf.md)
 | `vrfs.entries[].table_id` | uint32 | 0 以外で kernel VRF device を作成 (既存 device は adopt)。End.DT4/DT6/DT46 の FIB lookup 先 |
 | `vrfs.entries[].members` | []string | device に enslave する interface。`table_id` が必要 |
 | `vrfs.entries[].enable_l3mdev_rule` | bool | l3mdev ip rule (prio 1000) を入れる。`table_id` が必要 |
+| `vrfs.entries[].no_unreachable_default` | bool | device の table に IPv4 / IPv6 の `unreachable default` を足さない。既定 (false) では足すので、table に無い宛先は main table へ進まずに止まる。値は起動時に state の記録より優先して当てはめ、変えた値は次の起動で効く (opt-out にすると Vinbero が足した経路を外す)。`table_id` が必要 |
 | `vrfs.entries[].acs[].interface` | string | この VRF に分類する ingress interface |
 | `vrfs.entries[].acs[].vlan` | uint16 | VLAN ID (0 = untagged) |
 | `vrfs.entries[].bridge.name` | string | L2 facet の bridge device 名。End.DT2/DT2M の配送先 |

@@ -20,6 +20,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
 	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/bgp/export"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/cplane"
@@ -105,6 +106,10 @@ func run(cliCtx *cli.Context) error {
 	}
 	vrfBgpMgr := vrfbgp.NewManager()
 	vrfBgpMgr.VRF().SetLogger(lg)
+	// The VRF tables are closed only when the data plane can look tenant
+	// encapsulations up in the main table (bpf.ProbeFibLookupTBID).
+	vrfBgpMgr.VRF().SetTablesClosed(vin.FibLookupTBID())
+	vrfBgpMgr.VRF().SetTablesHeldOpen(vin.GetResourceManager().TablesHeldOpen)
 	bindingVRFs := make([]string, 0, len(cfg.BGP.VrfBindings))
 	for _, b := range cfg.BGP.VrfBindings {
 		bindingVRFs = append(bindingVRFs, b.VRFName)
@@ -126,6 +131,10 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	// The boot's creates and adopts are done: from here on a create that
+	// would close a table under an L2 headend circuit is refused.
+	vin.GetResourceManager().FinishBoot()
+	warnVRFPorts(vrfBgpMgr.VRF(), vin.GetMapOperations(), lg)
 	// Forget runtime attachments whose interface is deleted.
 	if err := vin.WatchDevices(); err != nil {
 		return fmt.Errorf("watch devices: %w", err)
@@ -140,6 +149,9 @@ func run(cliCtx *cli.Context) error {
 	}
 	if err := vin.StartBumRouteWatch(ctx); err != nil {
 		return fmt.Errorf("start xdp BUM route watch: %w", err)
+	}
+	if err := vin.StartEncapNeighKeeper(ctx); err != nil {
+		return fmt.Errorf("start the encapsulation next-hop keeper: %w", err)
 	}
 
 	// The locator.Manager and vrfbgp.Manager are shared between the RPC
@@ -764,6 +776,29 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 	return nil
 }
 
+// warnVRFPorts names, once XDP runs on the devices, what the VRF tables'
+// unreachable default drops: member ports the data plane classifies to the
+// global VRF (no AC in their VRF), and L2 headend circuits on a port of such
+// a VRF (enslaved outside Vinbero, which refuses it itself). An existing
+// configuration then does not black-hole silently.
+func warnVRFPorts(mgr *vrf.Manager, mapOps *bpf.MapOperations, lg *zap.Logger) {
+	if !mgr.TablesClosed() {
+		return
+	}
+	links, err := vrf.SnapshotLinks()
+	if err != nil {
+		lg.Warn("cannot check the VRF ports", zap.Error(err))
+		return
+	}
+	mgr.WarnMembersWithoutAC(links, "", lg)
+	ports, err := mapOps.HeadendL2Ports()
+	if err != nil {
+		lg.Warn("cannot list the L2 headend circuits", zap.Error(err))
+		return
+	}
+	mgr.WarnL2CircuitsOnClosedVRFs(links, ports, lg)
+}
+
 // bridgeRegistrar is the FDB-watcher surface watchBridgeFacets needs.
 type bridgeRegistrar interface {
 	RegisterBridge(ifindex int, bdID uint16)
@@ -806,18 +841,20 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, dev vrf.DeviceOps, br vrf
 	mgr.SetPolicy(vrf.Policy{DefaultDeny: cfg.DefaultDeny, DenyAction: action})
 	for _, v := range cfg.Entries {
 		// Kernel-device facet first: table_id != 0 creates (or adopts) the
-		// Linux VRF device. members / enable_l3mdev_rule without a table are a
-		// typo (they configure the device), so reject rather than ignore.
+		// Linux VRF device. members / enable_l3mdev_rule /
+		// no_unreachable_default without a table are a typo (they configure
+		// the device), so reject rather than ignore.
 		if v.TableID != 0 {
 			if _, err := mgr.CreateDevice(v.Name, vrf.Device{
-				TableID:          v.TableID,
-				Members:          v.Members,
-				EnableL3mdevRule: v.EnableL3mdevRule,
+				TableID:              v.TableID,
+				Members:              v.Members,
+				EnableL3mdevRule:     v.EnableL3mdevRule,
+				NoUnreachableDefault: v.NoUnreachableDefault,
 			}, dev); err != nil {
 				return err
 			}
-		} else if len(v.Members) > 0 || v.EnableL3mdevRule {
-			return fmt.Errorf("vrf %q: members / enable_l3mdev_rule require table_id (they configure the kernel device)", v.Name)
+		} else if len(v.Members) > 0 || v.EnableL3mdevRule || v.NoUnreachableDefault {
+			return fmt.Errorf("vrf %q: members / enable_l3mdev_rule / no_unreachable_default require table_id (they configure the kernel device)", v.Name)
 		}
 		// L2 bridge-domain facet: creates (or adopts, idempotent over the
 		// state-file seed) the kernel bridge. watchBridgeFacets registers
@@ -867,10 +904,11 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, dev vrf.DeviceOps, br vrf
 func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error {
 	for _, mv := range resMgr.ListVrfs() {
 		if _, err := mgr.SetDevice(mv.Name, vrf.Device{
-			TableID:          mv.TableID,
-			Members:          mv.Members,
-			EnableL3mdevRule: mv.EnableL3mdevRule,
-			Ifindex:          mv.Ifindex,
+			TableID:              mv.TableID,
+			Members:              mv.Members,
+			EnableL3mdevRule:     mv.EnableL3mdevRule,
+			NoUnreachableDefault: mv.OptedOut(),
+			Ifindex:              mv.Ifindex,
 		}); err != nil {
 			return fmt.Errorf("seed vrf %q from state: %w (remove the entry from the netresource state file, settings.state_path, and restart)", mv.Name, err)
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/vishvananda/netlink"
 	"net"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
@@ -16,16 +17,33 @@ import (
 // HeadendL2Server implements the HeadendL2ServiceHandler interface
 type HeadendL2Server struct {
 	mapOps *bpf.MapOperations
-	// deleteEntry and linkGone default to mapOps and the kernel; tests
-	// replace them.
+	// createEntry, deleteEntry and linkGone default to mapOps and the
+	// kernel; tests replace them.
+	createEntry func(ifindex uint32, vlan uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte) error
 	deleteEntry func(ifindex uint32, vlan uint16) error
 	linkGone    func(ifindex uint32) bool
+	// closedVRF names the managed VRF whose closed table (it ends in the
+	// unreachable default) the interface is enslaved to. Nil (the default
+	// until SetClosedVRFCheck) refuses nothing.
+	closedVRF func(ifindex uint32) (string, bool, error)
+	// vrfMu is VrfServer's mutation lock, held from the check to the write
+	// so a concurrent VrfCreate cannot close the port's table in between
+	// (or enslave the port after its own check).
+	vrfMu *sync.Mutex
+}
+
+// SetClosedVRFCheck installs the check HeadendL2Create refuses a port with,
+// and the VRF mutation lock it runs under (VrfServer's).
+func (s *HeadendL2Server) SetClosedVRFCheck(fn func(ifindex uint32) (string, bool, error), vrfMu *sync.Mutex) {
+	s.closedVRF = fn
+	s.vrfMu = vrfMu
 }
 
 // NewHeadendL2Server creates a new HeadendL2Server
 func NewHeadendL2Server(mapOps *bpf.MapOperations) *HeadendL2Server {
 	s := &HeadendL2Server{mapOps: mapOps, linkGone: ifindexGone}
 	if mapOps != nil {
+		s.createEntry = mapOps.CreateHeadendL2
 		s.deleteEntry = mapOps.DeleteHeadendL2
 	}
 	return s
@@ -58,6 +76,26 @@ func (s *HeadendL2Server) deleteTarget(name string, vlan uint16) error {
 		return fmt.Errorf("%s: interface %q has no entry for VLAN %d", v1.ReasonNotFound, name, vlan)
 	}
 	return err
+}
+
+// refuseVrfPort rejects an L2 circuit on a port enslaved to a managed VRF
+// whose table ends in the unreachable default. An L2 circuit's encapsulations
+// and BUM copies are looked up on the source port, so on such a port they go
+// to the VRF table and stop there. Ports of other VRFs (unmanaged, opted
+// out) work as they always have.
+func (s *HeadendL2Server) refuseVrfPort(name string, ifindex uint32) error {
+	if s.closedVRF == nil {
+		return nil
+	}
+	vrf, closed, err := s.closedVRF(ifindex)
+	if err != nil {
+		return err
+	}
+	if closed {
+		return fmt.Errorf("interface %q is a port of VRF %q, whose table ends in the unreachable default: "+
+			"an L2 headend circuit on it would be dropped there (use a bridge port or a port in no VRF, or opt the VRF out)", name, vrf)
+	}
+	return nil
 }
 
 func resolveIfindex(name string) (uint32, error) {
@@ -100,10 +138,22 @@ func (s *HeadendL2Server) HeadendL2Create(
 		Created: make([]*v1.HeadendL2, 0),
 		Errors:  make([]*v1.OperationError, 0),
 	}
+	if s.vrfMu != nil {
+		s.vrfMu.Lock()
+		defer s.vrfMu.Unlock()
+	}
 
 	for _, headend := range req.Msg.HeadendL2S {
 		ifindex, err := resolveIfindex(headend.InterfaceName)
 		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
+				Reason:        err.Error(),
+			})
+			continue
+		}
+
+		if err := s.refuseVrfPort(headend.InterfaceName, ifindex); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),
@@ -129,7 +179,7 @@ func (s *HeadendL2Server) HeadendL2Create(
 			continue
 		}
 
-		if err := s.mapOps.CreateHeadendL2(ifindex, uint16(headend.VlanId), entry, esi); err != nil {
+		if err := s.createEntry(ifindex, uint16(headend.VlanId), entry, esi); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),

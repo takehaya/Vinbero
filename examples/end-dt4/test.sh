@@ -31,6 +31,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# check <description> <command...>: tallies a PASS when the command succeeds.
+check() {
+    local desc=$1; shift
+    if "$@" > /dev/null 2>&1; then
+        print_success "$desc: PASS"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$desc: FAIL"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+
 # check_not <description> <command...>: tallies a PASS when the command fails.
 check_not() {
     local desc=$1; shift
@@ -115,6 +127,8 @@ echo "Phase 2: Vinbero XDP End.DT4 (VRF)"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router3..."
+# A previous run's state would adopt vrf100 at start (Phase 4 does that).
+rm -f /tmp/vinbero_end_dt4_state.json
 start_vinbero "$ns_router3" "${VINBERO_CONFIG}" "/tmp/vinbero_end_dt4_test.log"
 VINBERO_PID=$VINBERO_LAST_PID
 wait_vinbero_ready "$ns_router3" "127.0.0.1:8082" 10
@@ -193,9 +207,129 @@ ip netns exec "$ns_host2" ip link del "$h2if.5"
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 with the AC (SID from the underlay)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 with the AC (ordinary tenant path)"
 
+echo ""
+
+# Phase 4: the kernel side of the VRF
+echo "=========================================="
+echo "Phase 4: the kernel VRF table"
+echo "=========================================="
+
+# host2 now encapsulates its traffic to host1 to router1's End.DX4 SID
+# (fc00:1::1), a remote PE's SID that router3 has only in its main table.
+# The packet enters router3 on the enslaved vrf100 port, XDP has no entry
+# for it and passes it on, and the kernel looks it up in vrf100's table.
+print_info "Steering host2 -> host1 to the remote SID fc00:1::1..."
+ip netns exec "$ns_host2" ip -6 route replace fc00:1::1/128 dev "$h2if"
+ip netns exec "$ns_host2" ip -6 neigh replace fc00:1::1 lladdr "$rt3h2_mac" dev "$h2if" nud permanent
+ip netns exec "$ns_host2" ip route replace 172.0.1.1/32 encap seg6 mode encap segs fc00:1::1 dev "$h2if"
+
+# vrf100 was made with `ip link add`, so its table has no route of last
+# resort yet and a miss goes on to the main table.
+test_ping_with_counter "$ns_host2" 172.0.1.1 \
+  "host2 -> remote SID before Vinbero manages vrf100 (falls through to the main table)"
+
+print_info "Adopting vrf100 (vbctl vrf create)..."
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 vrf create \
+  --name vrf100 --table-id 100 > /dev/null
+for af in 4 6; do
+    check "vrf100's table ends in an IPv$af unreachable default" \
+      sh -c "ip netns exec '$ns_router3' ip -$af route show table 100 | grep -q '^unreachable default'"
+done
+
+check_not "host2 -> remote SID with vrf100 managed (stopped in the VRF table)" \
+  ip netns exec "$ns_host2" ping -c 3 -W 1 172.0.1.1
+ip netns exec "$ns_host2" ip route del 172.0.1.1/32
+
+# The return path's kernel seg6 route in table 100 needs the same main-table
+# lookup for its outer header, so Vinbero takes over the encapsulation. The
+# packet comes from the vrf100 AC, and its outer header is looked up in the
+# main table.
+print_info "Encapsulating host2 -> host1 with Vinbero (hv4 create)..."
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
+  --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::1 > /dev/null
+test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero H.Encaps from the vrf100 AC)"
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into the managed vrf100)"
+
+# The encapsulation's underlay next hop (router2, through a static route) is
+# a neighbour Vinbero keeps resolved. Without that, a missing entry would
+# never come back: XDP hands the packet to the kernel to resolve it, and the
+# kernel drops it at vrf100's unreachable default before soliciting. Only
+# host2's own pings run below; there is no BGP session or other traffic.
+uplink="${TOPO_NS_PREFIX}rt3rt2"
+r3neigh() { ip netns exec "$ns_router3" ip -6 neigh show "$1" dev "$uplink"; }
+# eventually_ping <description>: host2 -> host1 succeeds within 20 s.
+eventually_ping() {
+    local desc=$1 i
+    print_info "Testing: $desc"
+    for i in $(seq 1 20); do
+        if ip netns exec "$ns_host2" ping -c 1 -W 1 172.0.1.1 > /dev/null 2>&1; then
+            print_success "$desc: PASS (try $i)"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+            return 0
+        fi
+    done
+    print_error "$desc: FAIL"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+}
+check "router3 keeps router2 (fc00:23::2) as a managed neighbour" \
+  sh -c "ip netns exec '$ns_router3' ip -6 neigh show fc00:23::2 dev '$uplink' | grep -Eq 'managed|extern_learn'"
+ip netns exec "$ns_router3" ip -6 neigh del fc00:23::2 dev "$uplink" 2>/dev/null || true
+print_info "router3's neighbour for router2 after the delete: $(r3neigh fc00:23::2 | tr '\n' ' ')"
+eventually_ping "host2 -> host1 after router3's neighbour entry for router2 was deleted"
+
+# Move the route to another address of router2: the next hop changes, and
+# its neighbour entry does not exist yet.
+ip netns exec "${TOPO_NS_PREFIX}router2" ip -6 addr add fc00:23::3/64 dev "${TOPO_NS_PREFIX}rt2rt3" nodad
+ip netns exec "$ns_router3" ip -6 neigh del fc00:23::3 dev "$uplink" 2>/dev/null || true
+ip netns exec "$ns_router3" ip -6 route replace fc00:2::/64 via fc00:23::3 dev "$uplink"
+eventually_ping "host2 -> host1 after the next hop moved to fc00:23::3"
+check "router3 keeps the new next hop (fc00:23::3) as a managed neighbour" \
+  sh -c "ip netns exec '$ns_router3' ip -6 neigh show fc00:23::3 dev '$uplink' | grep -Eq 'managed|extern_learn'"
+
+echo ""
+
+# Phase 5: a kernel without BPF_FIB_LOOKUP_TBID
+echo "=========================================="
+echo "Phase 5: without BPF_FIB_LOOKUP_TBID"
+echo "=========================================="
+
+# internal.bpf.fib_lookup_tbid "off" makes vinberod behave as on a kernel
+# whose bpf_fib_lookup lacks the flag: tenant encapsulations take the
+# ingress lookup, so the VRF tables must stay open. The restart gives back
+# the unreachable defaults Phase 4 added.
+print_info "Restarting Vinbero with internal.bpf.fib_lookup_tbid off..."
+kill $VINBERO_PID 2>/dev/null || true
+wait $VINBERO_PID 2>/dev/null || true
+notbid_config=/tmp/vinbero_end_dt4_notbid.yaml
+notbid_log=/tmp/vinbero_end_dt4_notbid.log
+sed '/^  bpf:$/a\    fib_lookup_tbid: "off"' "$VINBERO_CONFIG" > "$notbid_config"
+start_vinbero "$ns_router3" "$notbid_config" "$notbid_log"
+VINBERO_PID=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router3" "127.0.0.1:8082" 10
+check "vinberod says the VRF tables stay open" grep -q "fib_lookup_tbid is off" "$notbid_log"
+for af in 4 6; do
+    check_not "vrf100's table has no IPv$af unreachable default any more" \
+      sh -c "ip netns exec '$ns_router3' ip -$af route show table 100 | grep -q '^unreachable default'"
+done
+
+# The maps start empty: the SID and the headend entry come back over the API.
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 sid create \
+  --trigger-prefix fc00:3::3/128 --action END_DT4 --vrf-name vrf100 > /dev/null
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
+  --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::1 > /dev/null
+eventually_ping "host2 -> host1 (H.Encaps from the vrf100 AC, ingress lookup through the open table)"
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into vrf100)"
+
+ip netns exec "$ns_host2" ip route replace 172.0.1.1/32 encap seg6 mode encap segs fc00:1::1 dev "$h2if"
+test_ping_with_counter "$ns_host2" 172.0.1.1 \
+  "host2 -> remote SID with the table open (falls through to the main table)"
+ip netns exec "$ns_host2" ip route del 172.0.1.1/32
+rm -f "$notbid_config"
+
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true
 wait $VINBERO_PID 2>/dev/null || true
+rm -f /tmp/vinbero_end_dt4_state.json
 
 echo ""
 echo "=========================================="

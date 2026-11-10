@@ -98,19 +98,19 @@
         if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP);     \
         hdr_type *hdr = (hdr_type *)(data + 18);                             \
         if ((void *)(hdr + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP);     \
-        action = fn_name(ctx, eth, hdr, &tctx->headend, 18);                 \
+        action = fn_name(ctx, eth, hdr, &tctx->headend, tctx->vrf_id, 18);                 \
     } else if (l3_off == 22) {                                                \
         struct ethhdr *eth = data;                                            \
         if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP);     \
         hdr_type *hdr = (hdr_type *)(data + 22);                             \
         if ((void *)(hdr + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP);     \
-        action = fn_name(ctx, eth, hdr, &tctx->headend, 22);                 \
+        action = fn_name(ctx, eth, hdr, &tctx->headend, tctx->vrf_id, 22);                 \
     } else {                                                                  \
         struct ethhdr *eth = data;                                            \
         if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP);     \
         hdr_type *hdr = (hdr_type *)(data + 14);                             \
         if ((void *)(hdr + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP);     \
-        action = fn_name(ctx, eth, hdr, &tctx->headend, 14);                 \
+        action = fn_name(ctx, eth, hdr, &tctx->headend, tctx->vrf_id, 14);                 \
     }                                                                         \
     TAILCALL_RETURN(ctx,action)
 

@@ -58,11 +58,15 @@ type AC struct {
 // Device is the kernel-device facet of a VRF: the Linux VRF device (and its
 // routing table) that End.DT4/DT6/DT46 deliver decapsulated traffic into.
 // Ifindex is filled by the mechanics layer at create/adopt time.
+// NoUnreachableDefault leaves the routing table without the unreachable
+// default the mechanics layer otherwise adds, so a miss in the table goes on
+// to the main table.
 type Device struct {
-	TableID          uint32
-	Members          []string
-	EnableL3mdevRule bool
-	Ifindex          uint32
+	TableID              uint32
+	Members              []string
+	EnableL3mdevRule     bool
+	NoUnreachableDefault bool
+	Ifindex              uint32
 }
 
 // Bridge is the L2 bridge-domain facet of a VRF: the Linux bridge End.DT2 /
@@ -133,6 +137,12 @@ type Manager struct {
 	// about, so a stale AC is reported once rather than on every reconcile.
 	goneMu  sync.Mutex
 	goneACs map[runtimeACKey]struct{}
+	// tablesOpen: the managed VRF tables have no unreachable default
+	// (SetTablesClosed(false)).
+	tablesOpen bool
+	// heldOpen lists the tables the boot left open for an L2 headend
+	// circuit, with the circuit (SetTablesHeldOpen); nil lists none.
+	heldOpen func() map[uint32]string
 }
 
 type runtimeACKey struct {
@@ -647,7 +657,10 @@ func sortACs(acs []AC) {
 // it; tests use a fake. Like Reconcile's resolve/prog, ops is passed per call
 // rather than stored so NewManager stays dependency-free.
 type DeviceOps interface {
-	CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error)
+	// CreateVrf returns the device's ifindex. A non-zero ifindex with an
+	// error means the device exists (with its routes and members) but its
+	// record could not be saved.
+	CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, error)
 	DeleteVrf(name string) error
 }
 
@@ -704,8 +717,15 @@ func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error
 	if err != nil {
 		return VRF{}, err
 	}
-	ifindex, err := ops.CreateVrf(name, d.TableID, d.Members, d.EnableL3mdevRule)
+	ifindex, err := ops.CreateVrf(name, d.TableID, d.Members, d.EnableL3mdevRule, d.NoUnreachableDefault)
 	if err != nil {
+		if ifindex != 0 {
+			// The device is there though its record is not saved: the facet
+			// is attached all the same, so the table it closes counts as
+			// closed and its members are checked.
+			d.Ifindex = ifindex
+			_, _ = m.SetDevice(name, d)
+		}
 		return VRF{}, fmt.Errorf("vrf %q: create device: %w", name, err)
 	}
 	d.Ifindex = ifindex

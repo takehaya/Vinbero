@@ -17,7 +17,8 @@
 static __noinline int do_h_encaps_l2(
     struct xdp_md *ctx,
     struct headend_entry *entry,
-    __u16 l2_frame_len)
+    __u16 l2_frame_len,
+    __u32 vrf_id)
 {
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
         return XDP_DROP;
@@ -65,7 +66,7 @@ static __noinline int do_h_encaps_l2(
     }
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, vrf_id);
     // After encap, must not return XDP_PASS (stale pointers in caller)
     int action = fib_result_to_xdp_action(fib_result, ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
@@ -75,7 +76,8 @@ static __noinline int do_h_encaps_l2(
 static __always_inline int do_h_encaps_l2_red_1seg(
     struct xdp_md *ctx,
     struct headend_entry *entry,
-    __u16 l2_frame_len)
+    __u16 l2_frame_len,
+    __u32 vrf_id)
 {
     int new_headers_len = sizeof(struct ethhdr) + sizeof(struct ipv6hdr);
 
@@ -100,7 +102,7 @@ static __always_inline int do_h_encaps_l2_red_1seg(
                      headend_ctx_flow_label(0));
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, vrf_id);
     int action = fib_result_to_xdp_action(fib_result, ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
@@ -109,7 +111,8 @@ static __always_inline int do_h_encaps_l2_red_1seg(
 static __always_inline int do_h_encaps_l2_red_multi(
     struct xdp_md *ctx,
     struct headend_entry *entry,
-    __u16 l2_frame_len)
+    __u16 l2_frame_len,
+    __u32 vrf_id)
 {
     if (entry->num_segments < 2 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
@@ -160,7 +163,7 @@ static __always_inline int do_h_encaps_l2_red_multi(
         return XDP_DROP;
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, vrf_id);
     int action = fib_result_to_xdp_action(fib_result, ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
@@ -169,15 +172,16 @@ static __always_inline int do_h_encaps_l2_red_multi(
 static __noinline int do_h_encaps_l2_red(
     struct xdp_md *ctx,
     struct headend_entry *entry,
-    __u16 l2_frame_len)
+    __u16 l2_frame_len,
+    __u32 vrf_id)
 {
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
 
     if (entry->num_segments == 1)
-        return do_h_encaps_l2_red_1seg(ctx, entry, l2_frame_len);
+        return do_h_encaps_l2_red_1seg(ctx, entry, l2_frame_len, vrf_id);
 
-    return do_h_encaps_l2_red_multi(ctx, entry, l2_frame_len);
+    return do_h_encaps_l2_red_multi(ctx, entry, l2_frame_len, vrf_id);
 }
 
 #endif // SRV6_ENCAPS_L2_H

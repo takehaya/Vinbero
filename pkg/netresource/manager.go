@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
@@ -15,6 +16,30 @@ type ResourceManager struct {
 	state     *ManagedState
 	mu        sync.RWMutex
 	writeMu   sync.Mutex // serializes persist (see there)
+	// configNoUnreachable is the config's no_unreachable_default by VRF
+	// name (SetConfigUnreachableDefault); Reconcile applies it.
+	configNoUnreachable map[string]bool
+	noIPv6Logged        atomic.Bool // the "no IPv6" line is logged once
+	// tablesOpen leaves every VRF table without the unreachable default
+	// (SetTablesClosed(false)).
+	tablesOpen bool
+	// closeGuard finds an L2 headend circuit a table's unreachable default
+	// would cut off (SetTableCloseGuard); nil finds none.
+	closeGuard TableCloseGuard
+	// configDevices are the config's VRF devices (SetConfigVrfDevices).
+	configDevices []ConfigVrfDevice
+	// heldMu guards running, wantOpen, heldOpen and openFailed.
+	heldMu sync.Mutex
+	// running is set by FinishBoot: from then on a close the guard objects
+	// to is refused instead of the table being held open.
+	running bool
+	// wantOpen are the tables the boot found an L2 headend circuit on, with
+	// that circuit; heldOpen those of them without an unreachable default
+	// left, which stay open until the next start; openFailed those whose
+	// failure to open was logged.
+	wantOpen   map[uint32]L2CircuitOnTable
+	heldOpen   map[uint32]L2CircuitOnTable
+	openFailed map[uint32]bool
 }
 
 func NewResourceManager(statePath string, logger *zap.Logger) (*ResourceManager, error) {
@@ -73,25 +98,51 @@ func (m *ResourceManager) Reconcile() error {
 			b.RuntimeMembers = m.enslaveRuntimeMembers(b.Name, ifindex, b.RuntimeMembers)
 		}
 
+		// Every record's unreachable-default setting is settled first (the
+		// config's wins), so no table gets a route the config has opted out of,
+		// and a record that now opts out gives back the routes it added.
+		for i := range m.state.VRFs {
+			if err := m.decideUnreachableLocked(i); err != nil {
+				return fix("vrf "+m.state.VRFs[i].Name, err)
+			}
+		}
+		// Each table is checked for L2 headend circuits once, over every
+		// port that will be on it, before any VRF on it is processed, and
+		// the routes a table that stays open has are removed first.
+		checked := map[uint32]bool{}
+		for i := range m.state.VRFs {
+			v := m.state.VRFs[i]
+			if checked[v.TableID] {
+				continue
+			}
+			checked[v.TableID] = true
+			if _, err := m.checkTable(m.state.VRFs, v.Name, v.TableID, nil, v.OptedOut()); err != nil {
+				return fix("vrf "+v.Name, err)
+			}
+		}
+		m.openHeldTablesLocked()
 		for i := range m.state.VRFs {
 			v := &m.state.VRFs[i]
 			link, err := netlink.LinkByName(v.Name)
 			if err != nil {
 				m.logger.Info("Reconcile: recreating VRF",
 					zap.String("name", v.Name), zap.Uint32("table_id", v.TableID))
-				ifindex, err := createVrfNetlink(v.Name, v.TableID, v.Members, v.EnableL3mdevRule)
+				ifindex, added, err := m.createVrfNetlink(m.state.VRFs, v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.OptedOut())
 				if err != nil {
 					return fix("vrf "+v.Name, err)
 				}
 				v.Ifindex = ifindex
+				v.addUnreachableFamilies(added)
 				continue
 			}
-			ifindex, err := adoptVrfDevice(link, v.Name, v.TableID, v.Members, v.EnableL3mdevRule)
+			ifindex, added, err := m.adoptVrfDevice(m.state.VRFs, link, v.Name, v.TableID, v.Members, v.EnableL3mdevRule, v.OptedOut())
 			if err != nil {
 				return fix("vrf "+v.Name, err)
 			}
 			v.Ifindex = ifindex
+			v.addUnreachableFamilies(added)
 		}
+		m.openHeldTablesLocked()
 		return nil
 	}()
 	if err != nil {
@@ -131,6 +182,7 @@ func (m *ResourceManager) GetVrfByName(name string) (ManagedVrf, bool) {
 	for _, v := range m.state.VRFs {
 		if v.Name == name {
 			v.Members = slices.Clone(v.Members)
+			v.UnreachableDefaultAdded = slices.Clone(v.UnreachableDefaultAdded)
 			return v, true
 		}
 	}

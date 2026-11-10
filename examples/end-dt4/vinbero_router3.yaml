@@ -21,3 +21,6 @@ settings:
     headendv6:
       capacity: 1024
   enable_stats: true  # test.sh reads the End.DT4 slot counter
+  # test.sh adopts vrf100 in Phase 4; a private state file keeps that record
+  # away from the other examples and is removed before every run.
+  state_path: /tmp/vinbero_end_dt4_state.json
