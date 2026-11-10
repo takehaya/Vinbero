@@ -311,10 +311,12 @@ reactor initializer `_initialize` -- and imports host functions from the
 `vinbero` module. A module missing `vinbero_abi_version` is refused at
 registration: it is what lets the daemon turn away a plugin built against
 an ABI it no longer implements, rather than letting it trap on the first
-call into a function whose signature moved. The daemon admits versions 1
-and 2. Version 2 adds the VRF of a headend entry (`PluginHeadendEntry.vrf`)
-and is what the Go SDK declares; a daemon that only knows version 1 refuses
-such a module rather than writing its entries into the global VRF.
+call into a function whose signature moved. A headend entry can name its VRF
+(`PluginHeadendEntry.vrf`); a daemon that places it there reports the
+`FeatureHeadendVRF` bit (4) in `input_features`. A daemon without the bit
+ignores the field and writes the entry into the global VRF, so the Go SDK does
+not send a VRF to it, and a plugin that builds the wire itself checks the bit
+first.
 
 `configure` receives the operator's configuration bytes unchanged. The
 plugin can also read what its registration granted -- capabilities,

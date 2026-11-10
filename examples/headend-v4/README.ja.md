@@ -69,13 +69,13 @@ SRv6 Routing Header (RT6) でsegment list: [fc00:2::1, fc00:3::3] が確認で�
 
 ### VRF を指定した headend entry
 
-headend の entry は VRF に属します。`--vrf` を省略すると global VRF です。同じ prefix を、既にある VRF に指定して入れることもできます (存在しない名前は拒否します)。data plane は global VRF で引くので、上の ping は global VRF の entry を使い続けます。
+headend の entry は VRF に属します。`--vrf` を省略すると `hv4` の各 command は global VRF を扱い、`list` と `flush` は `--all-vrfs` で全 VRF を扱います。同じ prefix を、既にある VRF に指定して入れることもできます (存在しない名前は拒否します)。data plane は global VRF で引くので、上の ping は global VRF の entry を使い続けます。
 
 ```bash
 VB="sudo ip netns exec hv4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082"
 $VB vrf create --name hv4-tenant --table-id 4242
 $VB hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:9::1 --vrf hv4-tenant
-$VB hv4 list
+$VB hv4 list --all-vrfs
 # TRIGGER PREFIX  VRF         MODE      SRC ADDR   SEGMENTS
 # 172.0.2.0/24    global      H_ENCAPS  fc00:1::1  fc00:2::1,fc00:3::3
 # 172.0.2.0/24    hv4-tenant  H_ENCAPS  fc00:1::1  fc00:9::1

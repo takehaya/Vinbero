@@ -318,7 +318,7 @@ guest が export するもの。
 
 | export | 意味 |
 |---|---|
-| `vinbero_abi_version() -> i32` | 対応する ABI version。host は 1 と 2 を受け付け、それ以外は登録時に拒否 |
+| `vinbero_abi_version() -> i32` | 対応する ABI version。不一致は登録時に拒否 |
 | `alloc(size) -> ptr` | host が書き込む領域を確保 |
 | `free(ptr, size)` | 領域を解放 |
 | `configure(ptr, len) -> i32` | operator 設定を受け取る。省略可 |
@@ -332,7 +332,7 @@ host が提供するもの。すべて `vinbero` module から import します�
 |---|---|
 | `log(level, ptr, len)` | daemon log へ出力 |
 | `now_monotonic() -> i64` | `on_tick` と同じ clock による単調増加の ns |
-| `input_features() -> i64` | host が渡せる入力形式の bitmap |
+| `input_features() -> i64` | host が渡せる入力形式と、host が対応する機能 (headend の VRF など) の bitmap |
 | `grants(ptr, cap) -> i32` | 登録内容 (`PluginGrants`) を guest の buffer に書き、長さを返す |
 | `apply_begin(kind) -> i64` | desired-set transaction を開く (headend v4/v6、advertise、local SID) |
 | `apply_put(gen, ptr, len) -> i32` | 宣言の chunk を積む |
@@ -484,15 +484,18 @@ VRF を名前で宣言でき (`PluginHeadendEntry.vrf`、SDK の `HeadendEntry.V
 省略するか `global` と書くと global VRF (vrf_id 0) です。global VRF 以外は
 scope の VRF list に入っていなければ集合ごと拒否します。advertise と local SID の
 decap_vrf と同じ list です。名前は apply の時点で vrf_id に解決し、存在しない
-VRF は拒否します。宣言が VRF を作ることはありません。locator が後から登録される
-のと同じく、VRF が後から作られれば既存の retry で適用されます。解決から書き終える
-までは VRF の削除を待たせるので、削除された VRF の id に entry が残ることは
-ありません。同じ prefix を global VRF と別の VRF に宣言すると、2 つの entry に
+VRF は集合ごと拒否します。宣言が VRF を作ることはありません。host は拒否した集合を
+保持しないので、plugin は VRF ができてから宣言し直します。名前の解決から map への
+書き込みまでの間は VRF の削除を始めさせないので、削除された VRF の id に entry が
+残ることはありません。composition でも、この間に BGP や service の処理を挟みません。同じ prefix を global VRF と別の VRF に宣言すると、2 つの entry に
 なります。data plane は vrf_id 0 で引くので、global VRF 以外の entry は転送に
 使われません ([vrf.md](vrf.md#headend-entry-の-vrf))。
 
-VRF を指定する宣言には ABI version 2 が要ります。version 1 の module は VRF を
-宣言できず、すべて global VRF に書きます。
+host は headend の VRF に対応していることを `input_features` の bit
+(`FeatureHeadendVRF`、4) で示します。field を知らない古い host は VRF を無視して
+global VRF に書いてしまうので、SDK はこの bit が無い host には VRF を指定した宣言を
+送らず、宣言の時点で `ErrNoHeadendVRF` を返します。VRF を指定しない plugin は bit に
+関係なく動きます。SDK を使わずに wire を組む plugin は、自分でこの bit を確かめます。
 
 prefix には縛れる名前がありません。locator も key に入らないので、operator が
 prefix を並べます。prefix の検査はどの VRF の entry にもかかります。未指定なら
@@ -857,10 +860,7 @@ module は allowlist で検証します。
   通常の plugin の診断には既存の rate limit がある `vinbero.log` を使います。
 - memory は guest が定義して export する 1 つだけ。imported memory は拒否。
 - 必須 export が signature まで一致すること。
-- ABI version が host の受け付ける範囲 (1 と 2) にあること。2 は headend entry の VRF を
-  持てます。host function は 1 と同じなので version 1 の module もそのまま動きます。
-  2 を宣言する module は version 1 しか知らない host では登録できないので、VRF を
-  無視して global VRF に書かれることはありません。
+- ABI version が一致すること。
 - `_start` の自動実行は無効化し、reactor initializer だけを host が明示的
   に呼びます。
 
@@ -1237,7 +1237,7 @@ host から呼ばれている間だけ動き、定期処理には tick を使い
 `plugin.tinygo.wasm` を作れます。既定の Go artifact は置き換えません。
 `wasm-unknown` target には `-gc=conservative` を指定し、回収しない既定の collector を
 避けます。詳細な flag と callback の契約は [SDK README](../../../sdk/go/cplane/README.md)
-に記載しています。両 compiler とも ABI 2 を使います。
+に記載しています。両 compiler とも ABI 1 を使います。
 
 ## local SID と daemon 再起動
 

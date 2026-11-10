@@ -94,7 +94,7 @@ check() {
     fi
 }
 # The VRF column of the list row for prefix in the named VRF ("" if none).
-listed_vrf() { vb hv4 list | awk -v p="$1" -v v="$2" '$1 == p && $2 == v {print $2}'; }
+listed_vrf() { vb hv4 list --all-vrfs | awk -v p="$1" -v v="$2" '$1 == p && $2 == v {print $2}'; }
 
 check "an unknown VRF is refused" fails vb hv4 create \
     --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:9::1 --vrf hv4-nosuch
@@ -102,7 +102,8 @@ check "the refused request created no VRF" test -z "$(vb vrf show | grep hv4-nos
 
 vb vrf create --name hv4-tenant --table-id 4242 > /dev/null
 vb hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:9::1 --vrf hv4-tenant > /dev/null
-vb hv4 list | sed 's/^/    /'
+vb hv4 list --all-vrfs | sed 's/^/    /'
+check "the list without --vrf is the global VRF" test "$(vb hv4 list | awk 'NR > 1 {print $2}')" = global
 check "the global entry is listed" test "$(listed_vrf 172.0.2.0/24 global)" = global
 check "the same prefix is listed in hv4-tenant" test "$(listed_vrf 172.0.2.0/24 hv4-tenant)" = hv4-tenant
 check "--vrf lists that VRF only" test "$(vb hv4 list --vrf hv4-tenant | awk 'NR > 1' | wc -l)" = 1

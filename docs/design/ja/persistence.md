@@ -65,7 +65,7 @@ VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は�
 - `next_vrf_id` が上限の 4294967294 を超えている
 - `next_vrf_id` 以上の `vrf_id` を持つ entry がある
 
-起動時の順序と、interface が消えた AC の扱いは [vrf.md](vrf.md#永続化と-boot) を参照してください。
+pin した map に state.json が記録していない vrf_id の状態が残っている場合 (state.json を失った、保存できなかった、などで)、起動時はその id より上から割り当て、その id の headend entry を消します。起動時の順序と、interface が消えた AC の扱いは [vrf.md](vrf.md#永続化と-boot) を参照してください。
 
 state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください (例外は上記の修復手順と、bridge record の owning VRF 付け替え)。
 
@@ -217,7 +217,8 @@ pin 有効で運用すると「全部一旦クリアしたい」場面が出ま�
 
 ```bash
 vinbero sid flush --yes              # SID function + aux
-vinbero hv4 / hv6 / hl2 flush --yes  # Headend 各種
+vinbero hv4 / hv6 flush --yes --all-vrfs  # L3 Headend (省略すると global VRF だけ)
+vinbero hl2 flush --yes              # L2 Headend
 vinbero peer flush --yes --bd-id 100 # 部分フラッシュ (BD 単位)
 vinbero fdb flush --yes --keep-static # 動的学習だけ消す
 vinbero vt flush --yes --table-id 5  # 部分フラッシュ (table 単位)

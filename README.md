@@ -106,7 +106,7 @@ vinbero sid list
 
 # Headend encapsulation
 vinbero hv4 create --trigger-prefix 192.0.2.0/24 --src-addr fc00::1 --segments fc00::100,fc00::200
-vinbero hv4 list                       # every VRF; the VRF column is second (--vrf X narrows it)
+vinbero hv4 list --all-vrfs            # every VRF; without it the global VRF (--vrf X for one)
 vinbero hl2 create --interface eth1 --vlan-id 100 --src-addr fc00::1 --segments fc00::100,fc00::200 --bd-id 100
 
 # BUM flood peers

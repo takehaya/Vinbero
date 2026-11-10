@@ -2,8 +2,7 @@
 
 `github.com/takehaya/vinbero/sdk/go/cplane` supplies typed events and desired
 sets, and a view of BGP prefix routes. The `guest` subpackage supplies Go
-WASM entry points and host calls. Both use ABI version 2, which carries the
-VRF of a headend entry; a daemon admits versions 1 and 2.
+WASM entry points and host calls. Both use the daemon's existing ABI version 1.
 
 Compile a plugin to WASM to load new controller code into a running daemon without rebuilding it.
 The [SDK walkthrough](../../README.md#load-a-wasm-observer) covers loading, registration, and backend selection.
@@ -156,7 +155,7 @@ tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
 Use `make cplane-example-tinygo` for the example. `-gc=conservative` is required
 for reclaiming memory on this target; its default leaking collector is unsuitable
 for a long-running plugin. TinyGo's standard-library and scheduler limitations
-still apply. Both compilers use the same SDK callbacks and ABI 2.
+still apply. Both compilers use the same SDK callbacks and ABI 1.
 
 ## Declaring state
 
@@ -189,11 +188,16 @@ fails the replacement so the operator can retry.
 A headend entry names its VRF in `HeadendEntry.VRF`. Empty (or `global`) is
 the global VRF and needs no grant. Any other VRF must be in the registration's
 scope VRF list and must exist when the set is applied; otherwise the whole set
-is refused, and a later retry applies it once the VRF exists. The same prefix
-in two VRFs is two entries. The data plane looks every packet up in the global
-VRF, so an entry of another VRF is installed and listed but not used for
-forwarding. A daemon that only knows ABI version 1 refuses a module built with
-this SDK at registration instead of ignoring the VRF.
+is refused, and the host does not keep it: declare it again once the VRF
+exists. The same prefix in two VRFs is two entries. The data plane looks every
+packet up in the global VRF, so an entry of another VRF is installed and listed
+but not used for forwarding.
+
+Naming a VRF needs a host that reports `FeatureHeadendVRF` (the
+`input_features` bitmap). A host without it would ignore the field and write
+the entry into the global VRF, so the client refuses such a declaration with
+`ErrNoHeadendVRF` before sending anything. Entries that name no VRF work on any
+host.
 
 For local SIDs, declare a name, locator and endpoint slot. While its address is
 unknown, retry until the matching allocated SID event arrives: a successful

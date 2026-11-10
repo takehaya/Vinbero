@@ -214,11 +214,12 @@ vinbero stats slot show --type endpoint       # builtin + plugin の slot 毎
 vinbero stats slot show --plugin-only --top 10 # 人気の plugin slot
 ```
 
-`hv4 list` / `hv6 list` は全 VRF の entry を出し、2 列目が VRF です (global VRF は `global`)。`--vrf X` でその VRF だけに絞れます。headend の entry を global VRF 以外に作るには、既存の VRF を `--vrf` で指定します。存在しない VRF は拒否します。data plane は global VRF の entry だけで encap するので、それ以外の VRF の entry は保存と一覧だけです ([vrf.md](vrf.md#headend-entry-の-vrf))。
+`hv4` / `hv6` の各 subcommand は `--vrf` を省略すると global VRF を扱います。`list` と `flush` に `--all-vrfs` を付けると全 VRF です。一覧の 2 列目が VRF です (global VRF は `global`)。headend の entry を global VRF 以外に作るには、既存の VRF を `--vrf` で指定します。存在しない VRF は拒否します。data plane は global VRF の entry だけで encap するので、それ以外の VRF の entry は保存と一覧だけです ([vrf.md](vrf.md#headend-entry-の-vrf))。
 
 ```bash
 vinbero hv4 create --trigger-prefix 10.0.0.0/24 --src-addr fc00::1 --segments fc00::100 --vrf tenant-a
 vinbero hv4 list --vrf tenant-a
+vinbero hv4 list --all-vrfs
 vinbero hv4 delete --trigger-prefix 10.0.0.0/24 --vrf tenant-a
 ```
 
@@ -234,7 +235,7 @@ vinbero --json sid list | jq '.sid_functions[] | {prefix: .trigger_prefix, actio
 
 ```bash
 vinbero sid flush --yes              # SID function 全消去
-vinbero hv4 flush --yes              # Headend v4 全消去 (全 VRF。--vrf X でその VRF だけ)
+vinbero hv4 flush --yes              # Headend v4 (global VRF。--vrf X でその VRF、--all-vrfs で全 VRF)
 vinbero hv6 flush --yes
 vinbero hl2 flush --yes
 vinbero peer flush --yes [--bd-id N] # BD peer (BD 単位も可)
@@ -243,6 +244,6 @@ vinbero vt flush --yes [--table-id N]
 ```
 
 `pin_maps: true` との併用で安全な使い方:
-- デモ / test 環境の reset: `sid flush --yes && hv4 flush --yes && ...` で pin 済 map を空にしてから再投入
+- デモ / test 環境の reset: `sid flush --yes && hv4 flush --yes --all-vrfs && ...` で pin 済 map を空にしてから再投入
 - FDB の再学習: `fdb flush --yes --keep-static` で動的学習エントリだけ消す
 - BD 単位のマルテナント撤退: `peer flush --yes --bd-id 100 && fdb flush --yes --bd-id 100`
