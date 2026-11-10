@@ -22,43 +22,48 @@
 // for free, because it stays a negative "not redirected" code.
 #define FIB_RESULT_NO_NEIGH -3
 
-// Run the IPv6 FIB lookup the data plane makes, on zeroed params: family,
-// the device the lookup runs on, source and destination; flowinfo, L4 and
-// flags stay 0. The XDP path (srv6_fib_lookup_v6_core), the tc path's encap
-// and the control plane's uplink probe (bum_uplink_probe) all go through
-// here, so a change to the inputs reaches each of them. End.X adjacency
-// resolution does not: it looks up the configured next hop with the exposed
-// inner source (endpoint_resolve_adjacency).
-static __always_inline int srv6_fib_lookup_v6_params(
-    void *ctx,
+#define SRV6_FIB_MAIN_TABLE 254 // RT_TABLE_MAIN
+
+// Fill zeroed params for the IPv6 FIB lookup the data plane makes and return
+// the flags to run it with. Family, the device the lookup runs on, source and
+// destination are set; flowinfo and L4 stay 0. vrf_id is the ingress VRF of
+// the packet whose outer header is looked up, 0 for every lookup that is not
+// an encapsulation's outer header.
+//
+// vrf_id 0 runs the lookup on the device as an ingress lookup, ip rules
+// included. A non-zero vrf_id (a tenant AC's encapsulation) looks the outer
+// header up in the main table directly (BPF_FIB_LOOKUP_DIRECT |
+// BPF_FIB_LOOKUP_TBID): the outer header is underlay traffic, and on a port
+// enslaved to a VRF device the l3mdev rule would take the lookup to the
+// tenant's table, which ends in an unreachable default and may hold a tenant
+// route that covers the SID. That lookup does not consult ip rules. The
+// daemon checks at load time that the kernel accepts BPF_FIB_LOOKUP_TBID
+// (bpf.ProbeFibLookupTBID).
+//
+// Every IPv6 lookup goes through here: the XDP path (srv6_fib_lookup_v6_core,
+// srv6_fib_lookup_encap), the tc path's encap and the control plane's uplink
+// probe (bum_uplink_probe), so a change to the inputs reaches each of them.
+// End.X adjacency resolution does not: it looks up the configured next hop
+// with the exposed inner source (endpoint_resolve_adjacency).
+static __always_inline __u32 srv6_fib_v6_params_set(
     struct bpf_fib_lookup *params,
     const void *src,
     const void *dst,
-    __u32 ifindex)
+    __u32 ifindex,
+    __u32 vrf_id)
 {
     params->family = AF_INET6;
     params->ifindex = ifindex;
     __builtin_memcpy(params->ipv6_src, src, sizeof(params->ipv6_src));
     __builtin_memcpy(params->ipv6_dst, dst, sizeof(params->ipv6_dst));
-    return bpf_fib_lookup(ctx, params, sizeof(*params), 0);
+    if (vrf_id == 0)
+        return 0;
+    params->tbid = SRV6_FIB_MAIN_TABLE;
+    return BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID;
 }
 
-#define SRV6_FIB_MAIN_TABLE 254     // RT_TABLE_MAIN
-#define SRV6_FIB_LOOPBACK_IFINDEX 1 // the loopback device, in every namespace
-#define SRV6_FIB_EINVAL 22
-
-// Run the IPv6 FIB lookup for the outer header of an encapsulation. The
-// outer header is underlay traffic whatever VRF the inner packet came from.
-// For a packet from the global VRF (vrf_id 0) this is the ingress-device
-// lookup above, ip rules included. A packet from a tenant AC is looked up in
-// the main table directly instead: on an ingress port enslaved to a VRF
-// device the l3mdev rule would take the lookup to the tenant's table, which
-// ends in an unreachable default and may hold a tenant route that covers the
-// SID. BPF_FIB_LOOKUP_TBID (Linux 6.5) names the main table. A kernel without
-// it refuses the flag with -EINVAL; the lookup then runs again on the
-// loopback device, which cannot be enslaved to a VRF, so its table is main
-// as well.
-static __always_inline int srv6_fib_lookup_v6_encap_params(
+// Run the IPv6 FIB lookup on params set by srv6_fib_v6_params_set.
+static __always_inline int srv6_fib_lookup_v6_params(
     void *ctx,
     struct bpf_fib_lookup *params,
     const void *src,
@@ -66,22 +71,8 @@ static __always_inline int srv6_fib_lookup_v6_encap_params(
     __u32 ifindex,
     __u32 vrf_id)
 {
-    if (vrf_id == 0)
-        return srv6_fib_lookup_v6_params(ctx, params, src, dst, ifindex);
-
-    params->family = AF_INET6;
-    params->ifindex = ifindex;
-    params->tbid = SRV6_FIB_MAIN_TABLE;
-    __builtin_memcpy(params->ipv6_src, src, sizeof(params->ipv6_src));
-    __builtin_memcpy(params->ipv6_dst, dst, sizeof(params->ipv6_dst));
-    int ret = bpf_fib_lookup(ctx, params, sizeof(*params),
-                             BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
-    if (ret != -SRV6_FIB_EINVAL)
-        return ret;
-
-    params->ifindex = SRV6_FIB_LOOPBACK_IFINDEX;
-    params->tbid = 0;
-    return bpf_fib_lookup(ctx, params, sizeof(*params), BPF_FIB_LOOKUP_DIRECT);
+    __u32 flags = srv6_fib_v6_params_set(params, src, dst, ifindex, vrf_id);
+    return bpf_fib_lookup(ctx, params, sizeof(*params), flags);
 }
 
 // Map an IPv6 bpf_fib_lookup return value to a FIB_RESULT_* code. On
@@ -126,7 +117,7 @@ static __always_inline int srv6_fib_lookup_v6_core(
     __u32 ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
-    int ret = srv6_fib_lookup_v6_params(ctx, &fib_params, &ip6h->saddr, dst, ifindex);
+    int ret = srv6_fib_lookup_v6_params(ctx, &fib_params, &ip6h->saddr, dst, ifindex, 0);
     return srv6_fib_v6_result(ret, &fib_params, eth, out_ifindex);
 }
 
@@ -142,7 +133,8 @@ static __always_inline int srv6_fib_lookup_and_update(
 }
 
 // The lookup for a headend's new outer header (ip6h->daddr) on the ingress
-// device, by the packet's ingress VRF: see srv6_fib_lookup_v6_encap_params.
+// device. vrf_id is the packet's ingress VRF (tailcall_ctx.vrf_id, passed
+// down by the caller): see srv6_fib_v6_params_set.
 static __always_inline int srv6_fib_lookup_encap(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
@@ -151,8 +143,8 @@ static __always_inline int srv6_fib_lookup_encap(
     __u32 vrf_id)
 {
     struct bpf_fib_lookup fib_params = {};
-    int ret = srv6_fib_lookup_v6_encap_params(ctx, &fib_params, &ip6h->saddr, &ip6h->daddr,
-                                              ctx->ingress_ifindex, vrf_id);
+    int ret = srv6_fib_lookup_v6_params(ctx, &fib_params, &ip6h->saddr, &ip6h->daddr,
+                                        ctx->ingress_ifindex, vrf_id);
     return srv6_fib_v6_result(ret, &fib_params, eth, out_ifindex);
 }
 

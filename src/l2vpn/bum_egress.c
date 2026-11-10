@@ -332,7 +332,7 @@ int bum_uplink_probe(struct xdp_md *ctx)
         return XDP_ABORTED;
 
     struct bpf_fib_lookup fib_params = {};
-    io->ret = srv6_fib_lookup_v6_params(ctx, &fib_params, io->src, io->dst, io->ifindex);
+    io->ret = srv6_fib_lookup_v6_params(ctx, &fib_params, io->src, io->dst, io->ifindex, 0);
     io->ifindex = fib_params.ifindex;
     __builtin_memcpy(io->dst, fib_params.ipv6_dst, sizeof(io->dst));
     return XDP_PASS;

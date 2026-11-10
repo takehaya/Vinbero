@@ -56,7 +56,7 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         void *data = (void *)(long)ctx->data;
         void *data_end = (void *)(long)ctx->data_end;
         __u16 l2_frame_len = (__u16)(data_end - data);
-        int action = do_h_encaps_l2(ctx, entry, l2_frame_len);
+        int action = do_h_encaps_l2(ctx, entry, l2_frame_len, tctx->vrf_id);
         TAILCALL_RETURN(ctx, action);
     }
 
@@ -103,7 +103,7 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         if (claimed < sizeof(struct iphdr) || claimed > wire_len)
             TAILCALL_RETURN(ctx, XDP_DROP);
         action = CALL_WITH_CONST_L3(l3_off, do_h_encaps_core, ctx,
-                                    &saved_eth, entry, IPPROTO_IPIP, claimed);
+                                    &saved_eth, entry, IPPROTO_IPIP, claimed, tctx->vrf_id);
     } else if (ver == 6) {
         struct ipv6hdr *inner_ip6h = (struct ipv6hdr *)l3;
         if ((void *)(inner_ip6h + 1) > data_end)
@@ -113,7 +113,7 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         if (claimed < sizeof(struct ipv6hdr) || claimed > wire_len)
             TAILCALL_RETURN(ctx, XDP_DROP);
         action = CALL_WITH_CONST_L3(l3_off, do_h_encaps_core, ctx,
-                                    &saved_eth, entry, IPPROTO_IPV6, claimed);
+                                    &saved_eth, entry, IPPROTO_IPV6, claimed, tctx->vrf_id);
     } else {
         action = XDP_DROP;
     }

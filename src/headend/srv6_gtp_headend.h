@@ -38,7 +38,8 @@ static __always_inline int gtp4_d_build_srv6(
     struct headend_entry *entry,
     struct gtpu_parsed *gtp_info,
     __u16 l3_offset,
-    int patch_args)
+    int patch_args,
+    __u32 vrf_id)
 {
     void *data_end = (void *)(long)ctx->data_end;
 
@@ -170,7 +171,7 @@ static __always_inline int gtp4_d_build_srv6(
     __builtin_memcpy(new_eth, &saved_eth, sizeof(struct ethhdr));
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    return srv6_fib_redirect_encap(ctx, outer_ip6h, new_eth, tailcall_ctx_vrf_id());
+    return srv6_fib_redirect_encap(ctx, outer_ip6h, new_eth, vrf_id);
 }
 
 // gtp4_d_parse validates the GTP-U/IPv4 packet and parses its header. Shared
@@ -206,6 +207,7 @@ static __always_inline int do_h_m_gtp4_d(
     struct ethhdr *eth,
     struct iphdr *iph,
     struct headend_entry *entry,
+    __u32 vrf_id,
     __u16 l3_offset)
 {
     struct gtpu_parsed gtp_info = {};
@@ -213,7 +215,7 @@ static __always_inline int do_h_m_gtp4_d(
     if (ret != 0)
         return ret;
 
-    return gtp4_d_build_srv6(ctx, eth, iph, entry, &gtp_info, l3_offset, /*patch_args=*/1);
+    return gtp4_d_build_srv6(ctx, eth, iph, entry, &gtp_info, l3_offset, /*patch_args=*/1, vrf_id);
 }
 
 // do_h_m_gtp4_d_teid: F-TEID-keyed H.M.GTP4.D (BGP MUP T2ST,
@@ -228,6 +230,7 @@ static __always_inline int do_h_m_gtp4_d_teid(
     struct ethhdr *eth,
     struct iphdr *iph,
     struct headend_entry *entry,
+    __u32 vrf_id,
     __u16 l3_offset)
 {
     // entry is the headend_v4_map gate (mode trigger) only; the real
@@ -244,8 +247,7 @@ static __always_inline int do_h_m_gtp4_d_teid(
     // {endpoint, TEID} spaces stay separated per VRF (per ingress AC).
     struct mup_uplink_v4_key key = {};
     key.prefixlen = 96;
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
-    __be32 inst_be = bpf_htonl(tctx ? tctx->vrf_id : 0);
+    __be32 inst_be = bpf_htonl(vrf_id);
     __builtin_memcpy(key.instance, &inst_be, 4);
     __builtin_memcpy(key.endpoint, &iph->daddr, IPV4_ADDR_LEN);
     __be32 teid_be = bpf_htonl(gtp_info.teid); // network order so the MSB aligns to the prefix
@@ -256,7 +258,7 @@ static __always_inline int do_h_m_gtp4_d_teid(
         return XDP_PASS; // no session mapping for this F-TEID
 
     int patch_args = (session->args_offset != MUP_ARGS_OFFSET_NONE);
-    return gtp4_d_build_srv6(ctx, eth, iph, session, &gtp_info, l3_offset, patch_args);
+    return gtp4_d_build_srv6(ctx, eth, iph, session, &gtp_info, l3_offset, patch_args, vrf_id);
 }
 
 #endif // SRV6_GTP_HEADEND_H

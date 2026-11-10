@@ -58,7 +58,7 @@ static __always_inline int tc_srv6_fib_lookup_and_update(
     __u32 *out_ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
-    int ret = srv6_fib_lookup_v6_params(skb, &fib_params, &ip6h->saddr, &ip6h->daddr, skb->ifindex);
+    int ret = srv6_fib_lookup_v6_params(skb, &fib_params, &ip6h->saddr, &ip6h->daddr, skb->ifindex, 0);
     if (ret != BPF_FIB_LKUP_RET_SUCCESS)
         return -1;
 
