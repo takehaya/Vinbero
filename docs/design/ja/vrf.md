@@ -48,6 +48,7 @@ data plane は XDP 入口で ingress front door を 1 回だけ通します。`i
 - `VrfAcAdd` で足した AC の interface が後から消えた場合、reconcile は warning を出してその AC を飛ばします (pod の veth が AC の削除より先に消えても、他の AC の操作を止めないためです)。AC は `VrfAcRemove` まで残り、同じ名前の interface が戻れば再び効きます。config の `vrfs.entries[].acs` の AC は、interface が解決できなければ reconcile を失敗させます。
 - AC はちょうど 1 つの VRF に属します。別 VRF が持つ AC の追加は拒否されます (map の衝突キーを作らせない)。
 - default-deny を有効にすると、どの VRF にも分類されない AC のパケットを drop (または pass) します。underlay/control interface を通すには `global` VRF に AC を足します。
+- local SID の表 (`sid_function_map`) を引くのは、vrf_id 0 に分類された入口から来たパケットだけです。tenant VRF の AC から来た IPv6 パケットは、宛先が local SID でも SID の behavior を通らず、宛先が SID でないパケットと同じく headend の lookup へ進みます。tenant が End.DT4 などの SID を直接宛先にして、別の VRF へ decap されることを防ぐためです。SID ごとの例外はありません。SRv6 を受ける underlay の interface は、AC を持たないままにするか `global` VRF の AC にします。
 - `ingress_vrf_map` の writer は `vrf.Manager.Reconcile` だけです。
 
 詳細は [forwarding_model.md](forwarding_model.md) の VRF axis を参照してください。

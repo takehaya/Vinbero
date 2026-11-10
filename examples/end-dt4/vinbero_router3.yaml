@@ -20,3 +20,4 @@ settings:
       capacity: 1024
     headendv6:
       capacity: 1024
+  enable_stats: true  # test.sh reads the End.DT4 slot counter

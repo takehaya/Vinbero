@@ -31,6 +31,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# dt4_runs: how many packets router3's End.DT4 slot (endpoint slot 8) has
+# processed (needs settings.enable_stats).
+dt4_runs() {
+    ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json \
+        stats slot show --type endpoint --all | jq -er '.[] | select(.slot == 8) | (.packets // 0)'
+}
+
+# check_dt4_runs <description> <test-op> <count> <command...>: runs the
+# command and tallies whether the End.DT4 runs it caused satisfy
+# "delta <test-op> count".
+check_dt4_runs() {
+    local desc=$1 op=$2 want=$3; shift 3
+    print_info "Testing: $desc"
+    local before after
+    before=$(dt4_runs)
+    "$@" > /dev/null 2>&1 || true
+    after=$(dt4_runs)
+    if [ "$((after - before))" "$op" "$want" ]; then
+        print_success "$desc: PASS ($((after - before)) runs)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$desc: FAIL ($((after - before)) runs)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+
 echo "=========================================="
 echo "SRv6 End.DT4 (VRF) Test"
 echo "=========================================="
@@ -75,6 +101,42 @@ ip netns exec "$ns_router3" ping6 -c 1 -W 1 fc00:23::2 > /dev/null 2>&1 || true
 
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP End.DT4 VRF)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (return path, native baseline)"
+
+echo ""
+
+# Phase 3: a tenant AC cannot address the SID
+echo "=========================================="
+echo "Phase 3: SID from a tenant AC"
+echo "=========================================="
+
+# host2 encapsulates its traffic to host1 straight to router3's End.DT4 SID,
+# the way a tenant host would try to reach a SID directly. The outer packet
+# enters router3 on the host-facing port.
+print_info "Steering host2 -> host1 straight to the SID fc00:3::3..."
+rt3h2_mac=$(ip netns exec "$ns_router3" cat "/sys/class/net/${TOPO_NS_PREFIX}rt3h2/address")
+ip netns exec "$ns_host2" ip -6 addr add fc00:99::2/128 dev lo
+ip netns exec "$ns_host2" ip -6 route add fc00:3::3/128 dev "${TOPO_NS_PREFIX}h2rt3"
+ip netns exec "$ns_host2" ip -6 neigh replace fc00:3::3 lladdr "$rt3h2_mac" dev "${TOPO_NS_PREFIX}h2rt3" nud permanent
+ip netns exec "$ns_host2" ip route add 172.0.1.1/32 encap seg6 mode encap segs fc00:3::3 dev "${TOPO_NS_PREFIX}h2rt3"
+
+# Without an AC the port is in the global VRF, and End.DT4 decapsulates
+# host2's packets. (They go no further: vrf100 reaches host1 through a
+# kernel seg6 route, which the XDP FIB lookup does not follow.)
+check_dt4_runs "host2 -> SID with the port in the global VRF (End.DT4 runs)" -ge 3 \
+  ip netns exec "$ns_host2" ping -c 3 -W 1 172.0.1.1
+
+print_info "Classifying the host-facing port into vrf100 (vbctl vrf ac-add)..."
+ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8082 vrf ac-add \
+  --vrf vrf100 --interface "${TOPO_NS_PREFIX}rt3h2" > /dev/null
+
+# From a tenant AC the SID table is not looked up, so End.DT4 never runs.
+check_dt4_runs "host2 -> SID from the vrf100 AC (End.DT4 does not run)" -eq 0 \
+  ip netns exec "$ns_host2" ping -c 3 -W 1 172.0.1.1
+
+ip netns exec "$ns_host2" ip route del 172.0.1.1/32
+# The uplink has no AC, so it stays in the global VRF and keeps reaching the SID.
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 with the AC (SID from the underlay)"
+test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 with the AC (ordinary tenant path)"
 
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true

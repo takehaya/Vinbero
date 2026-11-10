@@ -42,6 +42,7 @@ uN / uA / uT は SRH の有無に関係なく動きます。shift 処理は SRH 
 
 - SRH ありのパケットは `process_srv6_localsid` が `sid_function_map` を引き、`DISPATCH_LOCALSID` として endpoint slot へ tail call します
 - SRH なしのパケットは `process_srv6_decap_nosrh` が入口です。この経路には従来、inner protocol が IPIP / IPv6 / Ethernet のときだけ decap するという gate がありました。uSID は任意の upper-layer protocol を運ぶため、lookup を先に行い、hit した entry が uN / uA / uT なら gate を通す形に変えています。他の action の到達性は変わりません
+- どちらの入口も、ingress front door が vrf_id 0 に分類したパケットだけが通ります。tenant VRF の AC から来たパケットは SID の表を引かずに headend の lookup へ進みます ([vrf.md](vrf.md) の ingress facet)
 
 `sid_function_map` は LPM trie なので、/48 や /64 の locator prefix エントリと、container 終端の /128 service SID エントリが同居できます。終端 DA では /128 が longest match で勝つため、uDT4 のような terminal behavior は従来の実装のまま動きます。
 
