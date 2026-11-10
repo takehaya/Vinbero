@@ -3,21 +3,30 @@
 
 // ========== L3 Pipeline ==========
 
-static __always_inline int process_l3(struct xdp_md *ctx, __u16 l3_offset, __u16 proto)
+// vrf_id is the ingress VRF the front door resolved (0 = global/underlay).
+static __always_inline int process_l3(struct xdp_md *ctx, __u16 l3_offset, __u16 proto,
+                                      __u32 vrf_id)
 {
     if (proto == bpf_htons(ETH_P_IPV6)) {
         struct ethhdr *eth;
         struct ipv6hdr *ip6h;
 
-        // Stage 1: SRH-based endpoint processing
-        REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
-        int action = process_srv6_localsid(ctx, eth, ip6h, l3_offset);
-        if (action != XDP_PASS) return action;
+        // Local SIDs serve the underlay: only a packet that entered on the
+        // global VRF looks up sid_function_map. A packet from a tenant AC
+        // skips both SID stages and goes to the headend lookup like any
+        // other tenant packet, so a tenant cannot address a local SID
+        // directly (e.g. an End.DT4 that decaps into another VRF).
+        if (vrf_id == 0) {
+            // Stage 1: SRH-based endpoint processing
+            REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
+            int action = process_srv6_localsid(ctx, eth, ip6h, l3_offset);
+            if (action != XDP_PASS) return action;
 
-        // Stage 2: Reduced SRH decap (no SRH present)
-        REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
-        action = process_srv6_decap_nosrh(ctx, ip6h, l3_offset);
-        if (action != XDP_PASS) return action;
+            // Stage 2: Reduced SRH decap (no SRH present)
+            REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
+            action = process_srv6_decap_nosrh(ctx, ip6h, l3_offset);
+            if (action != XDP_PASS) return action;
+        }
 
         // Stage 3: Headend encapsulation
         REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
@@ -48,6 +57,7 @@ int vinbero_main(struct xdp_md *ctx)
     void *data_end = (void *)(long)ctx->data_end;
     __u64 pkt_len = data_end - data;
     int action = XDP_PASS;
+    __u32 vrf_id = 0;
 
     STATS_INC(STATS_RX_PACKETS, pkt_len);
 
@@ -72,9 +82,10 @@ int vinbero_main(struct xdp_md *ctx)
         // unmapped ACs under default-deny, and stash vrf_id for all downstream
         // paths (L2 / SID / headend / MUP). Runs before try_l2_headend so the
         // policy covers every ingress path.
-        __u32 vrf_id;
+        // INGRESS_VRF_CIRCUIT_ONLY (a tag with no AC on a tenant port) still
+        // runs the two circuit lookups below and is dropped after them.
         int vrf_verdict = resolve_ingress_vrf(ctx, vlan_id, &vrf_id);
-        if (vrf_verdict != INGRESS_VRF_CONTINUE) {
+        if (vrf_verdict >= 0) {
             action = vrf_verdict;
             goto out;
         }
@@ -96,6 +107,12 @@ int vinbero_main(struct xdp_md *ctx)
             goto out;
         }
 
+        // No configured circuit took the unknown tag: it never reaches L3.
+        if (vrf_verdict == INGRESS_VRF_CIRCUIT_ONLY) {
+            action = XDP_DROP;
+            goto out;
+        }
+
         data = (void *)(long)ctx->data;
         data_end = (void *)(long)ctx->data_end;
         eth = data;
@@ -110,9 +127,9 @@ int vinbero_main(struct xdp_md *ctx)
             struct vlan_hdr *v2b = v2a + 1;
             if ((void *)(v2b + 1) > data_end)
                 goto out;
-            action = process_l3(ctx, 22, v2b->h_vlan_encapsulated_proto);
+            action = process_l3(ctx, 22, v2b->h_vlan_encapsulated_proto, vrf_id);
         } else {
-            action = process_l3(ctx, 18, inner_proto);
+            action = process_l3(ctx, 18, inner_proto, vrf_id);
         }
         goto out;
     }
@@ -120,7 +137,6 @@ int vinbero_main(struct xdp_md *ctx)
     // ========== Non-VLAN packets ==========
     {
         // Front door with vlan_id 0 (untagged AC).
-        __u32 vrf_id;
         int vrf_verdict = resolve_ingress_vrf(ctx, 0, &vrf_id);
         if (vrf_verdict != INGRESS_VRF_CONTINUE) {
             action = vrf_verdict;
@@ -144,7 +160,7 @@ int vinbero_main(struct xdp_md *ctx)
         }
     }
 
-    action = process_l3(ctx, 14, eth_proto);
+    action = process_l3(ctx, 14, eth_proto, vrf_id);
 
 out:
     // Note: When tail call succeeds, this epilogue is NOT reached.

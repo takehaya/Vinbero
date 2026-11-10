@@ -21,7 +21,7 @@ flowchart TD
     Q{"外側ヘッダで分類"}
     PKT --> FD
     FD --> Q
-    Q -->|"IPv6 DA = local SID"| SIDT["sid_function_map (LPM)<br/>SID prefix → behavior + aux_index"]
+    Q -->|"IPv6 DA = local SID<br/>(vrf_id 0 の入口のみ)"| SIDT["sid_function_map (LPM)<br/>SID prefix → behavior + aux_index"]
     Q -->|"encap 対象の IP"| HE["headend_v4/v6_map (LPM)<br/>prefix → H.Encaps エントリ / gate"]
     Q -->|"L2 frame"| L2["headend_l2_map / fdb_map"]
 
@@ -38,7 +38,7 @@ flowchart TD
 
 パケットはまず ingress front door を通ります。`ingress_vrf_map` を {ifindex, vlan} で引いて vrf_id を決め、`tailcall_ctx.vrf_id` に載せて以降のハンドラへ運びます。front door が無効なら全パケットが global VRF (vrf_id 0、underlay) になります。default-deny を有効にすると、どの VRF にも分類されない access circuit を drop できます。
 
-local SID 宛のパケットは `sid_function_map` で behavior を引き、`sid_aux_map` に置いた behavior ごとのパラメータで配送先が決まります。decap 系 (End.DT4/DT6/DT46) は aux の vrf_ifindex が指す kernel VRF へ渡し、そこからは kernel の per-VRF FIB が転送します。End.DT2/DT2M は bridge domain へ、End や End.X や GTP behavior は global の next hop へ向かいます。uSID の uN と uA も同じ `sid_function_map` に載りますが、これらは /128 でなく locator prefix (/48 と /64) のエントリで、DA を書き換えながら転送します。詳細は [usid.md](usid.md) を参照してください。
+`sid_function_map` を引くのは vrf_id 0 のパケットだけです。tenant VRF の access circuit から来た IPv6 パケットは、宛先がこのノードの local SID でも SID の表を引かずに headend の lookup へ進みます。このゲートが守る範囲と、kernel の VRF table が受け持つ残りは [vrf.md](vrf.md) の「local SID と AC」にあります。local SID 宛のパケットは `sid_function_map` で behavior を引き、`sid_aux_map` に置いた behavior ごとのパラメータで配送先が決まります。decap 系 (End.DT4/DT6/DT46) は aux の vrf_ifindex が指す kernel VRF へ渡し、そこからは kernel の per-VRF FIB が転送します。End.DT2/DT2M は bridge domain へ、End や End.X や GTP behavior は global の next hop へ向かいます。uSID の uN と uA も同じ `sid_function_map` に載りますが、これらは /128 でなく locator prefix (/48 と /64) のエントリで、DA を書き換えながら転送します。詳細は [usid.md](usid.md) を参照してください。
 
 encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。エントリが H.Encaps なら service SID へ encap し、color が付いていれば `sr_policy_map` を policy_id で引いて transport SID を前置します。エントリが MUP の gate なら、front door で決めた vrf_id を使って `mup_uplink_v4/v6_map` を {vrf_id, endpoint, TEID} で引いて direct SID を得ます。同じ N3 endpoint と TEID 空間を複数の VRF が共有しても、vrf_id がキーに入るので衝突しません。
 
@@ -46,7 +46,7 @@ encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。
 
 転送テーブルは次の軸で分かれます。どの軸に属するかで、テーブルのキーに何が入るかと、誰が tenant を分けるかが決まります。
 
-- global: ノード全体で 1 つ。tenant の次元を持ちません。`sid_function_map`、`headend_v4/v6_map`、`sr_policy_map` がこれです。local SID 空間と headend の prefix はノード共通です。
+- global: ノード全体で 1 つ。tenant の次元を持ちません。`sid_function_map`、`headend_v4/v6_map`、`sr_policy_map` がこれです。local SID 空間と headend の prefix はノード共通です。local SID は vrf_id 0 の入口から来たパケットだけが使えます。
 - VRF (vrf_id): routing/forwarding instance の identity です。control plane では `pkg/vrf` の一級オブジェクトが name と数値 vrf_id (0 = global/underlay) と ingress membership ({interface, VLAN}) を持ちます。data plane では front door が ingress access circuit を vrf_id に分類し、MUP F-TEID lookup (`mup_uplink_v4/v6_map`) がその vrf_id をキーに含めるので、同じ N3 endpoint と TEID 空間を複数の VRF が共有しても衝突しません。BGP の RT policy (`vrfbgp`)、MUP、EVPN は name で VRF に紐付く facet です。オブジェクト全体の設計は [vrf.md](vrf.md) を参照してください。
 - kernel VRF: VRF の L3 facet です。End.DT4/DT6/DT46 が aux の vrf_ifindex で kernel VRF へ渡し、per-VRF の L3 FIB は kernel が持ちます。eBPF 側はどの VRF へ渡すかだけを決めます。この kernel device は VRF object の facet として `vrf.Manager` が lifecycle を持ち、1 つの VRF が vrf_id と table_id と ifindex を併せ持ちます。作成と削除は `vbctl vrf create` / `vbctl vrf delete` または config の `vrfs.entries[].table_id` で、netlink 操作と JSON state への永続化は `pkg/netresource` が機構レイヤとして担います。削除は SID 参照、ingress AC、vrf-bgp binding のいずれかが残っている間は拒否します。config から entry を消しても device は消えません (config は加算的で、削除は明示的な `vbctl vrf delete` です)。data plane の lookup キーは従来どおり ifindex です (kernel の要求)。
 - bridge domain (bd): L2 の tenant です。`fdb_map` を {bd, MAC} で引き、BUM は bd 単位で flood します。

@@ -106,6 +106,8 @@ return XDP_DROP;
 bpf_tail_call(ctx, &my_private_progs, 0);
 ```
 
+組み込みの endpoint (`sid_endpoint_progs` の組み込みスロット) は、`tailcall_ctx.vrf_id` が 0 でなければ処理せずに drop します。local SID は global VRF の入口にだけ使えるので、tenant の AC から来たパケットを扱う headend プラグインがそこへ委譲しても、組み込みの behavior は動きません。
+
 `VINBERO_PLUGIN` を使う場合は `return XDP_DROP;` のように素の return で OK — ラッパーが必ず `tailcall_epilogue` を通します。`TAILCALL_PARSE_SRH` など直書きしたい高度なケースでは `SEC("xdp") int name(...)` を自分で書き、手動で `tailcall_epilogue` を呼んでください。
 
 サーバーは登録時に静的検証を行い、上記契約を満たさない ELF と vinbero 管理外の PROG_ARRAY を指す `bpf_tail_call` は拒否します。CLI で事前チェック可能:

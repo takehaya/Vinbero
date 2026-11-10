@@ -82,6 +82,20 @@ static __always_inline struct tailcall_ctx *tailcall_ctx_read(void)
     return bpf_map_lookup_elem(&tailcall_ctx_map, &key);
 }
 
+// Read context in a built-in endpoint program (sid_endpoint_progs). Local
+// SIDs serve only the global VRF, and the dispatchers never tail-call an
+// endpoint for a tenant packet. A plugin can still bpf_tail_call a built-in
+// slot from any context, a headend plugin running for a tenant packet for
+// example, so the endpoint checks the ingress VRF itself: a non-zero vrf_id
+// reads as no context, and every caller drops on that.
+static __always_inline struct tailcall_ctx *tailcall_ctx_read_endpoint(void)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (tctx && tctx->vrf_id != 0)
+        return NULL;
+    return tctx;
+}
+
 // ========== Tail Call Epilogue ==========
 //
 // bpf_tail_call does not return, so vinbero_main's stats epilogue is never

@@ -119,7 +119,7 @@
 SEC("xdp")                                                                    \
 int prog_name(struct xdp_md *ctx)                                             \
 {                                                                             \
-    struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();                          \
     if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                               \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                      \
                                                                               \
@@ -138,7 +138,7 @@ int prog_name(struct xdp_md *ctx)                                             \
 SEC("xdp")                                                                    \
 int prog_name(struct xdp_md *ctx)                                             \
 {                                                                             \
-    struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();                          \
     if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                               \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                      \
                                                                               \
@@ -180,7 +180,7 @@ int prog_name(struct xdp_md *ctx)                                             \
 SEC("xdp")                                                                    \
 int prog_name(struct xdp_md *ctx)                                             \
 {                                                                             \
-    struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();                          \
     if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                                \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                       \
                                                                               \

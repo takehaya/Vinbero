@@ -155,7 +155,7 @@ DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_t, process_end_t)
 SEC("xdp")
 int tailcall_endpoint_end_x(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -208,7 +208,7 @@ DEFINE_ENDPOINT_LOCALSID_AUX_DUAL(tailcall_endpoint_end_dt2m,
 SEC("xdp")
 int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -236,7 +236,7 @@ int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -263,7 +263,7 @@ int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -290,7 +290,7 @@ int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -320,7 +320,7 @@ int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -347,7 +347,7 @@ int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -390,7 +390,7 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_as(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -436,7 +436,7 @@ int tailcall_endpoint_end_as(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_ad(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -461,7 +461,7 @@ int tailcall_endpoint_end_ad(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_am(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -489,7 +489,7 @@ int tailcall_endpoint_end_am(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_un(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -514,7 +514,7 @@ int tailcall_endpoint_end_un(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_ut(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -538,7 +538,7 @@ int tailcall_endpoint_end_ut(struct xdp_md *ctx)
 // no-SRH sentinel for End (End.X keeps XDP_PASS there, like uA).
 static __always_inline int end_replace_tailcall(struct xdp_md *ctx, int is_endx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) return XDP_DROP;
     // Open-coded TAILCALL_BOUND_L3OFF: that macro returns through the
     // epilogue, which the SEC wrappers below already apply once.
@@ -585,7 +585,7 @@ int tailcall_endpoint_end_x_replace(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_ua(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
@@ -607,7 +607,7 @@ int tailcall_endpoint_end_ua(struct xdp_md *ctx)
 SEC("xdp")
 int tailcall_endpoint_end_dx2v(struct xdp_md *ctx)
 {
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    struct tailcall_ctx *tctx = tailcall_ctx_read_endpoint();
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 

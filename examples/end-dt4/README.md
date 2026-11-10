@@ -28,6 +28,26 @@ graph LR
 The difference from End.DX4 is the VRF routing table lookup, which lets
 several customer networks stay separated per VRF.
 
+## SIDs and tenant ACs
+
+Only packets that enter on the global VRF (vrf_id 0) look up local SIDs.
+`test.sh` checks this in its last phase. host2 encapsulates its traffic
+to host1 straight to the End.DT4 SID `fc00:3::3`, and the test reads
+router3's End.DT4 slot counter (`vbctl stats slot show --type endpoint`,
+which is why `vinbero_router3.yaml` sets `enable_stats`):
+
+- while router3's host-facing port has no AC, the port is in the global
+  VRF and End.DT4 decapsulates host2's packets
+- after `vbctl vrf ac-add --vrf vrf100 --interface dt4-rt3h2` the port is
+  a tenant AC: the SID is not looked up, End.DT4 does not run, and the
+  packets go on to the headend lookup like any tenant packet and are
+  passed to the kernel (the XDP_PASS counter rises)
+- the same packets with a VLAN 5 tag, which has no AC and no configured
+  circuit, are dropped before any L3 or SID processing, because the
+  untagged side of the port is a tenant AC
+- host1 to host2 keeps working: router3's uplink has no AC, so its
+  packets are still in the global VRF and reach the SID
+
 ## Quick start
 
 ```bash

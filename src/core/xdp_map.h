@@ -147,12 +147,25 @@ struct {
 } ingress_policy_map SEC(".maps");
 
 // resolve_ingress_vrf returns INGRESS_VRF_CONTINUE (and sets *vrf_id_out) to let
-// the packet proceed, or an XDP action (XDP_DROP / XDP_PASS) when the AC is
-// unmapped under default-deny. The front-door hash lookup is skipped unless the
-// policy is enabled, so the unconfigured path costs only one ARRAY lookup and
-// does not double the per-packet {ifindex,vlan} hashing that try_l2_headend
-// already does. XDP actions are 0..4, so -1 is an unambiguous "continue".
+// the packet proceed, INGRESS_VRF_CIRCUIT_ONLY (below), or an XDP action
+// (XDP_DROP / XDP_PASS) when the AC is unmapped under default-deny. The
+// front-door hash lookup is skipped unless the policy is enabled, so the
+// unconfigured path costs only one ARRAY lookup and does not double the
+// per-packet {ifindex,vlan} hashing that try_l2_headend already does. XDP
+// actions are 0..4, so negative verdicts are unambiguous.
+//
+// With default-deny off, a tagged frame whose {ifindex, vlan} has no entry is
+// checked against the port's untagged AC. When {ifindex, 0} belongs to a
+// tenant VRF the frame is not underlay: otherwise a host on an untagged tenant
+// AC could add any unused VLAN tag and be classified as vrf 0. The verdict is
+// then INGRESS_VRF_CIRCUIT_ONLY with *vrf_id_out set to the port's tenant VRF:
+// only a circuit the operator configured for that {ifindex, vlan} (service
+// return, L2 headend) may take the frame, and the caller drops it before any
+// L3 or SID processing otherwise. A trunk whose untagged side is underlay (no
+// entry, or an explicit vrf 0) keeps the plain miss behaviour. Untagged frames
+// never take this extra lookup.
 #define INGRESS_VRF_CONTINUE (-1)
+#define INGRESS_VRF_CIRCUIT_ONLY (-2)
 static __always_inline int resolve_ingress_vrf(struct xdp_md *ctx, __u16 vlan_id, __u32 *vrf_id_out)
 {
     *vrf_id_out = 0; // global VRF default; written on every return path so the caller never propagates a stale vrf_id
@@ -171,6 +184,14 @@ static __always_inline int resolve_ingress_vrf(struct xdp_md *ctx, __u16 vlan_id
     }
     if (pol->default_deny)
         return pol->deny_action == INGRESS_DENY_PASS ? XDP_PASS : XDP_DROP;
+    if (vlan_id) {
+        key.vlan_id = 0;
+        __u32 *untagged = bpf_map_lookup_elem(&ingress_vrf_map, &key);
+        if (untagged && *untagged) {
+            *vrf_id_out = *untagged; // unknown tag on a tenant port: never vrf 0
+            return INGRESS_VRF_CIRCUIT_ONLY;
+        }
+    }
     return INGRESS_VRF_CONTINUE; // miss, default-deny off: global VRF (vrf 0)
 }
 
