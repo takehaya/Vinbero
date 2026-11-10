@@ -141,6 +141,9 @@ func run(cliCtx *cli.Context) error {
 	if err := vin.StartBumRouteWatch(ctx); err != nil {
 		return fmt.Errorf("start xdp BUM route watch: %w", err)
 	}
+	if err := vin.StartEncapNeighKeeper(ctx); err != nil {
+		return fmt.Errorf("start the encapsulation next-hop keeper: %w", err)
+	}
 
 	// The locator.Manager and vrfbgp.Manager are shared between the RPC
 	// server and the BGP route applier, so locators / VRF bindings
@@ -761,6 +764,10 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 		return fmt.Errorf("vrf: %w", err)
 	}
 	lg.Info("VRF ingress classification programmed", zap.Int("vrfs", len(mgr.List())))
+	// A port enslaved to a managed VRF device but not one of its ACs is in
+	// the global VRF, and its encapsulation stops at the VRF table: name
+	// each one so an existing configuration does not black-hole silently.
+	mgr.WarnMembersWithoutAC(vrf.KernelMembers, lg)
 	return nil
 }
 
@@ -872,7 +879,7 @@ func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error
 			TableID:              mv.TableID,
 			Members:              mv.Members,
 			EnableL3mdevRule:     mv.EnableL3mdevRule,
-			NoUnreachableDefault: mv.NoUnreachableDefault,
+			NoUnreachableDefault: mv.OptedOut(),
 			Ifindex:              mv.Ifindex,
 		}); err != nil {
 			return fmt.Errorf("seed vrf %q from state: %w (remove the entry from the netresource state file, settings.state_path, and restart)", mv.Name, err)

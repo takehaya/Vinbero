@@ -57,6 +57,7 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
 	}
+	warnWithoutFibLookupTBID(bpf.ProbeFibLookupTBID, logger)
 
 	// Create map operations and recover aux index state from existing entries
 	mapOps := bpf.NewMapOperations(obj)
@@ -144,6 +145,22 @@ func bumXDPUnavailable(probe func(time.Duration) (bool, error)) string {
 	return ""
 }
 
+// warnWithoutFibLookupTBID warns once at load when the kernel's
+// bpf_fib_lookup does not accept BPF_FIB_LOOKUP_TBID (Linux 6.5 or a
+// backport). The outer header of a tenant AC's encapsulation is looked up
+// with it, so on such a kernel their outer lookup fails and XDP does not
+// forward them (they are passed to the kernel or dropped). The global VRF is
+// not affected.
+func warnWithoutFibLookupTBID(probe func() (bool, error), logger *zap.Logger) {
+	ok, err := probe()
+	switch {
+	case err != nil:
+		logger.Warn("cannot check bpf_fib_lookup for BPF_FIB_LOOKUP_TBID; encapsulation of packets from tenant VRF ACs needs it", zap.Error(err))
+	case !ok:
+		logger.Warn("this kernel's bpf_fib_lookup does not accept BPF_FIB_LOOKUP_TBID (Linux 6.5): XDP cannot forward the encapsulation of packets from tenant VRF ACs (they are passed to the kernel or dropped); the global VRF is not affected")
+	}
+}
+
 // kernelRealtimePath reads "1" on a PREEMPT_RT kernel.
 const kernelRealtimePath = "/sys/kernel/realtime"
 
@@ -173,7 +190,29 @@ func (v *Vinbero) StartBumRouteWatch(ctx context.Context) error {
 
 const bumRouteDebounce = 200 * time.Millisecond
 
+// StartEncapNeighKeeper keeps the underlay next hop of every encapsulation a
+// managed neighbour (bpf.EncapNeighKeeper), so an encapsulation never waits
+// for other traffic to resolve it. It syncs once before returning and keeps
+// following map writes, route changes and deleted neighbour entries.
+func (v *Vinbero) StartEncapNeighKeeper(ctx context.Context) error {
+	k := bpf.NewEncapNeighKeeper(v.mapOps, nil, nil, v.logger)
+	v.mapOps.SetEncapChangeHook(k.Kick)
+	return k.Run(ctx)
+}
+
 const defaultStatePath = "/var/lib/vinbero/state.json"
+
+// configNoUnreachableDefault is the config's no_unreachable_default for each
+// VRF it declares with a kernel device (table_id), by name.
+func configNoUnreachableDefault(cfg *config.Config) map[string]bool {
+	out := make(map[string]bool)
+	for _, e := range cfg.VRFs.Entries {
+		if e.TableID != 0 {
+			out[e.Name] = e.NoUnreachableDefault
+		}
+	}
+	return out
+}
 
 // InitResourceManager initializes the resource manager and reconciles state.
 func (v *Vinbero) InitResourceManager() error {
@@ -186,6 +225,11 @@ func (v *Vinbero) InitResourceManager() error {
 	if err != nil {
 		return fmt.Errorf("init resource manager: %w", err)
 	}
+
+	// The config's no_unreachable_default wins over the state file's, from
+	// the first start after it is set: Reconcile applies it before it adds
+	// any route.
+	resMgr.SetConfigUnreachableDefault(configNoUnreachableDefault(v.cfg))
 
 	// Fail-closed: a state entry that cannot be materialized aborts the boot
 	// (the error carries a repair hint). Continuing with a phantom entry

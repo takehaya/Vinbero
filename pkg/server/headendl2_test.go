@@ -62,3 +62,21 @@ func TestHeadendL2DeleteOutcomes(t *testing.T) {
 		t.Errorf("success: %+v", got)
 	}
 }
+
+// An L2 circuit on a port enslaved to a VRF device is refused before any map
+// write: its encapsulations and BUM copies would be looked up in the VRF
+// table. (mapOps is nil, so reaching the write would panic.)
+func TestHeadendL2CreateRefusesVrfPort(t *testing.T) {
+	s := NewHeadendL2Server(nil)
+	s.vrfMaster = func(uint32) (string, error) { return "vrf-cust", nil }
+	resp, err := s.HeadendL2Create(context.Background(), connect.NewRequest(&v1.HeadendL2CreateRequest{
+		HeadendL2S: []*v1.HeadendL2{{InterfaceName: "lo", SrcAddr: "fc00::1", Segments: []string{"fc00::2"}, BdId: 100}},
+	}))
+	if err != nil {
+		t.Fatalf("HeadendL2Create: %v", err)
+	}
+	if len(resp.Msg.Created) != 0 || len(resp.Msg.Errors) != 1 ||
+		!strings.Contains(resp.Msg.Errors[0].Reason, `enslaved to VRF device "vrf-cust"`) {
+		t.Errorf("got %+v, want one VRF-port error", resp.Msg)
+	}
+}

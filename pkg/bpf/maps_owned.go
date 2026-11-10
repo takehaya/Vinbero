@@ -166,6 +166,7 @@ func (m *MapOperations) CreateBdPeerOwned(bdID, index uint16, entry *HeadendEntr
 	return m.createBdPeerOwnedLocked(bdID, index, entry, esi, remoteSrc, writeReverse, owner)
 }
 func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) error {
+	defer m.encapChanged()
 	if entry == nil {
 		return errors.New("nil BD peer entry")
 	}

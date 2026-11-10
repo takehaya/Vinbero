@@ -20,11 +20,14 @@ type HeadendL2Server struct {
 	// replace them.
 	deleteEntry func(ifindex uint32, vlan uint16) error
 	linkGone    func(ifindex uint32) bool
+	// vrfMaster names the VRF device the interface is enslaved to ("" for
+	// none). It defaults to the kernel; tests replace it.
+	vrfMaster func(ifindex uint32) (string, error)
 }
 
 // NewHeadendL2Server creates a new HeadendL2Server
 func NewHeadendL2Server(mapOps *bpf.MapOperations) *HeadendL2Server {
-	s := &HeadendL2Server{mapOps: mapOps, linkGone: ifindexGone}
+	s := &HeadendL2Server{mapOps: mapOps, linkGone: ifindexGone, vrfMaster: vrfMasterOf}
 	if mapOps != nil {
 		s.deleteEntry = mapOps.DeleteHeadendL2
 	}
@@ -58,6 +61,42 @@ func (s *HeadendL2Server) deleteTarget(name string, vlan uint16) error {
 		return fmt.Errorf("%s: interface %q has no entry for VLAN %d", v1.ReasonNotFound, name, vlan)
 	}
 	return err
+}
+
+// vrfMasterOf returns the name of the VRF device the interface is enslaved
+// to, or "" when its master is not a VRF device (or it has none).
+func vrfMasterOf(ifindex uint32) (string, error) {
+	link, err := netlink.LinkByIndex(int(ifindex))
+	if err != nil {
+		return "", fmt.Errorf("look up interface %d: %w", ifindex, err)
+	}
+	master := link.Attrs().MasterIndex
+	if master == 0 {
+		return "", nil
+	}
+	m, err := netlink.LinkByIndex(master)
+	if err != nil {
+		return "", fmt.Errorf("look up the master of interface %d: %w", ifindex, err)
+	}
+	if _, ok := m.(*netlink.Vrf); !ok {
+		return "", nil
+	}
+	return m.Attrs().Name, nil
+}
+
+// refuseVrfPort rejects an L2 circuit on a port enslaved to a VRF device. An
+// L2 circuit's frames belong to a bridge domain, and its encapsulations and
+// BUM copies are looked up on the source port: on a VRF port that lookup
+// goes to the VRF table, which Vinbero ends in an unreachable default.
+func (s *HeadendL2Server) refuseVrfPort(name string, ifindex uint32) error {
+	vrf, err := s.vrfMaster(ifindex)
+	if err != nil {
+		return err
+	}
+	if vrf != "" {
+		return fmt.Errorf("interface %q is enslaved to VRF device %q: an L2 headend circuit cannot be on a VRF port (use a bridge port or a port in no VRF)", name, vrf)
+	}
+	return nil
 }
 
 func resolveIfindex(name string) (uint32, error) {
@@ -104,6 +143,14 @@ func (s *HeadendL2Server) HeadendL2Create(
 	for _, headend := range req.Msg.HeadendL2S {
 		ifindex, err := resolveIfindex(headend.InterfaceName)
 		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
+				Reason:        err.Error(),
+			})
+			continue
+		}
+
+		if err := s.refuseVrfPort(headend.InterfaceName, ifindex); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),

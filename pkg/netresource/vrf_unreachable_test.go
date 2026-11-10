@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 )
 
@@ -115,6 +119,9 @@ func TestCreateVrfUnreachableDefault(t *testing.T) {
 			t.Errorf("%s resolves in vrf-u: the lookup reached the main table", dst)
 		}
 	}
+	if got, _ := m.GetVrfByName("vrf-u"); got.OptedOut() || len(got.UnreachableDefaultAdded) != 2 {
+		t.Errorf("state = %+v, want both families recorded as added", got)
+	}
 
 	createVrfOrSkip(t, m, "vrf-open", 200, true)
 	wantUnreachable(t, 200, 0)
@@ -123,13 +130,22 @@ func TestCreateVrfUnreachableDefault(t *testing.T) {
 			t.Errorf("%s does not resolve in the opted-out vrf-open, want the main table's route", dst)
 		}
 	}
-	if got, _ := m.GetVrfByName("vrf-open"); !got.NoUnreachableDefault {
+	if got, _ := m.GetVrfByName("vrf-open"); !got.OptedOut() {
 		t.Errorf("state = %+v, want no_unreachable_default recorded", got)
 	}
 
-	// A second create of the same VRF (the adopt path) adds nothing.
+	// A second create of the same VRF (the adopt path) adds nothing, and one
+	// that asks for the other setting is refused.
 	createVrfOrSkip(t, m, "vrf-u", 100, false)
 	wantUnreachable(t, 100, 1)
+	if _, err := m.CreateVrf("vrf-u", 100, nil, false, true); err == nil {
+		t.Error("changing the setting of vrf-u at runtime: want an error")
+	}
+	if _, err := m.CreateVrf("vrf-open", 200, nil, false, false); err == nil {
+		t.Error("changing the setting of vrf-open at runtime: want an error")
+	}
+	wantUnreachable(t, 100, 1)
+	wantUnreachable(t, 200, 0)
 
 	if err := m.DeleteVrf("vrf-u"); err != nil {
 		t.Fatalf("DeleteVrf: %v", err)
@@ -143,7 +159,8 @@ func TestCreateVrfUnreachableDefault(t *testing.T) {
 // Adopting a device the operator made adds the unreachable default, and
 // keeps the table's own default route: a unicast default at a better metric
 // stays the route lookups use, and an unreachable default already at the
-// same metric is kept, not duplicated or refused.
+// same metric is kept, not duplicated or refused, and is not removed by the
+// VRF's delete because Vinbero did not add it.
 func TestAdoptVrfKeepsExistingDefault(t *testing.T) {
 	withTestNetns(t)
 	mainRoutes(t)
@@ -182,9 +199,7 @@ func TestAdoptVrfKeepsExistingDefault(t *testing.T) {
 		}
 	}
 	// vrf-same: the operator already put the unreachable default there.
-	if err := ensureUnreachableDefault(400); err != nil {
-		t.Fatal(err)
-	}
+	addOperatorUnreachable(t, 400)
 
 	createVrfOrSkip(t, m, "vrf-own", 300, false)
 	createVrfOrSkip(t, m, "vrf-same", 400, false)
@@ -201,11 +216,30 @@ func TestAdoptVrfKeepsExistingDefault(t *testing.T) {
 			t.Errorf("%s in vrf-own: %+v, %v; want the operator's default out of own0", dst, routes, err)
 		}
 	}
+	if got, _ := m.GetVrfByName("vrf-same"); len(got.UnreachableDefaultAdded) != 0 {
+		t.Errorf("vrf-same records %v as added, want none (the operator's routes were there)", got.UnreachableDefaultAdded)
+	}
+	if err := m.DeleteVrf("vrf-same"); err != nil {
+		t.Fatalf("DeleteVrf vrf-same: %v", err)
+	}
+	wantUnreachable(t, 400, 1) // the operator's, left alone
 }
 
-// Delete removes the routes when the device is already gone, keeps them
-// while another tracked VRF uses the same table, and leaves an opted-out
-// VRF's table alone.
+// addOperatorUnreachable puts an unreachable default into table the way an
+// operator would, outside the resource manager.
+func addOperatorUnreachable(t *testing.T, table uint32) {
+	t.Helper()
+	for _, f := range []string{familyIPv4, familyIPv6} {
+		if err := netlink.RouteAdd(unreachableDefault(table, f)); err != nil {
+			t.Fatalf("operator unreachable %s: %v", f, err)
+		}
+	}
+}
+
+// Delete removes the routes when the device is already gone. On a table
+// another VRF uses, they stay while a tracked VRF that did not opt out uses
+// it (that VRF takes them over) or a VRF device Vinbero does not track uses
+// it; a tracked VRF that opted out does not keep them.
 func TestDeleteVrfRemovesUnreachableDefault(t *testing.T) {
 	withTestNetns(t)
 	m := newTestManager(t)
@@ -224,27 +258,76 @@ func TestDeleteVrfRemovesUnreachableDefault(t *testing.T) {
 	}
 	wantUnreachable(t, 100, 0)
 
+	// Two tracked VRFs that want the routes: the second takes them over.
 	createVrfOrSkip(t, m, "vrf-s1", 500, false)
 	createVrfOrSkip(t, m, "vrf-s2", 500, false)
 	if err := m.DeleteVrf("vrf-s1"); err != nil {
 		t.Fatalf("DeleteVrf vrf-s1: %v", err)
 	}
 	wantUnreachable(t, 500, 1)
+	if got, _ := m.GetVrfByName("vrf-s2"); len(got.UnreachableDefaultAdded) != 2 {
+		t.Errorf("vrf-s2 = %+v, want it to have taken the routes over", got)
+	}
 	if err := m.DeleteVrf("vrf-s2"); err != nil {
 		t.Fatalf("DeleteVrf vrf-s2: %v", err)
 	}
 	wantUnreachable(t, 500, 0)
 
-	// The opt-out VRF's table holds an unreachable default someone else put
-	// there: deleting the VRF does not take it.
-	if err := ensureUnreachableDefault(600); err != nil {
-		t.Fatal(err)
-	}
-	createVrfOrSkip(t, m, "vrf-open", 600, true)
-	if err := m.DeleteVrf("vrf-open"); err != nil {
-		t.Fatalf("DeleteVrf vrf-open: %v", err)
+	// A VRF with the routes and one that opted out on the same table:
+	// deleting the first removes them, whichever goes first.
+	createVrfOrSkip(t, m, "vrf-m1", 600, false)
+	createVrfOrSkip(t, m, "vrf-m2", 600, true)
+	if err := m.DeleteVrf("vrf-m2"); err != nil {
+		t.Fatalf("DeleteVrf vrf-m2: %v", err)
 	}
 	wantUnreachable(t, 600, 1)
+	createVrfOrSkip(t, m, "vrf-m2", 600, true)
+	if err := m.DeleteVrf("vrf-m1"); err != nil {
+		t.Fatalf("DeleteVrf vrf-m1: %v", err)
+	}
+	wantUnreachable(t, 600, 0)
+	if err := m.DeleteVrf("vrf-m2"); err != nil {
+		t.Fatalf("DeleteVrf vrf-m2: %v", err)
+	}
+
+	// An untracked VRF device on the table keeps the routes.
+	createVrfOrSkip(t, m, "vrf-t1", 700, false)
+	if err := netlink.LinkAdd(&netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-raw"}, Table: 700}); err != nil {
+		t.Fatalf("LinkAdd vrf-raw: %v", err)
+	}
+	if err := m.DeleteVrf("vrf-t1"); err != nil {
+		t.Fatalf("DeleteVrf vrf-t1: %v", err)
+	}
+	wantUnreachable(t, 700, 1)
+}
+
+// A create that fails after the routes went in (a member that does not
+// exist) leaves no device, no route and no record behind.
+func TestCreateVrfFailureRollsBack(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+	if _, err := m.CreateVrf("vrf-bad", 100, []string{"nosuchif0"}, false, false); err == nil {
+		t.Fatal("CreateVrf with a missing member: want an error")
+	} else if errors.Is(err, unix.EOPNOTSUPP) {
+		t.Skipf("kernel lacks the vrf module: %v", err)
+	}
+	if _, err := netlink.LinkByName("vrf-bad"); err == nil {
+		t.Error("the device of the failed create is still there")
+	}
+	wantUnreachable(t, 100, 0)
+	if _, ok := m.GetVrfByName("vrf-bad"); ok {
+		t.Error("the failed create left a record")
+	}
+
+	// The same for an adopt: the operator's device stays, the routes the
+	// adopt added go.
+	if err := netlink.LinkAdd(&netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-op"}, Table: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateVrf("vrf-op", 200, []string{"nosuchif0"}, false, false); err == nil {
+		t.Fatal("adopt with a missing member: want an error")
+	}
+	wantUnreachable(t, 200, 0)
 }
 
 // After a reboot (device and routes gone) Reconcile recreates the device with
@@ -266,7 +349,7 @@ func TestReconcileUnreachableDefault(t *testing.T) {
 		}
 	}
 	for _, table := range []uint32{100, 200} {
-		if err := removeUnreachableDefault(table); err != nil {
+		if err := m.removeUnreachableFamilies(table, []string{familyIPv4, familyIPv6}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -283,37 +366,163 @@ func TestReconcileUnreachableDefault(t *testing.T) {
 	wantUnreachable(t, 300, 0)
 }
 
-// The state records the opt-out under no_unreachable_default and drops the
-// key when unset, so a record written before the field existed reads as
-// "add the routes". An adopt merges like the other device fields: the
-// opt-out stays only while every request asks for it.
-func TestManagedVrfNoUnreachableDefaultState(t *testing.T) {
+// writeLegacyState writes a state file whose VRF record predates the
+// unreachable-default fields.
+func writeLegacyState(t *testing.T, path, name string, table uint32) {
+	t.Helper()
+	data := []byte(`{"vrfs":[{"name":"` + name + `","table_id":` + strconv.Itoa(int(table)) +
+		`,"members":[],"enable_l3mdev_rule":false,"ifindex":0}],"bridges":[]}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// On the first start with a state record from before the setting existed,
+// the config's opt-out wins: Reconcile adds no route to that table. A record
+// the config does not mention gets the routes. The decision is recorded.
+func TestReconcileLegacyRecordFollowsConfig(t *testing.T) {
+	withTestNetns(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	writeLegacyState(t, path, "vrf-legacy", 100)
+	m, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetConfigUnreachableDefault(map[string]bool{"vrf-legacy": true})
+	if err := m.Reconcile(); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skipf("kernel lacks the vrf module: %v", err)
+		}
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 100, 0)
+	if got, _ := m.GetVrfByName("vrf-legacy"); got.NoUnreachableDefault == nil || !*got.NoUnreachableDefault {
+		t.Errorf("state = %+v, want the config's opt-out recorded", got)
+	}
+
+	path2 := filepath.Join(t.TempDir(), "state.json")
+	writeLegacyState(t, path2, "vrf-plain", 200)
+	m2, err := NewResourceManager(path2, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 200, 1)
+	if got, _ := m2.GetVrfByName("vrf-plain"); got.NoUnreachableDefault == nil || *got.NoUnreachableDefault {
+		t.Errorf("state = %+v, want the default (routes added) recorded", got)
+	}
+}
+
+// A config that opts a VRF out after it had the routes takes effect at the
+// next start: Reconcile removes the routes Vinbero added. Turning the opt-out
+// off again adds them back.
+func TestReconcileConfigChangesOptOut(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+	createVrfOrSkip(t, m, "vrf-c", 100, false)
+	wantUnreachable(t, 100, 1)
+
+	m2, err := NewResourceManager(m.statePath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.SetConfigUnreachableDefault(map[string]bool{"vrf-c": true})
+	if err := m2.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 100, 0)
+	if got, _ := m2.GetVrfByName("vrf-c"); !got.OptedOut() || len(got.UnreachableDefaultAdded) != 0 {
+		t.Errorf("state = %+v, want opted out with nothing added", got)
+	}
+
+	m3, err := NewResourceManager(m.statePath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m3.SetConfigUnreachableDefault(map[string]bool{"vrf-c": false})
+	if err := m3.Reconcile(); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	wantUnreachable(t, 100, 1)
+}
+
+// The state records the setting under no_unreachable_default and leaves it
+// out while undecided; the added families round-trip. Unprivileged.
+func TestManagedVrfUnreachableDefaultState(t *testing.T) {
 	var old ManagedVrf
 	if err := json.Unmarshal([]byte(`{"name":"v","table_id":100,"members":[],"enable_l3mdev_rule":false,"ifindex":3}`), &old); err != nil {
 		t.Fatal(err)
 	}
-	if old.NoUnreachableDefault {
-		t.Error("a record without the field reads as opted out")
+	if old.NoUnreachableDefault != nil || old.OptedOut() {
+		t.Errorf("a record without the field = %+v, want undecided", old)
 	}
 	b, _ := json.Marshal(ManagedVrf{Name: "v", TableID: 100})
 	var keys map[string]any
 	_ = json.Unmarshal(b, &keys)
 	if _, ok := keys["no_unreachable_default"]; ok {
-		t.Errorf("unset opt-out is written: %s", b)
+		t.Errorf("an undecided setting is written: %s", b)
+	}
+	v := ManagedVrf{Name: "v", TableID: 100}
+	v.setNoUnreachableDefault(false)
+	v.addUnreachableFamilies([]string{familyIPv4, familyIPv6, familyIPv4})
+	b, _ = json.Marshal(v)
+	var back ManagedVrf
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.NoUnreachableDefault == nil || *back.NoUnreachableDefault || len(back.UnreachableDefaultAdded) != 2 {
+		t.Errorf("round trip = %+v from %s", back, b)
+	}
+}
+
+// With IPv6 disabled on the host (the route add fails with EAFNOSUPPORT),
+// the IPv4 route still goes in and the create does not fail; the condition
+// is logged once. Unprivileged: the route calls are replaced.
+func TestEnsureUnreachableDefaultWithoutIPv6(t *testing.T) {
+	var added []string
+	routeAdd = func(r *netlink.Route) error {
+		if r.Dst.IP.To4() == nil {
+			return unix.EAFNOSUPPORT
+		}
+		added = append(added, r.Dst.String())
+		return nil
+	}
+	t.Cleanup(func() { routeAdd = netlink.RouteAdd })
+	core, logs := observer.New(zap.InfoLevel)
+	m := &ResourceManager{state: &ManagedState{}, logger: zap.New(core)}
+	for range 2 {
+		got, err := m.ensureUnreachableDefault(100)
+		if err != nil {
+			t.Fatalf("ensureUnreachableDefault: %v", err)
+		}
+		if len(got) != 1 || got[0] != familyIPv4 {
+			t.Errorf("added families = %v, want [ipv4]", got)
+		}
+	}
+	if len(added) != 2 {
+		t.Errorf("IPv4 routes added = %v, want one per call", added)
+	}
+	if n := logs.FilterMessageSnippet("IPv6 is not available").Len(); n != 1 {
+		t.Errorf("logged the missing IPv6 %d times, want once", n)
 	}
 
-	m := &ResourceManager{state: &ManagedState{}, logger: zap.NewNop()}
-	m.ensureVrfInState("v", 100, nil, false, true, 3)
-	m.ensureVrfInState("v", 100, nil, false, true, 3)
-	if got, _ := m.GetVrfByName("v"); !got.NoUnreachableDefault {
-		t.Errorf("opt-out adopt of an opted-out VRF: %+v, want it kept", got)
+	// Any other failure is an error, and the IPv4 route the call added is
+	// taken back.
+	var removed []string
+	routeAdd = func(r *netlink.Route) error {
+		if r.Dst.IP.To4() == nil {
+			return unix.EPERM
+		}
+		return nil
 	}
-	m.ensureVrfInState("v", 100, nil, false, false, 3)
-	if got, _ := m.GetVrfByName("v"); got.NoUnreachableDefault {
-		t.Errorf("default adopt of an opted-out VRF: %+v, want the routes recorded", got)
+	routeDel = func(r *netlink.Route) error { removed = append(removed, r.Dst.String()); return nil }
+	t.Cleanup(func() { routeDel = netlink.RouteDel })
+	if _, err := m.ensureUnreachableDefault(100); err == nil {
+		t.Error("an IPv6 failure other than EAFNOSUPPORT: want an error")
 	}
-	m.ensureVrfInState("v", 100, nil, false, true, 3)
-	if got, _ := m.GetVrfByName("v"); got.NoUnreachableDefault {
-		t.Errorf("opt-out adopt after the routes were added: %+v, want them still recorded", got)
+	if len(removed) != 1 || removed[0] != "0.0.0.0/0" {
+		t.Errorf("removed = %v, want the IPv4 route taken back", removed)
 	}
 }

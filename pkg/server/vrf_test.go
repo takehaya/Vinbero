@@ -18,6 +18,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeProgrammer captures the last ingress_vrf_map / policy write so a
@@ -1329,4 +1330,22 @@ func mustEnsure(t *testing.T, m *vrf.Manager, name string) vrf.VRF {
 		t.Fatalf("Ensure(%q): %v", name, err)
 	}
 	return v
+}
+
+// A create enslaves members, so VrfCreate checks them: a member port that is
+// not an AC of the VRF is named in a warning.
+func TestVrfServer_CreateWarnsMemberWithoutAC(t *testing.T) {
+	s, _, _ := newTestVrfServerFull()
+	s.members = func(uint32) ([]string, error) { return []string{"eth2"}, nil }
+	core, logs := observer.New(zap.WarnLevel)
+	s.SetLogger(zap.New(core))
+	if _, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100, Members: []string{"eth2"}}},
+	})); err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	got := logs.FilterMessageSnippet("is not an access circuit of its VRF").All()
+	if len(got) != 1 || got[0].ContextMap()["interface"] != "eth2" || got[0].ContextMap()["vrf"] != "vrf-cust" {
+		t.Errorf("warnings = %v, want one for vrf-cust / eth2", logs.All())
+	}
 }

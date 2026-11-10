@@ -15,6 +15,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
+	"go.uber.org/zap"
 )
 
 // SidLister is the SID-table surface the VRF delete reference check reads.
@@ -70,6 +71,11 @@ type VrfServer struct {
 	// routes dropped fail-closed before the attach are rescued. Failures
 	// are logged inside the hook (best-effort).
 	evpnReplay func()
+	// members lists a VRF device's ports for the member check after a
+	// create (vrf.Manager.WarnMembersWithoutAC); logger receives its
+	// warnings. Defaults: the kernel and a no-op logger (SetLogger).
+	members vrf.MembersFunc
+	logger  *zap.Logger
 	// mu serializes the mutation handlers' mutate+reconcile(+rollback)
 	// sequence and the device / bridge create+delete flows. SetIngressVrf /
 	// SetIngressPolicy replace the maps with a snapshot-then-rollback strategy
@@ -107,7 +113,15 @@ func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu, grantLease: grantLease}
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu, grantLease: grantLease,
+		members: vrf.KernelMembers, logger: zap.NewNop()}
+}
+
+// SetLogger sets where the server's warnings go.
+func (s *VrfServer) SetLogger(lg *zap.Logger) {
+	if lg != nil {
+		s.logger = lg
+	}
 }
 
 func (s *VrfServer) reconcile() error {
@@ -176,6 +190,11 @@ func (s *VrfServer) VrfCreate(
 		if opErr != nil {
 			resp.Errors = append(resp.Errors, opErr)
 		}
+	}
+	// A create enslaves its members: name every member port that is not an
+	// AC of its VRF, whose encapsulation the unreachable default now drops.
+	if len(resp.Created) > 0 {
+		s.mgr.WarnMembersWithoutAC(s.members, s.logger)
 	}
 	return connect.NewResponse(resp), nil
 }

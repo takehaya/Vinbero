@@ -93,10 +93,36 @@ type ManagedVrf struct {
 	TableID          uint32   `json:"table_id"`
 	Members          []string `json:"members"`
 	EnableL3mdevRule bool     `json:"enable_l3mdev_rule"`
-	// NoUnreachableDefault leaves the table without the unreachable default
-	// a create, an adopt and Reconcile otherwise add.
-	NoUnreachableDefault bool   `json:"no_unreachable_default,omitempty"`
+	// NoUnreachableDefault records whether the table goes without the
+	// unreachable default that a create, an adopt and Reconcile otherwise
+	// add. Nil (a record written before the field existed) is not decided
+	// yet: Reconcile takes the config's setting for the VRF, or adds the
+	// routes when the config does not declare it, and records the result.
+	NoUnreachableDefault *bool  `json:"no_unreachable_default,omitempty"`
 	Ifindex              uint32 `json:"ifindex"`
+	// UnreachableDefaultAdded are the families ("ipv4", "ipv6") whose
+	// unreachable default Vinbero added to the table itself. Only those are
+	// ever removed: a route that was already there (the operator's own) is
+	// left alone.
+	UnreachableDefaultAdded []string `json:"unreachable_default_added,omitempty"`
+}
+
+// OptedOut reports whether the VRF's table goes without the unreachable
+// default. An undecided record reads as not opted out.
+func (v ManagedVrf) OptedOut() bool {
+	return v.NoUnreachableDefault != nil && *v.NoUnreachableDefault
+}
+
+func (v *ManagedVrf) setNoUnreachableDefault(no bool) {
+	v.NoUnreachableDefault = &no
+}
+
+func (v *ManagedVrf) addUnreachableFamilies(families []string) {
+	for _, f := range families {
+		if !slices.Contains(v.UnreachableDefaultAdded, f) {
+			v.UnreachableDefaultAdded = append(v.UnreachableDefaultAdded, f)
+		}
+	}
 }
 
 type ManagedBridge struct {
