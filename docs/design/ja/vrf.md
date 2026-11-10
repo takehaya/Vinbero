@@ -113,6 +113,18 @@ VRF device に enslave したまま AC にしていない interface は vrf_id 0
 - どの宛先も使わなくなった next hop は返します。keeper が managed にした entry を消し、元の動的な扱いに戻します。neighbour の読み込みや削除が失敗したときは keeper のものとして持ち続け、後の見直しでやり直します。最初から静的 (permanent、noarp) だった entry、keeper が見る前から managed だった entry、BUM の flood 先として managed にした entry には触れません。1 回の見直しで neighbour table を読むのは device と family ごとに 1 回です
 - End.AM の戻りの次の宛先はパケットの SRH にしかなく、map から知る方法がありません。End.AM の戻りの next hop は keeper の対象外で、ほかの通信で解決されている必要があります ([service_programming.md](service_programming.md))
 
+## headend entry の VRF
+
+L3 headend の表 (`headend_v4_map` / `headend_v6_map`) は `{vrf_id, prefix}` を key にします。同じ trigger prefix でも VRF が違えば別の entry で、owner も別に持ちます。entry を書く経路ごとの VRF は次のとおりです。
+
+- operator の RPC と vbctl (`Headendv4Create` などの `vrf_name`、`vbctl headend-v4 create --vrf X`)。省略するか `global` を指定すると global VRF (vrf_id 0) です。それ以外の名前は既存の VRF でなければならず、未知の名前は拒否します。要求が VRF を作ることはありません (名前の打ち間違いで見えない entry ができるのを防ぐためです)。
+- control plane plugin の宣言 (`PluginHeadendEntry.vrf`)。global VRF には grant が要りません。それ以外の VRF は plugin の scope の VRF list に入っている必要があります ([cplane-plugin.md](cplane-plugin.md#headend-の-vrf-と-prefix))。
+- BGP の applier は global VRF に書きます。
+
+一覧 (`Headendv4List`、`vbctl headend-v4 list`) は全 VRF の entry をそれぞれの VRF 付きで返します。`vrf_name` (`--vrf`) を付けるとその VRF だけです。応答の `vrf_name` は global VRF では空、`vrf_id` は VRF の id です。Get と Delete は `vrf_name` の VRF の entry だけを扱い、省略すると global VRF です。Flush は `vrf_name` を省略すると全 VRF の RPC の entry を消し、付けるとその VRF の分だけを消します。
+
+data plane は入口の VRF に関係なく vrf_id 0 で headend の表を引きます。そのため global VRF 以外の entry は保存、一覧、削除はできますが、転送には使われません。
+
 ## kernel device facet
 
 End.DT4/DT6/DT46 は decap 後に `bpf_fib_lookup(ifindex=VRF device)` で per-VRF FIB を引くため、Linux VRF device が必要です。この device の lifecycle を VRF オブジェクトが持ちます。
@@ -156,8 +168,9 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 1. ingress AC が残っている → 拒否 (`vrf ac-remove` で先に外す)
 2. vrf-bgp binding が存在する → 拒否 (`vrf-bgp unbind` で先に外す。vpnv4 / vpnv6 の RT を持つ最後の binding を外すと、その family は default-allow に戻り、受信済みの経路がすべて入ります。[srv6_bgp.md](srv6_bgp.md#binding-と-locator-の変更による再評価))
 3. bridge facet が付いている → 拒否 (`vrf bridge-detach` で先に外す)
-4. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
-5. すべて clear なら device を teardown し (その VRF が足した unreachable default も外します。[kernel device facet](#kernel-device-facet))、identity を消して id を回収します。device 削除が失敗した場合は identity に触れず、retry できます
+4. その vrf_id の headend entry (entry が消えて owner の記録だけ残ったものも含む) がある → 拒否 (`vbctl headend-v4 delete --vrf X` / `headend-v6 delete --vrf X` で先に消す。plugin が書いた entry は plugin が宣言から外すか、plugin の登録を外すと消えます)。vrf_id は二度と使わないので、残すと名前で消せない entry になるためです。entry を書く RPC と plugin は VRF の名前を id に解決してから書き終えるまで VRF の削除を待たせるので、この検査が書きかけの entry を見落とすことはありません
+5. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
+6. すべて clear なら device を teardown し (その VRF が足した unreachable default も外します。[kernel device facet](#kernel-device-facet))、identity を消します。id は他の VRF に使いません。device 削除が失敗した場合は identity に触れず、retry できます
 
 `global` と、Vinbero 管理外の raw な kernel device (先に `vrf create` で adopt すれば管理下に入る) は削除できません。
 

@@ -275,6 +275,27 @@ sequenceDiagram
     V-->>Op: [{mode: H.Encaps, prefix: "10.0.0.0/24"},<br/>{mode: H.Encaps.Red, prefix: "10.1.0.0/24"}]
 ```
 
+headend の entry は `{vrf_id, prefix}` で区別されます。`vrf_name` を省略した要求は global VRF (vrf_id 0) の entry を扱います。名前を指定するとその VRF の entry になり、存在しない VRF は拒否します (VRF は作りません)。data plane は vrf_id 0 で引くので、global VRF 以外の entry は転送に使われません ([vrf.md](vrf.md#headend-entry-の-vrf))。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant V as Vinbero
+
+    Op->>V: Headendv4Create<br/>{trigger_prefix: "10.0.0.0/24", vrf_name: "tenant-a", ...}
+    V-->>V: tenant-a → vrf_id (VRF の削除は書き終えるまで待つ)<br/>headend_v4_map {vrf_id, 10.0.0.0/24} 書き込み
+    V-->>Op: Created [{trigger_prefix: "10.0.0.0/24", vrf_name: "tenant-a", vrf_id: 3}]
+
+    Op->>V: Headendv4Create<br/>{trigger_prefix: "10.0.0.0/24", vrf_name: "tenant-x", ...}
+    V-->>Op: errors: [{prefix: "10.0.0.0/24", reason: "unknown VRF \"tenant-x\""}]
+
+    Op->>V: Headendv4List {}
+    V-->>Op: [{prefix: "10.0.0.0/24"},<br/>{prefix: "10.0.0.0/24", vrf_name: "tenant-a", vrf_id: 3}]
+
+    Op->>V: Headendv4Delete<br/>{trigger_prefixes: ["10.0.0.0/24"], vrf_name: "tenant-a"}
+    V-->>Op: {deleted: ["10.0.0.0/24"]} (global VRF の entry は残る)
+```
+
 ---
 
 ## L3 Headend (IPv6)
@@ -632,6 +653,10 @@ sequenceDiagram
     Op->>V: VrfDelete {names: ["vrf100"]}
     V-->>V: SID map全走査: "fc00:3::3/128" が vrf100 を参照中
     V-->>Op: {errors: [{prefix: "vrf100",<br/>reason: "VRF is referenced by SID fc00:3::3/128"}]}
+
+    Op->>V: VrfDelete {names: ["tenant-a"]}
+    V-->>V: headend map走査: tenant-a の vrf_id に entry が残っている
+    V-->>Op: {errors: [{prefix: "tenant-a",<br/>reason: "headend entries remain in this VRF (1); ..."}]}
 
     Op->>V: BridgeDelete {names: ["br100"]}
     V-->>V: SID aux map走査: "fc00:3::3/128" が br100 を参照中

@@ -21,7 +21,7 @@ Use `fdb_read_forward()` for one coherent forwarding snapshot and the lookup key
 The FDB map layout remains 32 bytes, so existing pinned maps do not need migration.
 
 `headend_v4_map` and `headend_v6_map` are keyed by `struct headend_v4_key` and `struct headend_v6_key`: `{prefixlen, instance, addr}`, where `instance` is the vrf_id in big-endian and `prefixlen` counts its 32 bits ahead of the address prefix.
-Every headend entry is in vrf_id 0, so a lookup on a packet's destination uses `prefixlen` 64 (IPv4) or 160 (IPv6) with `instance` 0.
+The data plane looks every packet up in vrf_id 0, so a lookup on a packet's destination uses `prefixlen` 64 (IPv4) or 160 (IPv6) with `instance` 0. Entries an operator or a control-plane plugin writes in another VRF are in the same maps under their own vrf_id and are not used for forwarding.
 `<vinbero/maps.h>` declares every shared map, so build data-plane plugins against these headers (`VINBERO_SDK_VERSION` 5): registration refuses an ELF whose headend map key has another type or size.
 See [plugin-sdk.md](../docs/design/ja/plugin-sdk.md#headend-map-の-key) for a lookup example and the raw key layout.
 
@@ -311,7 +311,10 @@ reactor initializer `_initialize` -- and imports host functions from the
 `vinbero` module. A module missing `vinbero_abi_version` is refused at
 registration: it is what lets the daemon turn away a plugin built against
 an ABI it no longer implements, rather than letting it trap on the first
-call into a function whose signature moved.
+call into a function whose signature moved. The daemon admits versions 1
+and 2. Version 2 adds the VRF of a headend entry (`PluginHeadendEntry.vrf`)
+and is what the Go SDK declares; a daemon that only knows version 1 refuses
+such a module rather than writing its entries into the global VRF.
 
 `configure` receives the operator's configuration bytes unchanged. The
 plugin can also read what its registration granted -- capabilities,
