@@ -134,17 +134,16 @@ type BGPConfig struct {
 	VrfBindings []VrfBindingConfig `yaml:"vrf_bindings,omitempty"`
 	// Locators are SRv6 locator pools registered at startup, before the BGP
 	// session settles. Auto-advertise needs each VRF binding's default_locator
-	// to exist when the exporter enables it, and the receive applier needs the
-	// source_locator present to materialize headend entries -- both run before
-	// any RPC, so config is the only way to have them ready in time. Locators
-	// can still also be created over the LocatorService RPC.
+	// to exist when the exporter enables it, which runs before any RPC. The
+	// receive applier takes the encapsulation source from source_locator; a
+	// route received before that locator exists is written once it is
+	// registered, from config or over the LocatorService RPC.
 	Locators []LocatorConfig `yaml:"locators,omitempty"`
 }
 
 // LocatorConfig declares an SRv6 locator pool statically. It mirrors the
 // LocatorService RPC fields so the BGP paths that need a locator at startup
-// (auto-advertise, the receive applier's encap source) do not depend on an RPC
-// arriving first.
+// (auto-advertise) do not depend on an RPC arriving first.
 type LocatorConfig struct {
 	Name              string `yaml:"name,omitempty"`
 	Prefix            string `yaml:"prefix,omitempty"`

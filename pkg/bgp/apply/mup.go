@@ -403,10 +403,12 @@ func (a *Applier) applyMUPT1ST(r *bgp.MUPRoute, withdraw bool) {
 // SID, composes Args.Mob.Session onto it, and installs the H.Encaps entry on the
 // UE prefix. An unresolvable SID tears down any prior install and waits; an
 // unchanged SID is a no-op so re-resolution does not churn the data plane.
-func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
+// It reports false when a data-plane write failed, which a later reconcile
+// can fix.
+func (a *Applier) reconcileMUPT1ST(key mupT1STKey) bool {
 	st, ok := a.mupT1ST[key]
 	if !ok {
-		return
+		return true
 	}
 	r := &st.route
 	uePrefix, _ := netip.ParsePrefix(r.Prefix) // validated in applyMUPT1ST
@@ -424,7 +426,7 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 				zap.String("ue_prefix", r.Prefix), zap.String("endpoint", r.Endpoint))
 			st.deferLogged = true
 		}
-		return
+		return true
 	}
 	st.deferLogged = false
 
@@ -441,20 +443,20 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 		a.logger.Error("compose MUP T1ST interwork SID",
 			zap.String("ue_prefix", r.Prefix), zap.String("sid", base),
 			zap.String("endpoint", r.Endpoint), zap.Error(err))
-		return
+		return true
 	}
 
 	entry, err := a.buildHeadendEntry(composed, false)
 	if err != nil {
 		a.logger.Error("build MUP T1ST headend entry",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
-		return
+		return true
 	}
 	if src, ok := a.mupGTP4DownlinkSrc(r, endpoint); ok {
 		entry.SrcAddr = src
 	}
 	if st.installedSID == composed && st.installedSrc == entry.SrcAddr {
-		return // already programmed with this SID and source
+		return true // already programmed with this SID and source
 	}
 
 	createHeadend, _ := a.mupT1STHeadendFns(uePrefix)
@@ -462,7 +464,7 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 	if err := createHeadend(r.Prefix, entry, owner); err != nil {
 		a.logger.Error("install MUP T1ST headend",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
-		return
+		return false
 	}
 	st.installedSID = composed
 	st.installedSrc = entry.SrcAddr
@@ -470,6 +472,7 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 		zap.String("ue_prefix", r.Prefix), zap.String("endpoint", r.Endpoint),
 		zap.Uint32("teid", r.TEID), zap.Uint8("qfi", r.QFI), zap.String("sid", composed),
 		zap.String("src", netip.AddrFrom16(entry.SrcAddr).String()))
+	return true
 }
 
 // mupGTP4SrcPrefixForRD returns the GTP4 downlink source prefix of the unique
@@ -807,17 +810,19 @@ func (a *Applier) ReconcileMUPGTP4SrcForRD(rd string) {
 // installs the F-TEID entry (matching {endpoint, TEID-prefix}) and the per-
 // endpoint H.M.GTP{4,6}.D_TEID gate (reference counted). An unresolvable SID
 // tears the session down and waits for its DSD; a changed SID re-Puts the F-TEID
-// entry without touching the gate.
-func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
+// entry without touching the gate. It reports false when a data-plane write
+// or delete failed, which a later reconcile can fix.
+func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 	st, ok := a.mupT2ST[key]
 	if !ok {
-		return
+		return true
 	}
 	if st.withdrawn {
 		if (st.installedSID == "" && !st.gateHeld) || a.uninstallMUPT2ST(st) {
 			delete(a.mupT2ST, key)
+			return true
 		}
-		return
+		return false
 	}
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated in applyMUPT2ST
@@ -835,11 +840,11 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID))
 			st.deferLogged = true
 		}
-		return
+		return true
 	}
 	st.deferLogged = false
 	if st.installedSID == sid {
-		return // already programmed with this direct SID
+		return true // already programmed with this direct SID
 	}
 
 	// The direct SID is a plain End.DT4/DT6 target: H.Encaps toward it with no
@@ -849,7 +854,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 	if err != nil {
 		a.logger.Error("build MUP T2ST uplink entry",
 			zap.String("endpoint", r.Endpoint), zap.Error(err))
-		return
+		return true
 	}
 	entry.ArgsOffset = bpf.MupArgsOffsetNone
 
@@ -861,7 +866,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 			if err := a.acquireMUPGate(dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
 				a.logger.Error("install MUP T2ST gate",
 					zap.String("endpoint", r.Endpoint), zap.Error(err))
-				return
+				return false
 			}
 			st.gateHeld = true
 		}
@@ -871,20 +876,21 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 			if a.releaseMUPGate(dp.gatePrefix, gateOwner, dp.deleteGate) {
 				st.gateHeld = false
 			}
-			return
+			return false
 		}
 	} else if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		// SID changed (a different DSD now resolves): re-Put the F-TEID entry. The
 		// gate already exists and its ref-count is unchanged.
 		a.logger.Error("re-Put MUP T2ST uplink entry",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-		return
+		return false
 	}
 	st.installedSID = sid
 	a.logger.Info("MUP T2ST uplink installed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 		zap.Uint8("teid_len", r.TEIDLen), zap.String("sid", sid),
 		zap.Uint32("vrf_id", st.instance))
+	return true
 }
 
 // uninstallMUPT2ST removes an uplink session's F-TEID entry and releases its

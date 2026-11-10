@@ -52,7 +52,8 @@ bgp:
     # Bind TCP/179: vinberod owns BGP on this node, FRR connects in.
     listen_port: 179
     # Locator supplying the SRv6 encap source. Registered over RPC by
-    # start.sh before the session settles.
+    # start.sh; VPN routes that arrive before it are written once it is
+    # registered.
     source_locator: "LOC1"
   peers:
     # pe-osaka's loopback. Multihop iBGP session via the IPv6 core.

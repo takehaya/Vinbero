@@ -8,8 +8,6 @@ import (
 	"sync"
 
 	"connectrpc.com/connect"
-	"go.uber.org/zap"
-
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
@@ -53,15 +51,6 @@ type VrfBgpServer struct {
 	// Failures are logged inside the hook (best-effort: the next peer event
 	// re-delivers anyway).
 	evpnReplay func()
-	// requestVPNReplay schedules a re-evaluation of the VPN loc-rib for the
-	// given families, off the RPC path; nil when BGP is off. A VRF bound at
-	// runtime (a CNI network configuration carrying rd/rts, for example) can
-	// miss routes that arrived before its import RTs existed: those were
-	// dropped fail-closed and the watch stream never re-delivers them.
-	requestVPNReplay func([]bgp.Family)
-	// vpnReplayPending collects, under mu, the families whose import RTs
-	// grew since the handler's last flushVPNReplay.
-	vpnReplayPending map[bgp.Family]struct{}
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
@@ -88,32 +77,6 @@ func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordi
 		mu = &sync.Mutex{}
 	}
 	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, evpnReplay: evpnReplay, mu: mu}
-}
-
-// SetVPNReplay installs the VPN loc-rib replay run after a binding adds import
-// RTs. replay is called off the RPC path with the families to re-evaluate. Set
-// once at wiring time, before the server handles RPCs; nil leaves it off.
-func (s *VrfBgpServer) SetVPNReplay(replay func([]bgp.Family) error, logger *zap.Logger) {
-	if replay == nil {
-		return
-	}
-	s.requestVPNReplay = newVPNReplayer(replay, logger).request
-}
-
-// flushVPNReplay hands the families commitBinding collected to the replayer.
-// Handlers call it after releasing s.mu.
-func (s *VrfBgpServer) flushVPNReplay() {
-	if s.requestVPNReplay == nil {
-		return
-	}
-	s.mu.Lock()
-	families := make([]bgp.Family, 0, len(s.vpnReplayPending))
-	for fam := range s.vpnReplayPending {
-		families = append(families, fam)
-	}
-	clear(s.vpnReplayPending)
-	s.mu.Unlock()
-	s.requestVPNReplay(families)
 }
 
 // SetCplaneManager installs the plugin manager whose advertisements follow
@@ -289,22 +252,6 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.evpnReplay()
 		}
 	}
-	// Re-evaluate the loc-rib of each L3VPN family that gained an import RT.
-	// A route that arrived before the RT existed was dropped fail-closed and
-	// the watch stream will not resend it. The replay gives every route the
-	// result a fresh delivery would get, so it can also remove routes: the
-	// first binding importing a family ends that family's default-allow, and
-	// installed routes no VRF imports are withdrawn.
-	if s.requestVPNReplay != nil {
-		for _, fam := range []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6} {
-			if hasNewImportRT(prev, updated, fam) {
-				if s.vpnReplayPending == nil {
-					s.vpnReplayPending = make(map[bgp.Family]struct{})
-				}
-				s.vpnReplayPending[fam] = struct{}{}
-			}
-		}
-	}
 	if s.mupSrc != nil && mupGTP4SrcFieldsChanged(existed, prev, updated) {
 		// The manager already holds the updated binding, so the reconcile
 		// resolves the new prefix; this hook fires only on the success path
@@ -478,7 +425,6 @@ func (s *VrfBgpServer) VrfBgpBind(
 			resp.Bound = append(resp.Bound, bound)
 		}
 	}
-	s.flushVPNReplay()
 	return connect.NewResponse(resp), nil
 }
 
@@ -600,7 +546,6 @@ func (s *VrfBgpServer) UpdateBinding(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	defer s.flushVPNReplay()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, existed := s.mgr.Get(binding.VRFName); !existed {
@@ -632,7 +577,6 @@ func (s *VrfBgpServer) BatchModifyRouteTargets(
 	if vrfName == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("vrf_name is required"))
 	}
-	defer s.flushVPNReplay()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.mgr.Get(vrfName)
@@ -781,7 +725,6 @@ func (s *VrfBgpServer) mutateOne(vrfName string, mutate func(*vrfbgp.Binding) er
 	if vrfName == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("vrf_name is required"))
 	}
-	defer s.flushVPNReplay()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.mgr.Get(vrfName)

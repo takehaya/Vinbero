@@ -1472,87 +1472,173 @@ func TestVrfBgpBindAndUnbindReconcilePluginAdvertisements(t *testing.T) {
 	}
 }
 
-// A binding that adds a vpnv4 or vpnv6 import RT requests a replay of exactly
-// the families that gained one, after the handler released the mutation mutex.
-// A route received before a runtime binding exists is dropped by the import-RT
-// filter and never re-delivered by the watch stream, so without the replay a
-// VRF bound at runtime misses every route that arrived before it.
-func TestVrfBgpBind_RequestsVpnReplayForWidenedFamilies(t *testing.T) {
-	newServer := func(t *testing.T) (*VrfBgpServer, *[][]bgp.Family) {
-		s := NewVrfBgpServer(newEvpnTestMgr(t, nil), nil, nil, nil, nil, nil)
-		var got [][]bgp.Family
-		s.requestVPNReplay = func(families []bgp.Family) {
-			if !s.mu.TryLock() {
-				t.Error("replay requested while holding the mutation mutex")
-			} else {
-				s.mu.Unlock()
-			}
-			if len(families) > 0 {
-				slices.Sort(families)
-				got = append(got, families)
-			}
-		}
-		return s, &got
-	}
-	binding := func(vrf string, families map[string]*v1.VrfBgpFamily) *v1.VrfBgpBinding {
-		return &v1.VrfBgpBinding{VrfName: vrf, Rd: "65100:100", Families: families}
-	}
-	bind := func(t *testing.T, s *VrfBgpServer, bs ...*v1.VrfBgpBinding) {
-		t.Helper()
-		resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{Bindings: bs}))
-		if err != nil {
-			t.Fatalf("VrfBgpBind: %v", err)
-		}
-		if len(resp.Msg.GetErrors()) != 0 {
-			t.Fatalf("VrfBgpBind errors: %v", resp.Msg.GetErrors())
-		}
-	}
-	rt := func(value, direction string) *v1.VrfBgpFamily {
-		return &v1.VrfBgpFamily{RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: value, Direction: direction}}}
-	}
-	v4 := []bgp.Family{bgp.FamilyVPNv4}
+// vpnReplayRecorder is a VrfBgpServer whose binding manager reports import
+// filter changes through the daemon's hook, with the VPN replay requests
+// recorded.
+func vpnReplayRecorder(t *testing.T) (*VrfBgpServer, *[][]bgp.Family) {
+	t.Helper()
+	mgr := newEvpnTestMgr(t, nil)
+	s := NewVrfBgpServer(mgr, nil, nil, nil, nil, nil)
+	var got [][]bgp.Family
+	mgr.SetImportFilterHook(vpnImportFilterHook(func(families []bgp.Family) {
+		families = slices.Clone(families)
+		slices.Sort(families)
+		got = append(got, families)
+	}, zap.NewNop()))
+	return s, &got
+}
 
-	s, got := newServer(t)
-	both := map[string]*v1.VrfBgpFamily{"vpnv4": rt("65000:100", "both")}
-	bind(t, s, binding("evi", both))
-	if !slices.EqualFunc(*got, [][]bgp.Family{v4}, slices.Equal[[]bgp.Family]) {
-		t.Errorf("new binding importing vpnv4: replays = %v, want [%v]", *got, v4)
+func vpnTestBinding(vrf string, families map[string]*v1.VrfBgpFamily) *v1.VrfBgpBinding {
+	return &v1.VrfBgpBinding{VrfName: vrf, Rd: "65100:100", Families: families}
+}
+
+func vpnTestRT(value, direction string) *v1.VrfBgpFamily {
+	return &v1.VrfBgpFamily{RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: value, Direction: direction}}}
+}
+
+func vpnTestBind(t *testing.T, s *VrfBgpServer, bs ...*v1.VrfBgpBinding) {
+	t.Helper()
+	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{Bindings: bs}))
+	if err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
 	}
-	bind(t, s, binding("evi", both))
-	if len(*got) != 1 {
-		t.Errorf("unchanged re-bind requested a replay: %v", *got)
+	if len(resp.Msg.GetErrors()) != 0 {
+		t.Fatalf("VrfBgpBind errors: %v", resp.Msg.GetErrors())
 	}
+}
+
+func wantReplays(t *testing.T, what string, got [][]bgp.Family, want ...[]bgp.Family) {
+	t.Helper()
+	if !slices.EqualFunc(got, want, slices.Equal[[]bgp.Family]) {
+		t.Errorf("%s: replays = %v, want %v", what, got, want)
+	}
+}
+
+// A binding change that widens what the import-RT filter accepts requests a
+// replay of exactly the families affected. A route received
+// before a runtime binding exists is dropped by the filter and never
+// re-delivered by the watch stream, so without the replay a VRF bound at
+// runtime misses every route that arrived before it.
+func TestVrfBgpBind_RequestsVpnReplayForWidenedFamilies(t *testing.T) {
+	v4 := []bgp.Family{bgp.FamilyVPNv4}
+	both := map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "both")}
+
+	s, got := vpnReplayRecorder(t)
+	vpnTestBind(t, s, vpnTestBinding("evi", both))
+	wantReplays(t, "new binding importing vpnv4", *got, v4)
+	vpnTestBind(t, s, vpnTestBinding("evi", both))
+	wantReplays(t, "unchanged re-bind", *got, v4)
 	if _, err := s.AddRouteTarget(context.Background(), connect.NewRequest(&v1.AddRouteTargetRequest{
 		VrfName: "evi", Family: "vpnv4",
 		RouteTarget: &v1.VrfBgpRouteTarget{Rt: "65000:101", Direction: "import"},
 	})); err != nil {
 		t.Fatalf("AddRouteTarget: %v", err)
 	}
-	if len(*got) != 2 {
-		t.Errorf("import RT add: replays = %v, want 2", *got)
-	}
+	wantReplays(t, "import RT add", *got, v4, v4)
 
-	// Export-only: no import surface, no replay.
-	s, got = newServer(t)
-	bind(t, s, binding("evi", map[string]*v1.VrfBgpFamily{"vpnv4": rt("65000:100", "export")}))
-	if len(*got) != 0 {
-		t.Errorf("export-only bind requested a replay: %v", *got)
-	}
+	// An RT another VRF already imports does not change what the filter
+	// accepts.
+	vpnTestBind(t, s, vpnTestBinding("other", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "import")}))
+	wantReplays(t, "RT already imported elsewhere", *got, v4, v4)
+
+	// Export-only still ends the family's default-allow (any RT under the
+	// family does), so routes installed under it have to be re-evaluated.
+	s, got = vpnReplayRecorder(t)
+	vpnTestBind(t, s, vpnTestBinding("evi", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "export")}))
+	wantReplays(t, "export-only bind", *got, v4)
 
 	// vpnv6 only: vpnv4 is not rescanned.
-	s, got = newServer(t)
-	bind(t, s, binding("evi", map[string]*v1.VrfBgpFamily{"vpnv6": rt("65000:100", "both")}))
-	if want := [][]bgp.Family{{bgp.FamilyVPNv6}}; !slices.EqualFunc(*got, want, slices.Equal[[]bgp.Family]) {
-		t.Errorf("vpnv6 bind: replays = %v, want %v", *got, want)
+	s, got = vpnReplayRecorder(t)
+	vpnTestBind(t, s, vpnTestBinding("evi", map[string]*v1.VrfBgpFamily{"vpnv6": vpnTestRT("65000:100", "both")}))
+	wantReplays(t, "vpnv6 bind", *got, []bgp.Family{bgp.FamilyVPNv6})
+
+	// In a batch each binding that changes the filter requests its own
+	// replay; the replayer merges the requests that arrive while one runs.
+	s, got = vpnReplayRecorder(t)
+	vpnTestBind(t, s,
+		vpnTestBinding("evi", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "both")}),
+		vpnTestBinding("evi2", map[string]*v1.VrfBgpFamily{"vpnv6": vpnTestRT("65000:200", "both")}),
+	)
+	wantReplays(t, "batch", *got, []bgp.Family{bgp.FamilyVPNv4}, []bgp.Family{bgp.FamilyVPNv6})
+}
+
+// A binding change that narrows the filter requests a replay too, so routes no
+// VRF imports any more leave the data plane: an import RT removed, a family
+// removed, a binding updated to import less, or a binding deleted. Removing
+// the last binding of a family restores its default-allow, which a replay
+// applies to the routes already received.
+func TestVrfBgpServer_RequestsVpnReplayWhenImportsShrink(t *testing.T) {
+	ctx := context.Background()
+	v4 := []bgp.Family{bgp.FamilyVPNv4}
+	twoRTs := &v1.VrfBgpFamily{RouteTargets: []*v1.VrfBgpRouteTarget{
+		{Rt: "65000:100", Direction: "both"},
+		{Rt: "65000:101", Direction: "import"},
+	}}
+	setup := func(t *testing.T) (*VrfBgpServer, *[][]bgp.Family) {
+		s, got := vpnReplayRecorder(t)
+		vpnTestBind(t, s,
+			vpnTestBinding("vrf-a", map[string]*v1.VrfBgpFamily{"vpnv4": twoRTs}),
+			vpnTestBinding("vrf-b", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:200", "both")}),
+		)
+		*got = nil
+		return s, got
+	}
+	unbind := func(t *testing.T, s *VrfBgpServer, names ...string) {
+		t.Helper()
+		if _, err := s.VrfBgpUnbind(ctx, connect.NewRequest(&v1.VrfBgpUnbindRequest{VrfNames: names})); err != nil {
+			t.Fatalf("VrfBgpUnbind: %v", err)
+		}
 	}
 
-	// A batch requests one replay covering every widened family.
-	s, got = newServer(t)
-	bind(t, s,
-		binding("evi", map[string]*v1.VrfBgpFamily{"vpnv4": rt("65000:100", "both")}),
-		binding("evi2", map[string]*v1.VrfBgpFamily{"vpnv6": rt("65000:200", "both")}),
-	)
-	if want := [][]bgp.Family{{bgp.FamilyVPNv4, bgp.FamilyVPNv6}}; !slices.EqualFunc(*got, want, slices.Equal[[]bgp.Family]) {
-		t.Errorf("batch: replays = %v, want %v", *got, want)
-	}
+	t.Run("RemoveRouteTarget", func(t *testing.T) {
+		s, got := setup(t)
+		if _, err := s.RemoveRouteTarget(ctx, connect.NewRequest(&v1.RemoveRouteTargetRequest{
+			VrfName: "vrf-a", Family: "vpnv4", Rt: "65000:101",
+		})); err != nil {
+			t.Fatalf("RemoveRouteTarget: %v", err)
+		}
+		wantReplays(t, "import RT removed", *got, v4)
+		// Dropping only the export bit leaves the import set as it was.
+		if _, err := s.RemoveRouteTarget(ctx, connect.NewRequest(&v1.RemoveRouteTargetRequest{
+			VrfName: "vrf-a", Family: "vpnv4", Rt: "65000:100", Direction: "export",
+		})); err != nil {
+			t.Fatalf("RemoveRouteTarget export: %v", err)
+		}
+		wantReplays(t, "export bit removed", *got, v4)
+	})
+
+	t.Run("RemoveFamily", func(t *testing.T) {
+		s, got := setup(t)
+		if _, err := s.RemoveFamily(ctx, connect.NewRequest(&v1.RemoveFamilyRequest{
+			VrfName: "vrf-b", Family: "vpnv4",
+		})); err != nil {
+			t.Fatalf("RemoveFamily: %v", err)
+		}
+		wantReplays(t, "family removed", *got, v4)
+	})
+
+	t.Run("UpdateBinding", func(t *testing.T) {
+		s, got := setup(t)
+		if _, err := s.UpdateBinding(ctx, connect.NewRequest(&v1.UpdateBindingRequest{
+			Binding: vpnTestBinding("vrf-a", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "both")}),
+		})); err != nil {
+			t.Fatalf("UpdateBinding: %v", err)
+		}
+		wantReplays(t, "binding updated to import less", *got, v4)
+	})
+
+	t.Run("Unbind", func(t *testing.T) {
+		s, got := setup(t)
+		unbind(t, s, "vrf-b")
+		wantReplays(t, "binding deleted", *got, v4)
+		// The last binding goes and vpnv4 is default-allow again.
+		unbind(t, s, "vrf-a")
+		wantReplays(t, "last binding deleted", *got, v4, v4)
+	})
+
+	t.Run("UnbindBatch", func(t *testing.T) {
+		s, got := setup(t)
+		unbind(t, s, "vrf-a", "vrf-b", "missing")
+		wantReplays(t, "batch unbind", *got, v4, v4)
+	})
 }

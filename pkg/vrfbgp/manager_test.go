@@ -425,3 +425,100 @@ func TestBind_EnsuresVRF(t *testing.T) {
 		t.Errorf("after Unbind, VRF a id = %d,%t want stable %d,true", id2, ok, id)
 	}
 }
+
+// ImportFilterKey changes exactly when the L3VPN import filter would decide
+// some route differently: default-allow ending or returning, or the union of
+// import RTs growing or shrinking. Which VRF imports an RT does not matter.
+func TestImportFilterKey(t *testing.T) {
+	m := NewManager()
+	fam := bgp.FamilyVPNv4
+	bind := func(vrf string, rts ...RouteTarget) {
+		t.Helper()
+		if err := m.Bind(Binding{VRFName: vrf, Families: map[bgp.Family]FamilyPolicy{fam: {RouteTargets: rts}}}); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+	}
+	imp := func(rt string) RouteTarget { return RouteTarget{RT: rt, Direction: DirectionImport} }
+	exp := func(rt string) RouteTarget { return RouteTarget{RT: rt, Direction: DirectionExport} }
+
+	keys := []string{m.ImportFilterKey(fam)}
+	step := func(what string, changed bool) {
+		t.Helper()
+		key := m.ImportFilterKey(fam)
+		if got := key != keys[len(keys)-1]; got != changed {
+			t.Errorf("%s: key %q -> %q, changed = %v, want %v", what, keys[len(keys)-1], key, got, changed)
+		}
+		keys = append(keys, key)
+	}
+
+	bind("vrf-a")
+	step("family declared with no RT", false)
+	bind("vrf-a", exp("65000:1"))
+	step("export-only RT ends default-allow", true)
+	bind("vrf-a", exp("65000:1"), imp("65000:2"))
+	step("import RT added", true)
+	bind("vrf-b", imp("65000:2"))
+	step("RT another VRF already imports", false)
+	if err := m.Unbind("vrf-a"); err != nil {
+		t.Fatal(err)
+	}
+	step("binding removed, its RT still imported elsewhere", false)
+	bind("vrf-b", exp("65000:2"))
+	step("import RT removed", true)
+	if err := m.Unbind("vrf-b"); err != nil {
+		t.Fatal(err)
+	}
+	step("last binding removed", true)
+	if keys[len(keys)-1] != keys[0] {
+		t.Errorf("default-allow key = %q, want %q as on a fresh manager", keys[len(keys)-1], keys[0])
+	}
+	if m.ImportFilterKey(bgp.FamilyVPNv6) != keys[0] {
+		t.Error("vpnv6 key moved with vpnv4 bindings")
+	}
+}
+
+// The import filter hook hears about every mutation that changed a family's
+// key, compared under the lock: a change undone by the next mutation (A-B-A)
+// is reported twice, not missed, and a mutation that leaves the key alone is
+// not reported.
+func TestImportFilterHook(t *testing.T) {
+	m := NewManager()
+	var got []ImportFilterChange
+	m.SetImportFilterHook(func(c []ImportFilterChange) { got = append(got, c...) })
+	bind := func(vrf string, fams map[bgp.Family]FamilyPolicy) {
+		t.Helper()
+		if err := m.Bind(Binding{VRFName: vrf, Families: fams}); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+	}
+	imp := func(rts ...string) FamilyPolicy {
+		var fp FamilyPolicy
+		for _, rt := range rts {
+			fp.RouteTargets = append(fp.RouteTargets, RouteTarget{RT: rt, Direction: DirectionBoth})
+		}
+		return fp
+	}
+
+	bind("vrf-a", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1")})
+	bind("vrf-a", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1", "65000:2")})
+	bind("vrf-a", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1")})
+	bind("vrf-a", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1")}) // unchanged
+	bind("vrf-b", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1"), bgp.FamilyVPNv6: imp("65000:9")})
+	if err := m.Unbind("vrf-a"); err != nil { // vrf-b still imports 65000:1
+		t.Fatal(err)
+	}
+	if err := m.Unbind("vrf-b"); err != nil {
+		t.Fatal(err)
+	}
+	want := []ImportFilterChange{
+		{bgp.FamilyVPNv4, ImportFilterDefaultAllow, "import:65000:1"},
+		{bgp.FamilyVPNv4, "import:65000:1", "import:65000:1,65000:2"},
+		{bgp.FamilyVPNv4, "import:65000:1,65000:2", "import:65000:1"},
+		{bgp.FamilyVPNv6, ImportFilterDefaultAllow, "import:65000:9"},
+		{bgp.FamilyVPNv4, "import:65000:1", ImportFilterDefaultAllow},
+		{bgp.FamilyVPNv6, "import:65000:9", ImportFilterDefaultAllow},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("changes =\n%v\nwant\n%v", got, want)
+	}
+}

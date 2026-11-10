@@ -103,7 +103,15 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 		if !steered {
 			continue
 		}
-		if !slices.Equal(memberFingerprint(ms), d.installed) {
+		src, err := a.encapSource()
+		if err != nil {
+			// The source locator is gone, so the journey cannot be rebuilt.
+			// Fail open, as for a registration that cannot be refreshed.
+			a.prober.Unregister(d.groupID)
+			d.probed = false
+			continue
+		}
+		if !slices.Equal(groupFingerprint(ms, src), d.installed) {
 			// The desired members have drifted from what the data plane
 			// holds (a reconcile retry is owed, e.g. an earlier reconcile
 			// bailed before writing). The standing registration matches the
@@ -117,7 +125,7 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 		paths := make([]bpf.EcmpPath, 0, len(ms))
 		rebuilt := true
 		for _, m := range ms {
-			entry, err := a.buildHeadendEntry(m.sid, m.reduced)
+			entry, err := buildHeadendEntryFrom(src, m.sid, m.reduced)
 			if err != nil {
 				a.logger.Error("rebuild probe targets after SR Policy transport change",
 					zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))

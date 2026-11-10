@@ -251,6 +251,19 @@ func (a *Applier) QuietVPNDenials(replay func() error) error {
 	return err
 }
 
+// ReplayAndReconcile is the loc-rib replay the daemon runs off the RPC
+// path: replay re-delivers the received routes (with VPN denials summarized,
+// see QuietVPNDenials), then ReconcileTracked writes what is still not in
+// the data plane. It returns an error when either step failed, so the caller
+// retries the whole pass.
+func (a *Applier) ReplayAndReconcile(replay func() error) error {
+	err := a.QuietVPNDenials(replay)
+	if terr := a.ReconcileTracked(); terr != nil {
+		return terr
+	}
+	return err
+}
+
 // removeVPNPath drops one tracked path and reconciles what remains. Shared
 // by withdraw and by a replacement UPDATE whose SID became unusable. Callers
 // hold vpnMu.
@@ -397,6 +410,13 @@ func (a *Applier) buildHeadendEntry(sid string, reduced bool) (*bpf.HeadendEntry
 	if err != nil {
 		return nil, err
 	}
+	return buildHeadendEntryFrom(src, sid, reduced)
+}
+
+// buildHeadendEntryFrom is buildHeadendEntry with the encapsulation source
+// already resolved, for a caller that writes several entries and records
+// which source it wrote them with.
+func buildHeadendEntryFrom(src [16]byte, sid string, reduced bool) (*bpf.HeadendEntry, error) {
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {
 		return nil, fmt.Errorf("parse SRv6 SID %q: %w", sid, err)
