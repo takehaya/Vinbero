@@ -3,6 +3,7 @@ package bpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 	"unsafe"
@@ -125,9 +126,9 @@ func TestBuildHeadendV4Key(t *testing.T) {
 			t.Errorf("%s: reads back as vrf %#x %s, want vrf %#x %s", tc.cidr, vrf, prefix, tc.vrf, tc.prefix)
 		}
 	}
-	for _, bad := range []string{"", "nonsense", "10.0.0.0/33", "fd00::/64", "fd00::1"} {
-		if _, err := BuildHeadendV4Key(0, bad); err == nil {
-			t.Errorf("%q accepted as an IPv4 trigger prefix", bad)
+	for _, bad := range []string{"", "nonsense", "10.0.0.0/33", "fd00::/64", "fd00::1", "::ffff:10.0.0.0/120", "::ffff:10.0.0.1"} {
+		if key, err := BuildHeadendV4Key(0, bad); err == nil || !errors.Is(err, ErrInvalidHeadendPrefix) {
+			t.Errorf("%q accepted as an IPv4 trigger prefix: %+v %v", bad, key, err)
 		}
 	}
 }
@@ -169,17 +170,15 @@ func TestBuildHeadendV6Key(t *testing.T) {
 		}
 	}
 
-	// The IPv6 headend key accepts exactly what the SID key does, with the
-	// same address bytes and a prefix length 32 longer.
-	for _, in := range []string{"", "nonsense", "fd00::/129", "10.0.0.0/8", "10.0.0.1", "fd00:1::/48"} {
-		lpm, lerr := buildLpmKeyV6(in)
-		key, herr := BuildHeadendV6Key(0, in)
-		if (lerr == nil) != (herr == nil) {
-			t.Errorf("%q: SID key err %v, headend key err %v", in, lerr, herr)
-			continue
-		}
-		if herr == nil && (key.Addr != lpm.Addr || key.Prefixlen != lpm.Prefixlen+32) {
-			t.Errorf("%q: headend key %+v does not match SID key %+v", in, key, lpm)
+	// An IPv4-mapped IPv6 prefix is IPv6.
+	if key, err := BuildHeadendV6Key(0, "::ffff:10.0.0.0/104"); err != nil || key.Prefixlen != 32+104 {
+		t.Errorf("::ffff:10.0.0.0/104: %+v %v", key, err)
+	}
+	// An IPv4 prefix or address is refused, not stored as ::ffff:a.b.c.d
+	// with a prefix length that would cover IPv6 destinations.
+	for _, bad := range []string{"", "nonsense", "fd00::/129", "10.0.0.0/8", "10.0.0.1", "0.0.0.0/0", "fe80::1%eth0"} {
+		if key, err := BuildHeadendV6Key(0, bad); err == nil || !errors.Is(err, ErrInvalidHeadendPrefix) {
+			t.Errorf("%q accepted as an IPv6 trigger prefix: %+v %v", bad, key, err)
 		}
 	}
 }

@@ -169,3 +169,40 @@ func TestHeadendv6RPCRoundTrip(t *testing.T) {
 		t.Errorf("group prefixes = %v, want %v", prefixes[groupID], want)
 	}
 }
+
+// A trigger prefix of the other address family is refused before the map is
+// touched: Create and Delete report it per prefix, Get as InvalidArgument.
+func TestHeadendRPCRefusesOtherFamily(t *testing.T) {
+	ctx := context.Background()
+	s4, s6 := NewHeadendv4Server(nil), NewHeadendv6Server(nil)
+	for _, p := range []string{"fd00::/64", "::ffff:10.0.0.0/120", "nonsense"} {
+		c, err := s4.Headendv4Create(ctx, connect.NewRequest(&v1.Headendv4CreateRequest{Headendv4S: []*v1.Headendv4{{
+			Mode: v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS, TriggerPrefix: p, SrcAddr: "fc00::1", Segments: []string{"fc00::2"},
+		}}}))
+		if err != nil || len(c.Msg.Created) != 0 || len(c.Msg.Errors) != 1 {
+			t.Errorf("v4 create %s: %v %v", p, c, err)
+		}
+		d, err := s4.Headendv4Delete(ctx, connect.NewRequest(&v1.Headendv4DeleteRequest{TriggerPrefixes: []string{p}}))
+		if err != nil || len(d.Msg.Errors) != 1 {
+			t.Errorf("v4 delete %s: %v %v", p, d, err)
+		}
+		if _, err := s4.Headendv4Get(ctx, connect.NewRequest(&v1.Headendv4GetRequest{TriggerPrefix: p})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("v4 get %s: %v, want InvalidArgument", p, err)
+		}
+	}
+	for _, p := range []string{"10.0.0.0/8", "10.0.0.1", "nonsense"} {
+		c, err := s6.Headendv6Create(ctx, connect.NewRequest(&v1.Headendv6CreateRequest{Headendv6S: []*v1.Headendv6{{
+			Mode: v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS, TriggerPrefix: p, SrcAddr: "fc00::1", Segments: []string{"fc00::2"},
+		}}}))
+		if err != nil || len(c.Msg.Created) != 0 || len(c.Msg.Errors) != 1 {
+			t.Errorf("v6 create %s: %v %v", p, c, err)
+		}
+		d, err := s6.Headendv6Delete(ctx, connect.NewRequest(&v1.Headendv6DeleteRequest{TriggerPrefixes: []string{p}}))
+		if err != nil || len(d.Msg.Errors) != 1 {
+			t.Errorf("v6 delete %s: %v %v", p, d, err)
+		}
+		if _, err := s6.Headendv6Get(ctx, connect.NewRequest(&v1.Headendv6GetRequest{TriggerPrefix: p})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("v6 get %s: %v, want InvalidArgument", p, err)
+		}
+	}
+}
