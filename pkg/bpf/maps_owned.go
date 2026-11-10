@@ -345,7 +345,7 @@ func (m *MapOperations) ListHeadendV4Owners() (map[string]OwnerTag, error) {
 	owners, err := listEntryOwners[HeadendV4Key](m.headendV4Owners)
 	result := make(map[string]OwnerTag, len(owners))
 	for key, owner := range owners {
-		if key.vrf() != headendLookupVRF {
+		if key.vrf() != HeadendLookupVRF {
 			continue
 		}
 		if prefix, ok := key.prefix(); ok {
@@ -360,7 +360,7 @@ func (m *MapOperations) ListHeadendV6Owners() (map[string]OwnerTag, error) {
 	owners, err := listEntryOwners[HeadendV6Key](m.headendV6Owners)
 	result := make(map[string]OwnerTag, len(owners))
 	for key, owner := range owners {
-		if key.vrf() != headendLookupVRF {
+		if key.vrf() != HeadendLookupVRF {
 			continue
 		}
 		if prefix, ok := key.prefix(); ok {

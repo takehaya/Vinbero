@@ -79,12 +79,12 @@ func daemonMaps(pid int, names ...string) (map[string]*ebpf.Map, error) {
 }
 
 // triggerKeyV4 builds the headend_v4_map key of a trigger prefix. The
-// daemon writes every trigger in the global VRF (vrf_id 0).
+// daemon writes and looks up every trigger in bpf.HeadendLookupVRF.
 func triggerKeyV4(cidr string) (*bpf.HeadendV4Key, error) {
 	if _, _, err := net.ParseCIDR(cidr); err != nil {
 		return nil, fmt.Errorf("parse trigger prefix %q: %w", cidr, err)
 	}
-	key, err := bpf.BuildHeadendV4Key(0, cidr)
+	key, err := bpf.BuildHeadendV4Key(bpf.HeadendLookupVRF, cidr)
 	if err != nil {
 		return nil, fmt.Errorf("trigger prefix %q: %w", cidr, err)
 	}

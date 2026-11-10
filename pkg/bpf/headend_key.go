@@ -16,11 +16,11 @@ import (
 // prefixlen headendKeyVRFBits + p.
 const headendKeyVRFBits = 32
 
-// headendLookupVRF is the VRF every headend entry is written to and read
+// HeadendLookupVRF is the VRF every headend entry is written to and read
 // from through MapOperations. The data plane matches every packet in this
 // VRF too (headend_vrf in process_l3), so the prefix-keyed API and the
 // lookup agree. Writing and looking up per-VRF entries starts here.
-const headendLookupVRF uint32 = 0
+const HeadendLookupVRF uint32 = 0
 
 // ErrInvalidHeadendPrefix is returned for a trigger prefix that does not
 // parse, or that belongs to the other address family than the map.
@@ -191,7 +191,7 @@ func pruneUnlistedHeadend[K comparable, PK headendKey[K]](main *ebpf.Map, owners
 		if holder != owner {
 			continue
 		}
-		if _, ok := PK(&key).prefix(); ok && PK(&key).vrf() == headendLookupVRF {
+		if _, ok := PK(&key).prefix(); ok && PK(&key).vrf() == HeadendLookupVRF {
 			continue
 		}
 		if err := deleteHeadendKey(main, owners, &key, owner, false, family); err != nil {

@@ -1741,7 +1741,7 @@ func (m *MapOperations) ResetSlotStats(mapType string) error {
 // headend_v4_owner_map; empty owner returns ErrEmptyOwner, cross-owner
 // write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1766,7 +1766,7 @@ func (m *MapOperations) ForceDeleteHeadendV4(triggerPrefix string) error {
 }
 
 func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester OwnerTag, force bool) error {
-	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1775,7 +1775,7 @@ func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester 
 
 // GetHeadendV4 retrieves a headend v4 entry from the map
 func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1799,7 +1799,7 @@ func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
 	for iter.Next(&key, &entry) {
 		// The prefix-keyed API reads the global VRF only: it has no way to
 		// name another one. A per-VRF listing comes with naming the VRF.
-		if key.vrf() != headendLookupVRF {
+		if key.vrf() != HeadendLookupVRF {
 			continue
 		}
 		prefix, ok := key.prefix()
@@ -1993,7 +1993,7 @@ func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction u
 // headend_v6_owner_map; empty owner returns ErrEmptyOwner, cross-owner
 // write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2018,7 +2018,7 @@ func (m *MapOperations) ForceDeleteHeadendV6(triggerPrefix string) error {
 }
 
 func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester OwnerTag, force bool) error {
-	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2027,7 +2027,7 @@ func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester 
 
 // GetHeadendV6 retrieves a headend v6 entry from the map
 func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2050,7 +2050,7 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 	for iter.Next(&key, &entry) {
 		// The prefix-keyed API reads the global VRF only: it has no way to
 		// name another one. A per-VRF listing comes with naming the VRF.
-		if key.vrf() != headendLookupVRF {
+		if key.vrf() != HeadendLookupVRF {
 			continue
 		}
 		prefix, ok := key.prefix()
@@ -2399,7 +2399,7 @@ func (m *MapOperations) GetEcmpGroup(groupID uint32) (*EcmpGroupInfo, []*Headend
 // GetHeadendV4Owner returns the owner recorded for a v4 trigger prefix, or
 // ("", false) when the entry or its owner is absent.
 func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2422,7 +2422,7 @@ func (m *MapOperations) GetSidFunctionOwner(triggerPrefix string) (OwnerTag, boo
 
 // GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
 func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
 	}
