@@ -38,8 +38,9 @@ const (
 
 // Type aliases for BPF generated types
 type (
-	LpmKeyV4         = BpfLpmKeyV4
 	LpmKeyV6         = BpfLpmKeyV6
+	HeadendV4Key     = BpfHeadendV4Key
+	HeadendV6Key     = BpfHeadendV6Key
 	HeadendL2Key     = BpfHeadendL2Key
 	SidFunctionEntry = BpfSidFunctionEntry
 	SidAuxEntry      = BpfSidAuxEntry
@@ -1740,7 +1741,7 @@ func (m *MapOperations) ResetSlotStats(mapType string) error {
 // headend_v4_owner_map; empty owner returns ErrEmptyOwner, cross-owner
 // write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	key, err := buildLpmKeyV4(triggerPrefix)
+	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1765,7 +1766,7 @@ func (m *MapOperations) ForceDeleteHeadendV4(triggerPrefix string) error {
 }
 
 func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester OwnerTag, force bool) error {
-	key, err := buildLpmKeyV4(triggerPrefix)
+	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1785,7 +1786,7 @@ func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester 
 
 // GetHeadendV4 retrieves a headend v4 entry from the map
 func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := buildLpmKeyV4(triggerPrefix)
+	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1797,16 +1798,20 @@ func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error
 	return &entry, nil
 }
 
-// ListHeadendV4 returns all headend v4 entries
+// ListHeadendV4 returns the headend v4 entries of the global VRF (vrf_id 0),
+// keyed by trigger prefix. Every MapOperations writer uses that VRF.
 func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
 	result := make(map[string]*HeadendEntry)
 
-	var key LpmKeyV4
+	var key HeadendV4Key
 	var entry HeadendEntry
 	iter := m.objs.HeadendV4Map.Iterate()
 
 	for iter.Next(&key, &entry) {
-		prefix := lpmKeyV4ToString(&key)
+		vrfID, prefix := headendV4KeyPrefix(&key)
+		if vrfID != headendLookupVRF {
+			continue
+		}
 		entryCopy := entry
 		result[prefix] = &entryCopy
 	}
@@ -1994,7 +1999,7 @@ func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction u
 // headend_v6_owner_map; empty owner returns ErrEmptyOwner, cross-owner
 // write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
+	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2019,7 +2024,7 @@ func (m *MapOperations) ForceDeleteHeadendV6(triggerPrefix string) error {
 }
 
 func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester OwnerTag, force bool) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
+	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2039,7 +2044,7 @@ func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester 
 
 // GetHeadendV6 retrieves a headend v6 entry from the map
 func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := buildLpmKeyV6(triggerPrefix)
+	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2051,16 +2056,19 @@ func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error
 	return &entry, nil
 }
 
-// ListHeadendV6 returns all headend v6 entries
+// ListHeadendV6 is the IPv6 counterpart of ListHeadendV4.
 func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 	result := make(map[string]*HeadendEntry)
 
-	var key LpmKeyV6
+	var key HeadendV6Key
 	var entry HeadendEntry
 	iter := m.objs.HeadendV6Map.Iterate()
 
 	for iter.Next(&key, &entry) {
-		prefix := lpmKeyV6ToString(&key)
+		vrfID, prefix := headendV6KeyPrefix(&key)
+		if vrfID != headendLookupVRF {
+			continue
+		}
 		entryCopy := entry
 		result[prefix] = &entryCopy
 	}
@@ -2157,10 +2165,10 @@ func (m *MapOperations) HighestSRPolicyIDInUse() (uint32, error) {
 	// Iterate the headend maps directly rather than through ListHeadendV*:
 	// this runs at startup against maps that may be large and pinned, and
 	// only one number is wanted, so materializing every entry into a
-	// string-keyed map would be pure waste.
+	// string-keyed map would be pure waste. Every VRF's entries count.
 	var entry HeadendEntry
 
-	var k4 LpmKeyV4
+	var k4 HeadendV4Key
 	iter = m.objs.HeadendV4Map.Iterate()
 	for iter.Next(&k4, &entry) {
 		raise(entry.PolicyId)
@@ -2169,7 +2177,7 @@ func (m *MapOperations) HighestSRPolicyIDInUse() (uint32, error) {
 		return 0, fmt.Errorf("iterate headend v4 map: %w", err)
 	}
 
-	var k6 LpmKeyV6
+	var k6 HeadendV6Key
 	iter = m.objs.HeadendV6Map.Iterate()
 	for iter.Next(&k6, &entry) {
 		raise(entry.PolicyId)
@@ -2403,7 +2411,7 @@ func (m *MapOperations) GetEcmpGroup(groupID uint32) (*EcmpGroupInfo, []*Headend
 // GetHeadendV4Owner returns the owner recorded for a v4 trigger prefix, or
 // ("", false) when the entry or its owner is absent.
 func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	key, err := buildLpmKeyV4(triggerPrefix)
+	key, err := BuildHeadendV4Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2426,7 +2434,7 @@ func (m *MapOperations) GetSidFunctionOwner(triggerPrefix string) (OwnerTag, boo
 
 // GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
 func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	key, err := buildLpmKeyV6(triggerPrefix)
+	key, err := BuildHeadendV6Key(headendLookupVRF, triggerPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -3351,7 +3359,8 @@ func (m *MapOperations) FlushHeadendV4(scope OwnerTag) (uint32, error) {
 	return flushScoped(entries, scope, m.DeleteHeadendV4, "headend_v4")
 }
 
-// ForceFlushHeadendV4 removes every headend_v4 entry regardless of owner.
+// ForceFlushHeadendV4 removes every headend_v4 entry of the global VRF
+// (vrf_id 0) regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV4() (uint32, error) {
 	entries, err := m.ListHeadendV4()
 	if err != nil {
@@ -3373,7 +3382,8 @@ func (m *MapOperations) FlushHeadendV6(scope OwnerTag) (uint32, error) {
 	return flushScoped(entries, scope, m.DeleteHeadendV6, "headend_v6")
 }
 
-// ForceFlushHeadendV6 removes every headend_v6 entry regardless of owner.
+// ForceFlushHeadendV6 removes every headend_v6 entry of the global VRF
+// (vrf_id 0) regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV6() (uint32, error) {
 	entries, err := m.ListHeadendV6()
 	if err != nil {
@@ -3506,24 +3516,6 @@ func (m *MapOperations) FlushVlanTable(tableID uint16) (uint32, error) {
 
 // ===== Helper Functions =====
 
-func buildLpmKeyV4(cidr string) (*LpmKeyV4, error) {
-	ip, prefixLen, err := ParseCIDR(cidr)
-	if err != nil {
-		return nil, err
-	}
-
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return nil, fmt.Errorf("not an IPv4 address: %s", cidr)
-	}
-
-	key := &LpmKeyV4{
-		Prefixlen: uint32(prefixLen),
-	}
-	copy(key.Addr[:], ip4)
-	return key, nil
-}
-
 func buildLpmKeyV6(cidr string) (*LpmKeyV6, error) {
 	ip, prefixLen, err := ParseCIDR(cidr)
 	if err != nil {
@@ -3540,11 +3532,6 @@ func buildLpmKeyV6(cidr string) (*LpmKeyV6, error) {
 	}
 	copy(key.Addr[:], ip6)
 	return key, nil
-}
-
-func lpmKeyV4ToString(key *LpmKeyV4) string {
-	ip := net.IP(key.Addr[:])
-	return fmt.Sprintf("%s/%d", ip.String(), key.Prefixlen)
 }
 
 func lpmKeyV6ToString(key *LpmKeyV6) string {

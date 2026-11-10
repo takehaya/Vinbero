@@ -203,8 +203,8 @@ func decodeOwnerTag(v []byte) (string, bool) {
 // owner space entirely when the BPF handle is unavailable.
 //
 // Key type matches the paired main map -- LpmKeyV6 for
-// sid_function_owner_map and headend_v6_owner_map, LpmKeyV4 for
-// headend_v4_owner_map. We accept it as any so one wrapper covers all
+// sid_function_owner_map, HeadendV4Key / HeadendV6Key for
+// headend_v4/v6_owner_map. We accept it as any so one wrapper covers all
 // three maps without generics.
 //
 // This type tracks write-permission ownership. It is deliberately not

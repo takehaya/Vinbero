@@ -1,11 +1,13 @@
 package bpf
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -145,6 +147,15 @@ func TestSharedMapPartitioning(t *testing.T) {
 			continue
 		}
 		t.Errorf("expectedMapValueTypes references %q but neither RO nor RW contains it", name)
+	}
+	for name := range expectedMapKeyTypes {
+		if _, ok := ro[name]; ok {
+			continue
+		}
+		if _, ok := rw[name]; ok {
+			continue
+		}
+		t.Errorf("expectedMapKeyTypes references %q but neither RO nor RW contains it", name)
 	}
 }
 
@@ -453,6 +464,110 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 				t.Fatalf("owner cleanup after pinned reload: %v", err)
 			}
 		}
+	}
+}
+
+// TestBpfLoad_PinMapsIncompatibleKey covers a pin directory whose headend
+// maps were created with a key of another size: the load fails, the error
+// names every such map and says to reset the pin directory, and the pins
+// are left exactly as they were (no deletion, no conversion).
+func TestBpfLoad_PinMapsIncompatibleKey(t *testing.T) {
+	const bpffsRoot = "/sys/fs/bpf"
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(bpffsRoot, &stat); err != nil {
+		t.Skipf("bpffs not accessible at %s: %v", bpffsRoot, err)
+	}
+	const bpfFsMagic = 0xcafe4a11
+	if stat.Type != bpfFsMagic {
+		t.Skipf("%s is not bpffs (fstype=0x%x)", bpffsRoot, stat.Type)
+	}
+
+	entrySize := uint32(binary.Size(HeadendEntry{}))
+	oldLayout := map[string]*ebpf.MapSpec{
+		"headend_v4_map":       {Type: ebpf.LPMTrie, KeySize: 8, ValueSize: entrySize, MaxEntries: 1024, Flags: 1},
+		"headend_v4_owner_map": {Type: ebpf.Hash, KeySize: 8, ValueSize: auxOwnerTagBytes, MaxEntries: 1024},
+		"headend_v6_map":       {Type: ebpf.LPMTrie, KeySize: 20, ValueSize: entrySize, MaxEntries: 1024, Flags: 1},
+		"headend_v6_owner_map": {Type: ebpf.Hash, KeySize: 20, ValueSize: auxOwnerTagBytes, MaxEntries: 1024},
+	}
+	for _, tc := range []struct {
+		name string
+		old  []string
+	}{
+		{"v4 main and owner", []string{"headend_v4_map", "headend_v4_owner_map"}},
+		{"owner only", []string{"headend_v6_owner_map"}},
+		{"all four", []string{"headend_v4_map", "headend_v4_owner_map", "headend_v6_map", "headend_v6_owner_map"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinPath := filepath.Join(bpffsRoot, fmt.Sprintf("vinbero-test-oldkey-%d", os.Getpid()))
+			_ = os.RemoveAll(pinPath)
+			if err := os.MkdirAll(pinPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(pinPath) })
+			for _, name := range tc.old {
+				m, err := ebpf.NewMap(oldLayout[name])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := m.Pin(filepath.Join(pinPath, name)); err != nil {
+					t.Fatal(err)
+				}
+				_ = m.Close()
+			}
+			// An entry in the old main map, to show it is left untouched.
+			if tc.old[0] == "headend_v4_map" {
+				m, err := ebpf.LoadPinnedMap(filepath.Join(pinPath, "headend_v4_map"), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oldKey := []byte{24, 0, 0, 0, 192, 0, 2, 0}
+				if err := m.Put(oldKey, make([]byte, entrySize)); err != nil {
+					t.Fatal(err)
+				}
+				_ = m.Close()
+			}
+
+			cfg := &config.Config{Setting: config.SettingConfig{PinMaps: config.PinMapsConfig{Enabled: true, Path: pinPath}}}
+			objs, err := ReadCollection(nil, cfg)
+			if err == nil {
+				_ = objs.Close()
+				t.Fatal("loaded over pins with another key size")
+			}
+			if !errors.Is(err, ebpf.ErrMapIncompatible) {
+				t.Errorf("error does not wrap ErrMapIncompatible: %v", err)
+			}
+			msg := err.Error()
+			for _, want := range append([]string{pinPath, "remove the pin directory", "KeySize"}, tc.old...) {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error does not mention %q: %v", want, msg)
+				}
+			}
+			listed := msg[strings.Index(msg, "(")+1 : strings.Index(msg, ")")]
+			if got, want := strings.Split(listed, ", "), tc.old; strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("error names %v, want %v", got, want)
+			}
+
+			for _, name := range tc.old {
+				m, err := ebpf.LoadPinnedMap(filepath.Join(pinPath, name), nil)
+				if err != nil {
+					t.Fatalf("pin %s gone after the failed load: %v", name, err)
+				}
+				info, err := m.Info()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.KeySize != oldLayout[name].KeySize {
+					t.Errorf("pin %s key size %d, want it left at %d", name, info.KeySize, oldLayout[name].KeySize)
+				}
+				if name == "headend_v4_map" {
+					var v []byte
+					if err := m.Lookup([]byte{32, 0, 0, 0, 192, 0, 2, 1}, &v); err != nil {
+						t.Errorf("entry in the old pin lost: %v", err)
+					}
+				}
+				_ = m.Close()
+			}
+		})
 	}
 }
 

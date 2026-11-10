@@ -31,33 +31,59 @@ var expectedMapValueTypes = map[string]string{
 	"ecmp_path_map":         "headend_entry",
 }
 
+// expectedMapKeyTypes pins BTF key-type names the same way, for the shared
+// maps whose key is a vinbero struct a plugin builds itself to look up.
+// The headend maps are keyed by {vrf_id, prefix}: a plugin built with a
+// prefix-only key would make every lookup miss or match the wrong bytes.
+var expectedMapKeyTypes = map[string]string{
+	"headend_v4_map": "headend_v4_key",
+	"headend_v6_map": "headend_v6_key",
+}
+
 // validatePluginMapTypes checks that every shared map declared by the plugin
-// ELF carries a BTF value type whose name matches the vinbero-side struct.
-// Stripped ELFs (no BTF) are allowed through — validation falls back to the
-// asm-level checks in ValidatePluginProgram.
+// ELF carries BTF key and value types whose names match the vinbero-side
+// structs. Stripped ELFs (no BTF) are allowed through — validation falls
+// back to the asm-level checks in ValidatePluginProgram, and the
+// MapReplacements size check at load still refuses a key or value of the
+// wrong size.
 func validatePluginMapTypes(spec *ebpf.CollectionSpec) error {
 	for name, expected := range expectedMapValueTypes {
 		ms, ok := spec.Maps[name]
 		if !ok {
 			continue
 		}
-		if ms.Value == nil {
+		if err := checkMapTypeName(name, "value", ms.Value, expected); err != nil {
+			return err
+		}
+	}
+	for name, expected := range expectedMapKeyTypes {
+		ms, ok := spec.Maps[name]
+		if !ok {
 			continue
 		}
-		got := mapValueTypeName(ms.Value)
-		if got == "" {
-			continue
-		}
-		if got != expected {
-			return fmt.Errorf(
-				"plugin map %q declares value type %q but vinbero expects %q; "+
-					"update your SDK headers (sdk/c/include/vinbero/) or remove "+
-					"the map declaration to use the vinbero-provided map",
-				name, got, expected,
-			)
+		if err := checkMapTypeName(name, "key", ms.Key, expected); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// checkMapTypeName compares one BTF type of a plugin map declaration with
+// the struct name vinbero expects. A missing or anonymous type passes.
+func checkMapTypeName(mapName, what string, t btf.Type, expected string) error {
+	if t == nil {
+		return nil
+	}
+	got := mapValueTypeName(t)
+	if got == "" || got == expected {
+		return nil
+	}
+	return fmt.Errorf(
+		"plugin map %q declares %s type %q but vinbero expects %q; "+
+			"update your SDK headers (sdk/c/include/vinbero/) or remove "+
+			"the map declaration to use the vinbero-provided map",
+		mapName, what, got, expected,
+	)
 }
 
 // mapValueTypeName returns the struct/union name of a BTF type, unwrapping

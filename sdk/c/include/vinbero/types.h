@@ -7,6 +7,7 @@
  *   - struct sid_function_entry: lookup result in sid_function_map
  *   - struct sid_aux_entry     : auxiliary data (union of per-behavior variants)
  *   - struct headend_entry     : lookup result in headend_v4_map / headend_v6_map
+ *   - struct headend_v4_key / headend_v6_key: their {vrf_id, prefix} keys
  *   - struct tailcall_ctx      : per-CPU context passed across bpf_tail_call
  *
  * These definitions live in src/core/xdp_prog.h and src/core/xdp_tailcall.h.

@@ -1,13 +1,17 @@
 // SRv6 dispatchers — tail call entry points from the main pipeline.
 // Included from xdp_prog.c — not compiled standalone.
 
+// vrf_id selects the VRF whose headend entries the packet is matched against.
 static __always_inline int process_headend_v4(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct iphdr *iph,
-    __u16 l3_offset)
+    __u16 l3_offset,
+    __u32 vrf_id)
 {
-    struct lpm_key_v4 key = { .prefixlen = 32 };
+    struct headend_v4_key key = { .prefixlen = HEADEND_KEY_VRF_BITS + 32 };
+    __be32 instance = bpf_htonl(vrf_id);
+    __builtin_memcpy(key.instance, &instance, sizeof(key.instance));
     __builtin_memcpy(key.addr, &iph->daddr, IPV4_ADDR_LEN);
 
     struct headend_entry *entry = bpf_map_lookup_elem(&headend_v4_map, &key);
@@ -32,9 +36,12 @@ static __always_inline int process_headend_v6(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct ipv6hdr *ip6h,
-    __u16 l3_offset)
+    __u16 l3_offset,
+    __u32 vrf_id)
 {
-    struct lpm_key_v6 key = { .prefixlen = 128 };
+    struct headend_v6_key key = { .prefixlen = HEADEND_KEY_VRF_BITS + 128 };
+    __be32 instance = bpf_htonl(vrf_id);
+    __builtin_memcpy(key.instance, &instance, sizeof(key.instance));
     __builtin_memcpy(key.addr, &ip6h->daddr, IPV6_ADDR_LEN);
 
     struct headend_entry *entry = bpf_map_lookup_elem(&headend_v6_map, &key);

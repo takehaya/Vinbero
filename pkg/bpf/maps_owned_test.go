@@ -198,9 +198,9 @@ func TestOrdinaryOwnerInventoryAfterPartialDeletion(t *testing.T) {
 			name = "v6"
 		}
 		t.Run(name, func(t *testing.T) {
-			keySize := uint32(binary.Size(LpmKeyV4{}))
+			keySize := uint32(binary.Size(HeadendV4Key{}))
 			if v6 {
-				keySize = uint32(binary.Size(LpmKeyV6{}))
+				keySize = uint32(binary.Size(HeadendV6Key{}))
 			}
 			main, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.LPMTrie, KeySize: keySize, ValueSize: uint32(binary.Size(HeadendEntry{})), MaxEntries: 4, Flags: 1})
 			if err != nil {

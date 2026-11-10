@@ -78,19 +78,16 @@ func daemonMaps(pid int, names ...string) (map[string]*ebpf.Map, error) {
 	return found, nil
 }
 
-// lpmKeyV4 builds the headend_v4_map trigger key from a CIDR.
-func lpmKeyV4(cidr string) (*bpf.LpmKeyV4, error) {
-	_, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
+// triggerKeyV4 builds the headend_v4_map key of a trigger prefix. The
+// daemon writes every trigger in the global VRF (vrf_id 0).
+func triggerKeyV4(cidr string) (*bpf.HeadendV4Key, error) {
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
 		return nil, fmt.Errorf("parse trigger prefix %q: %w", cidr, err)
 	}
-	v4 := ipnet.IP.To4()
-	if v4 == nil {
-		return nil, fmt.Errorf("trigger prefix %q is not IPv4", cidr)
+	key, err := bpf.BuildHeadendV4Key(0, cidr)
+	if err != nil {
+		return nil, fmt.Errorf("trigger prefix %q: %w", cidr, err)
 	}
-	ones, _ := ipnet.Mask.Size()
-	key := &bpf.LpmKeyV4{Prefixlen: uint32(ones)}
-	copy(key.Addr[:], v4)
 	return key, nil
 }
 
@@ -149,7 +146,7 @@ func groupPut(c *cli.Context) error {
 
 	// Paths inherit mode / src_addr / policy_id from the trigger entry so the
 	// tool only has to vary the segment lists.
-	key, err := lpmKeyV4(c.String("from-trigger"))
+	key, err := triggerKeyV4(c.String("from-trigger"))
 	if err != nil {
 		return err
 	}
@@ -201,7 +198,7 @@ func attach(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	key, err := lpmKeyV4(c.String("trigger"))
+	key, err := triggerKeyV4(c.String("trigger"))
 	if err != nil {
 		return err
 	}
