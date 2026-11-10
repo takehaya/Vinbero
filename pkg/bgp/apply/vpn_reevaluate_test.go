@@ -494,3 +494,30 @@ func TestVPNSourceLocatorWriteFailureConverges(t *testing.T) {
 		t.Fatal("route not written after the retry")
 	}
 }
+
+// An EVPN route is not tracked until it is written, so a write that fails
+// during the replay the locator registration requests is seen only by that
+// replay. The replay must report it, so the replayer retries.
+func TestEVPNSourceLocatorWriteFailureConverges(t *testing.T) {
+	l := newVPNLab(t)
+	if _, err := l.bindings.VRF().SetBridge("evi-100", vrf.Bridge{Name: "br100", BdID: 100, Ifindex: 5}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	if err := l.bindings.Bind(vrfbgp.Binding{VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionImport}}},
+	}}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	l.rib.deliver(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: &bgp.EVPNRoute{
+		Type: bgp.EVPNRouteTypeMACIP, RD: "65000:100", RTs: []string{"65000:100"},
+		MAC: "aa:bb:cc:00:00:01", SRv6SID: "fd00:100:0:d2::",
+	}})
+	// The replay's bd_peer write fails once.
+	l.dp.FailBdPeerWrites(1)
+	l.createLocator("fd00:200::/48")
+	// Without a retry no further replay runs, and this times out.
+	l.replayed()
+	if !l.dp.HasFdb(100, "aa:bb:cc:00:00:01") {
+		t.Fatal("RT2 not written after the retry")
+	}
+}

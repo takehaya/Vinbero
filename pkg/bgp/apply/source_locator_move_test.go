@@ -395,3 +395,31 @@ func TestReconcileTrackedRetriesEVPN(t *testing.T) {
 		t.Errorf("%d aliasing groups after the retry, want 1", len(fh.ecmpGroups))
 	}
 }
+
+// An uplink whose direct SID stops resolving is removed. When the removal
+// fails, the session counts as a failed write, so the pass that follows
+// removes it.
+func TestReconcileTrackedRetriesT2STRemoval(t *testing.T) {
+	a, fh, _, uplink := mupSourceLab(t)
+	fh.mupUplinkDelErr = errors.New("busy")
+	// The same session re-advertised without a SID, and no discovery route
+	// resolves one.
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: "65000:100",
+		Endpoint: labGateEndpoint, TEID: 0xAB000000, TEIDLen: 8,
+	}})
+	if _, ok := fh.mupUplink[uplink]; !ok {
+		t.Fatal("setup: uplink entry removed although its delete failed")
+	}
+	if err := a.ReconcileTracked(); err == nil {
+		t.Fatal("ReconcileTracked reported success with the stale uplink entry still installed")
+	}
+	fh.mupUplinkDelErr = nil
+	reconcileTracked(t, a)
+	if _, ok := fh.mupUplink[uplink]; ok {
+		t.Error("stale uplink entry still installed after the retry")
+	}
+	if _, ok := fh.v4created[labGatePrefix]; ok {
+		t.Error("gate still installed after the last uplink on it was removed")
+	}
+}

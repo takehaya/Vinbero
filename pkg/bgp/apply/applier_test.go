@@ -49,6 +49,8 @@ type fakeHeadend struct {
 	// putEcmpFailures fails that many more PutEcmpGroup calls. Atomic, so
 	// a test can arm it while another goroutine applies routes.
 	putEcmpFailures atomic.Int32
+	// bdPeerFailures does the same for bd_peer writes.
+	bdPeerFailures atomic.Int32
 
 	fdb                              map[fdbKey]*bpf.FdbEntry
 	bdPeers                          map[bdPeerKey]*bpf.HeadendEntry
@@ -64,7 +66,8 @@ type fakeHeadend struct {
 	esPeerCreateErr, esPeerDeleteErr error
 	esPeerCreates, esPeerDeletes     int
 
-	mupUplink map[mupUplinkKey]*bpf.HeadendEntry
+	mupUplink       map[mupUplinkKey]*bpf.HeadendEntry
+	mupUplinkDelErr error
 }
 
 func newFakeHeadend() *fakeHeadend {
@@ -105,6 +108,10 @@ func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, esi 
 	if f.bdPeerErr != nil {
 		return f.bdPeerErr
 	}
+	if f.bdPeerFailures.Add(-1) >= 0 {
+		return errors.New("injected bd_peer failure")
+	}
+	f.bdPeerFailures.Store(0)
 	f.bdPeers[bdPeerKey{bdID, index}] = e
 	f.bdPeerReverse[bdPeerKey{bdID, index}] = writeReverse
 	f.bdPeerRemoteSrc[bdPeerKey{bdID, index}] = remoteSrc
@@ -288,6 +295,9 @@ func (f *fakeHeadend) CreateMupUplinkV4(instance uint32, endpoint string, teid u
 }
 
 func (f *fakeHeadend) DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
+	if f.mupUplinkDelErr != nil {
+		return f.mupUplinkDelErr
+	}
 	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
 	return nil
 }
@@ -304,6 +314,9 @@ func (f *fakeHeadend) CreateMupUplinkV6(instance uint32, endpoint string, teid u
 }
 
 func (f *fakeHeadend) DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
+	if f.mupUplinkDelErr != nil {
+		return f.mupUplinkDelErr
+	}
 	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
 	return nil
 }

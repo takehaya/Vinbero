@@ -29,6 +29,9 @@ func (f *fakeHeadend) EcmpGroup(id uint32) []bpf.EcmpPath {
 // FailEcmpWrites makes the next n ECMP group writes fail.
 func (f *fakeHeadend) FailEcmpWrites(n int32) { f.putEcmpFailures.Store(n) }
 
+// FailBdPeerWrites makes the next n bd_peer writes fail.
+func (f *fakeHeadend) FailBdPeerWrites(n int32) { f.bdPeerFailures.Store(n) }
+
 // HasFdb reports whether an FDB entry is installed for mac in bdID.
 func (f *fakeHeadend) HasFdb(bdID uint16, mac string) bool {
 	_, ok := f.fdb[fdbKey{bdID, mac}]

@@ -862,8 +862,11 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 
 	sid := a.resolveDirectSID(r)
 	if sid == "" {
-		if st.installedSID != "" || st.gateHeld {
-			a.uninstallMUPT2ST(st)
+		if (st.installedSID != "" || st.gateHeld) && !a.uninstallMUPT2ST(st) {
+			// The uplink entry or the gate is still in the data plane, and
+			// forwards towards the SID that no longer resolves. The state is
+			// kept, so the next reconcile retries the removal.
+			return false
 		}
 		// Log the deferral only on the transition into it (see reconcileMUPT1ST).
 		if !st.deferLogged {

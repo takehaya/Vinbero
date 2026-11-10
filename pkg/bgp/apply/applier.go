@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -122,6 +123,11 @@ type Applier struct {
 	// ReplayEVPN (VrfBridgeAttach / commitBinding re-pull the loc-rib after
 	// the EVPN import surface widens). Same pattern as mupMu.
 	evpnMu sync.Mutex
+	// evpnWriteFailures counts EVPN routes the receive path could not write
+	// (see evpnWriteFailed). An EVPN route that was never written is not
+	// tracked, so ReconcileTracked cannot retry it; ReplayAndReconcile reads
+	// the count instead, to see the routes its replay failed to write.
+	evpnWriteFailures atomic.Uint64
 	logger *zap.Logger
 }
 
@@ -255,11 +261,17 @@ func (a *Applier) QuietVPNDenials(replay func() error) error {
 // path: replay re-delivers the received routes (with VPN denials summarized,
 // see QuietVPNDenials), then ReconcileTracked writes what is still not in
 // the data plane. It returns an error when either step failed, so the caller
-// retries the whole pass.
+// retries the whole pass. A failed EVPN write during the replay counts too:
+// the route is not tracked, and only another replay delivers it again.
 func (a *Applier) ReplayAndReconcile(replay func() error) error {
+	before := a.evpnWriteFailures.Load()
 	err := a.QuietVPNDenials(replay)
+	evpnFailed := a.evpnWriteFailures.Load() - before
 	if terr := a.ReconcileTracked(); terr != nil {
 		return terr
+	}
+	if err == nil && evpnFailed > 0 {
+		err = fmt.Errorf("data-plane writes failed for %d EVPN routes during the replay", evpnFailed)
 	}
 	return err
 }

@@ -417,6 +417,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		// The PE already has a peer in this BD: refresh it in place and
 		// bump the reference count.
 		if err := a.fdbBd.CreateBdPeerOwned(bdID, st.index, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
+			a.evpnWriteFailed()
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.Error(err))
 			return
@@ -430,6 +431,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		// same free slot (both allocate from the same operator range).
 		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN))
 		if err != nil {
+			a.evpnWriteFailed()
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID), zap.Error(err))
 			return
@@ -448,6 +450,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	}
 	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: fdbIdx, BdId: bdID, Esi: r.ESI}
 	if err := a.fdbBd.CreateFdbOwned(bdID, mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
+		a.evpnWriteFailed()
 		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
 		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
 			if existed, derr := a.fdbBd.DeleteBdPeerOwned(bdID, rIdx, bpf.OwnerBGPEVPN(a.localASN)); derr != nil && existed {
@@ -648,6 +651,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 			return
 		}
 		if !a.withdrawEVPNMcast(mk, prev) {
+			a.evpnWriteFailed()
 			return
 		}
 	}
@@ -667,6 +671,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
 	idx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN))
 	if err != nil {
+		a.evpnWriteFailed()
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
@@ -799,6 +804,12 @@ func buildL2HeadendEntryFrom(src [bpf.IPv6AddrLen]byte, sid string, bdID uint16,
 	}
 	return e, nil
 }
+
+// evpnWriteFailed records that a received EVPN route could not be written,
+// for the loc-rib replay to see (see Applier.evpnWriteFailures). Only
+// failures another delivery of the same route can fix are counted: an
+// install, or the teardown a replacing route has to do first.
+func (a *Applier) evpnWriteFailed() { a.evpnWriteFailures.Add(1) }
 
 // reconcileEVPNSource rewrites the EVPN entries written with an
 // encapsulation source other than the current one: the per-PE unicast

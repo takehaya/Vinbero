@@ -573,6 +573,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	// -- and its group id -- stay reserved (fingerprint cleared), so
 	// nothing else can be handed its index or id in the meantime.
 	fail := func() {
+		a.evpnWriteFailed()
 		d.active = false
 		// The registration describes the member layout this reconcile just
 		// tried to replace; against whatever half-written state remains,
