@@ -105,3 +105,42 @@ func TestL2CircuitsOnClosedVRFs(t *testing.T) {
 		t.Error("open tables reported a circuit")
 	}
 }
+
+// Closedness belongs to the table: a VRF that opted out but shares its table
+// with one that did not is closed too, for the L2 check, the member report
+// and the create check.
+func TestClosedByTable(t *testing.T) {
+	m := NewManager()
+	if _, err := m.SetDevice("vrf-x", Device{TableID: 600, Ifindex: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetDevice("vrf-y", Device{TableID: 600, Ifindex: 31, NoUnreachableDefault: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetDevice("vrf-z", Device{TableID: 700, Ifindex: 32, NoUnreachableDefault: true}); err != nil {
+		t.Fatal(err)
+	}
+	links := Links{
+		5:  {Name: "eth5", XDP: true, Master: 31},
+		6:  {Name: "eth6", XDP: true, Master: 32},
+		30: {Name: "vrf-x", IsVrf: true},
+		31: {Name: "vrf-y", IsVrf: true},
+		32: {Name: "vrf-z", IsVrf: true},
+	}
+	if name, ok := m.ClosedVRFOfPort(links, 5); !ok || name != "vrf-y" {
+		t.Errorf("ClosedVRFOfPort(eth5) = %q %v, want vrf-y closed through table 600", name, ok)
+	}
+	if _, ok := m.ClosedVRFOfPort(links, 6); ok {
+		t.Error("eth6 is in vrf-z, alone on its opted-out table 700, and must not be closed")
+	}
+	got := m.MembersWithoutAC(links, "")
+	if len(got) != 1 || got[0].VRF != "vrf-y" || got[0].Interface != "eth5" {
+		t.Errorf("uncovered = %+v, want vrf-y/eth5 only", got)
+	}
+	if len(m.L2CircuitsOnClosedVRFs(links, []uint32{5, 6})) != 1 {
+		t.Error("the circuit on eth5 is not reported")
+	}
+	if !m.TableClosedAfterCreate(600, true) || m.TableClosedAfterCreate(700, true) || !m.TableClosedAfterCreate(800, false) {
+		t.Error("TableClosedAfterCreate: want 600 closed for an opt-out, 700 open, 800 closed without one")
+	}
+}

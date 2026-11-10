@@ -1414,3 +1414,36 @@ func TestVrfServer_CreateRefusesL2CircuitMember(t *testing.T) {
 		t.Errorf("create with open tables: %v %v", err, resp.Msg.GetErrors())
 	}
 }
+
+// The L2 guard also covers an adopt: a port the kernel already has in the
+// device carries a circuit, the request names no members. And an opted-out
+// VRF on a table another managed VRF closes is closed too.
+func TestVrfServer_CreateRefusesL2CircuitOnExistingPort(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{51}, nil })
+	s.links = func() (vrf.Links, error) {
+		return vrf.Links{50: {Name: "vrf-u", IsVrf: true}, 51: {Name: "eth5", Master: 50}}, nil
+	}
+	ctx := context.Background()
+	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-u", TableId: 100}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, `port "eth5" carries an L2 headend circuit`) || len(dev.created) != 0 {
+		t.Errorf("adopt: errors %v, created %v; want the refusal for eth5", resp.Msg.Errors, dev.created)
+	}
+
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{10}, nil }) // eth0
+	if resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-closed", TableId: 600}}})); err != nil || len(resp.Msg.Errors) != 0 {
+		t.Fatalf("VrfCreate vrf-closed: %v %v", err, resp.Msg.GetErrors())
+	}
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{
+		Name: "vrf-shared", TableId: 600, Members: []string{"eth0"}, NoUnreachableDefault: true,
+	}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, "carries an L2 headend circuit") {
+		t.Errorf("opted-out VRF on a closed table: errors %v, want the refusal", resp.Msg.Errors)
+	}
+}

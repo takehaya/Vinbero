@@ -241,27 +241,49 @@ func (s *VrfServer) createOne(in *v1.Vrf) (*vrf.VRF, *v1.OperationError) {
 	return &created, nil
 }
 
-// refuseL2CircuitMembers refuses to enslave a port that carries an L2
-// headend circuit into a VRF whose table will end in the unreachable
-// default: the circuit's encapsulations and BUM copies are looked up on the
-// port, so they would go to that table and stop there.
+// refuseL2CircuitMembers refuses a create that would put a port carrying an
+// L2 headend circuit into a VRF whose table ends in the unreachable default:
+// the circuit's encapsulations and BUM copies are looked up on the port, so
+// they would go to that table and stop there. The ports checked are the
+// requested members and, for an adopt, every port the kernel already has in
+// the device; the table counts as closed when the request asks for the
+// routes or another managed VRF on the table has them.
 func (s *VrfServer) refuseL2CircuitMembers(in *v1.Vrf) error {
-	if s.l2Ports == nil || in.GetNoUnreachableDefault() || !s.mgr.TablesClosed() || len(in.GetMembers()) == 0 {
+	if s.l2Ports == nil || !s.mgr.TableClosedAfterCreate(in.GetTableId(), in.GetNoUnreachableDefault()) {
 		return nil
 	}
 	ports, err := s.l2Ports()
 	if err != nil {
 		return fmt.Errorf("list the L2 headend circuits: %w", err)
 	}
+	if len(ports) == 0 {
+		return nil
+	}
+	candidates := map[uint32]string{}
 	for _, member := range in.GetMembers() {
-		ifindex, err := s.resolve(member)
-		if err != nil {
-			continue // the create reports a missing member itself
+		if ifindex, err := s.resolve(member); err == nil {
+			candidates[ifindex] = member
+		} // a missing member is reported by the create itself
+	}
+	links, err := s.links()
+	if err != nil {
+		return fmt.Errorf("list the ports of VRF %q: %w", in.GetName(), err)
+	}
+	for ifindex, l := range links {
+		if !l.IsVrf || l.Name != in.GetName() {
+			continue
 		}
+		for port, pl := range links {
+			if pl.Master == ifindex {
+				candidates[port] = pl.Name
+			}
+		}
+	}
+	for ifindex, name := range candidates {
 		if slices.Contains(ports, ifindex) {
-			return fmt.Errorf("member %q carries an L2 headend circuit: in VRF %q, whose table ends in the unreachable default, "+
+			return fmt.Errorf("port %q carries an L2 headend circuit: in VRF %q, whose table ends in the unreachable default, "+
 				"its encapsulations and BUM copies would be dropped (delete the circuit first, or create the VRF with no_unreachable_default)",
-				member, in.GetName())
+				name, in.GetName())
 		}
 	}
 	return nil

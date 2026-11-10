@@ -65,22 +65,51 @@ func (m *Manager) TablesClosed() bool {
 	return !m.tablesOpen
 }
 
-// closedVRFs returns the VRFs whose kernel device's table ends in the
-// unreachable default, by device ifindex.
+// closedTablesLocked returns the tables that end in the unreachable default:
+// a table some managed VRF on it did not opt out of. Closedness belongs to
+// the table, not the VRF: a VRF that opted out but shares a table with one
+// that did not is closed all the same. Callers hold m.mu.
+func (m *Manager) closedTablesLocked() map[uint32]bool {
+	out := map[uint32]bool{}
+	if m.tablesOpen {
+		return out
+	}
+	for _, v := range m.byName {
+		if v.Device != nil && v.Device.TableID != 0 && !v.Device.NoUnreachableDefault {
+			out[v.Device.TableID] = true
+		}
+	}
+	return out
+}
+
+// closedVRFs returns the managed VRFs whose kernel device's table ends in
+// the unreachable default (closedTablesLocked), by device ifindex.
 func (m *Manager) closedVRFs() map[uint32]VRF {
 	m.mu.RLock()
-	open := m.tablesOpen
+	closed := m.closedTablesLocked()
 	m.mu.RUnlock()
 	out := map[uint32]VRF{}
-	if open {
+	if len(closed) == 0 {
 		return out
 	}
 	for _, v := range m.List() {
-		if v.Device != nil && v.Device.Ifindex != 0 && !v.Device.NoUnreachableDefault {
+		if v.Device != nil && v.Device.Ifindex != 0 && closed[v.Device.TableID] {
 			out[v.Device.Ifindex] = v
 		}
 	}
 	return out
+}
+
+// TableClosedAfterCreate reports whether table ends in the unreachable
+// default once a VRF with this setting is created on it: it asks for the
+// routes, or another managed VRF on the table has them.
+func (m *Manager) TableClosedAfterCreate(table uint32, noUnreachableDefault bool) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.tablesOpen {
+		return false
+	}
+	return !noUnreachableDefault || m.closedTablesLocked()[table]
 }
 
 // ClosedVRFOfPort returns the managed VRF whose closed table the port with
