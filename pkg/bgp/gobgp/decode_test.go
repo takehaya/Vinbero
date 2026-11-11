@@ -115,6 +115,20 @@ func TestDecodeRouteTargets(t *testing.T) {
 	}
 }
 
+// The MUP Direct Segment community with a 4-octet AS has sub-type 2 like a
+// route target and prints like a 4-octet AS one; it is not a route target.
+func TestDecodeRouteTargets_SkipsMUPFourOctetAS(t *testing.T) {
+	rt := gobgppkt.NewFourOctetAsSpecificExtended(gobgppkt.EC_SUBTYPE_ROUTE_TARGET, 65546, 7, true)
+	mup := gobgppkt.NewMUPFourOctetAsSpecificExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG_4_OCTET_AS, 65546, 8)
+	ec := &gobgppkt.PathAttributeExtendedCommunities{
+		Value: []gobgppkt.ExtendedCommunityInterface{rt, mup},
+	}
+	got := decodeRouteTargets([]gobgppkt.PathAttributeInterface{ec})
+	if len(got) != 1 || got[0] != rt.String() {
+		t.Errorf("decodeRouteTargets = %v, want only %q", got, rt.String())
+	}
+}
+
 func TestDecodeRouteTargets_None(t *testing.T) {
 	if got := decodeRouteTargets(nil); got != nil {
 		t.Errorf("decodeRouteTargets(nil) = %v, want nil", got)
