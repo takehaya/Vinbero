@@ -30,7 +30,7 @@ import (
 )
 
 // headendOps is shared with plugin reconciliation. It deliberately has no
-// force-delete operation: legacy migration deletes under the observed owner.
+// force-delete operation: the applier deletes only under its own owners.
 type headendOps = headend.Writer
 
 // Option configures an applier before it starts receiving routes.

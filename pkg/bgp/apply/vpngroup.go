@@ -1,7 +1,6 @@
 package apply
 
 import (
-	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -527,70 +526,12 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	return true
 }
 
-// clearLegacyVPNHeadend removes a trigger left by the pre-aggregation
-// writer, which owned each prefix per RD.
-//
-// Those entries survive in the pinned headend maps across an upgrade, and
-// the aggregating writer's owner is RD-independent, so without this every
-// previously installed prefix fails the cross-owner check and never comes
-// back -- and a withdraw arriving for one cannot remove it either.
-//
-// Delete under the observed legacy owner. If an operator or another controller
-// replaces it after the read, the owner check refuses the deletion.
-//
-// Reports whether anything was cleared, so the caller knows a retry is
-// worth attempting.
-func (a *Applier) clearLegacyVPNHeadend(vrfID uint32, fam bgp.Family, prefix string) bool {
-	var (
-		owner bpf.OwnerTag
-		found bool
-		err   error
-	)
-	switch fam {
-	case bgp.FamilyVPNv4:
-		owner, found, err = a.headend.GetHeadendV4OwnerIn(vrfID, prefix)
-	case bgp.FamilyVPNv6:
-		owner, found, err = a.headend.GetHeadendV6OwnerIn(vrfID, prefix)
-	default:
-		return false
-	}
-	if err != nil || !found || !bpf.IsLegacyBGPVPNOwner(a.localASN, owner) {
-		return false
-	}
-	if err := a.deleteHeadend(vrfID, fam, prefix, owner); err != nil {
-		a.logger.Error("clear pre-aggregation VPN trigger",
-			zap.Uint32("vrf_id", vrfID), zap.String("prefix", prefix),
-			zap.String("owner", string(owner)), zap.Error(err))
-		return false
-	}
-	a.logger.Info("cleared pre-aggregation VPN trigger",
-		zap.Uint32("vrf_id", vrfID), zap.String("prefix", prefix), zap.String("owner", string(owner)))
-	return true
-}
-
-// createTrigger writes the trigger entry of vrfID, migrating off a
-// pre-aggregation owner if one is in the way.
+// createTrigger writes the trigger entry of vrfID.
 func (a *Applier) createTrigger(vrfID uint32, fam bgp.Family, prefix string, entry *bpf.HeadendEntry) error {
-	owner := bpf.OwnerBGPVPN(a.localASN, "")
-	err := a.createHeadend(vrfID, fam, prefix, entry, owner)
-	if !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
-		return err
-	}
-	if !a.clearLegacyVPNHeadend(vrfID, fam, prefix) {
-		return err
-	}
-	return a.createHeadend(vrfID, fam, prefix, entry, owner)
+	return a.createHeadend(vrfID, fam, prefix, entry, bpf.OwnerBGPVPN(a.localASN, ""))
 }
 
-// deleteTrigger removes the trigger entry of vrfID, including one left by
-// the pre-aggregation writer.
+// deleteTrigger removes the trigger entry of vrfID.
 func (a *Applier) deleteTrigger(vrfID uint32, fam bgp.Family, prefix string) error {
-	err := a.deleteHeadend(vrfID, fam, prefix, bpf.OwnerBGPVPN(a.localASN, ""))
-	if !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
-		return err
-	}
-	if a.clearLegacyVPNHeadend(vrfID, fam, prefix) {
-		return nil
-	}
-	return err
+	return a.deleteHeadend(vrfID, fam, prefix, bpf.OwnerBGPVPN(a.localASN, ""))
 }

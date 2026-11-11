@@ -54,39 +54,3 @@ func TestVPNAndPluginUseSharedHeadendOwnership(t *testing.T) {
 		t.Fatal("BGP failed to restore its ECMP trigger after plugin flush")
 	}
 }
-
-// Simulate an operator replacement between observing a legacy owner and deleting
-// it. Migration must not force-delete the replacement under the stale identity.
-type replacedLegacyOwner struct {
-	headend.Writer
-	maps *fakeHeadend
-}
-
-func (w replacedLegacyOwner) GetHeadendV4Owner(prefix string) (bpf.OwnerTag, bool, error) {
-	owner, found, err := w.Writer.GetHeadendV4Owner(prefix)
-	w.maps.v4owners[prefix] = bpf.OwnerRPC
-	return owner, found, err
-}
-
-func (w replacedLegacyOwner) GetHeadendV4OwnerIn(v uint32, prefix string) (bpf.OwnerTag, bool, error) {
-	if v != 0 {
-		return w.Writer.GetHeadendV4OwnerIn(v, prefix)
-	}
-	return w.GetHeadendV4Owner(prefix)
-}
-
-func TestLegacyMigrationDoesNotDeleteReplacementOwner(t *testing.T) {
-	fh := newFakeHeadend()
-	const prefix = "10.0.0.0/24"
-	fh.v4owners[prefix] = bpf.OwnerBGPVPN(65000, "65000:1")
-	fh.v4created[prefix] = &bpf.HeadendEntry{}
-	r, err := headend.NewReconciler(sharedHeadendMaps{fh}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop(), WithHeadendWriter(replacedLegacyOwner{r, fh}))
-	a.Apply(vpnEvent(prefix, "65000:1", "fd00:1:1:a::", "fd00::1", false))
-	if fh.v4owners[prefix] != bpf.OwnerRPC || fh.v4created[prefix] == nil || len(fh.v4forced) != 0 {
-		t.Fatal("migration deleted a replacement installed after its owner lookup")
-	}
-}

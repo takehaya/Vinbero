@@ -36,8 +36,8 @@ type fakeHeadend struct {
 	createErr error
 	deleteErr error // DeleteHeadendV4 fails with it when set
 
-	// v4owners / v6owners model the persisted owner table so the upgrade off
-	// the pre-aggregation per-RD owner can be exercised.
+	// v4owners / v6owners model the persisted owner table so the
+	// cross-owner checks can be exercised.
 	v4owners map[string]bpf.OwnerTag
 	v6owners map[string]bpf.OwnerTag
 	v4forced []string
@@ -339,8 +339,8 @@ func (f *fakeHeadend) DeleteMupUplinkV6(instance uint32, endpoint string, teid u
 }
 
 // Create / Delete honour the recorded owner the way bpf.MapOperations does,
-// so tests can exercise the cross-owner paths (the pre-aggregation per-RD
-// owner in particular) rather than assuming every write lands.
+// so tests can exercise the cross-owner paths rather than assuming every
+// write lands.
 func (f *fakeHeadend) CreateHeadendV4(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
 	if f.createErr != nil {
 		return f.createErr

@@ -210,51 +210,23 @@ func TestVPNGroup_ResetSkipsUnownedGroupIDs(t *testing.T) {
 	}
 }
 
-// A rolling upgrade finds the pinned headend maps holding entries written by
-// the pre-aggregation code, which owned each prefix per RD. The aggregating
-// writer's owner is RD-independent, so without a migration path every one of
-// those prefixes fails the cross-owner check and never comes back.
-func TestVPNGroup_UpgradesOffTheLegacyPerRDOwner(t *testing.T) {
-	t.Run("re-advertise replaces a legacy entry", func(t *testing.T) {
-		fh := newFakeHeadend()
-		fh.v4owners["10.0.0.0/24"] = bpf.OwnerBGPVPN(65000, "65000:1")
-		fh.v4created["10.0.0.0/24"] = &bpf.HeadendEntry{}
+// A BGP route never takes over another owner's entry for the same prefix:
+// an operator's RPC-installed entry stays as it is.
+func TestVPNGroup_LeavesAnotherOwnersEntry(t *testing.T) {
+	fh := newFakeHeadend()
+	fh.v4owners["10.0.0.0/24"] = bpf.OwnerRPC
+	rpcEntry := &bpf.HeadendEntry{}
+	fh.v4created["10.0.0.0/24"] = rpcEntry
 
-		a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
-		a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:1:1:a::", "fd00::1", false))
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:1:1:a::", "fd00::1", false))
 
-		trigger := fh.v4created["10.0.0.0/24"]
-		if trigger == nil || trigger.GroupId == 0 {
-			t.Fatal("legacy entry blocked the aggregating writer")
-		}
-		if len(fh.v4deleted) != 1 || len(fh.v4forced) != 0 {
-			t.Errorf("legacy migration must delete under its owner: deleted=%v, forced=%v", fh.v4deleted, fh.v4forced)
-		}
-	})
-
-	// A legacy entry whose prefix is withdrawn before it is advertised
-	// again is not this process's to find: the boot removes every entry the
-	// applier's owners wrote, the legacy ones included (TestPurgeBuiltinHeadends).
-
-	t.Run("another owner's entry is left alone", func(t *testing.T) {
-		// An operator's RPC-installed entry for the same prefix must not be
-		// destroyed by a BGP route; only this node's own legacy shape is
-		// cleared.
-		fh := newFakeHeadend()
-		fh.v4owners["10.0.0.0/24"] = bpf.OwnerRPC
-		rpcEntry := &bpf.HeadendEntry{}
-		fh.v4created["10.0.0.0/24"] = rpcEntry
-
-		a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
-		a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:1:1:a::", "fd00::1", false))
-
-		if len(fh.v4forced) != 0 {
-			t.Errorf("force-deleted an entry owned by %q", bpf.OwnerRPC)
-		}
-		if fh.v4created["10.0.0.0/24"] != rpcEntry {
-			t.Error("the RPC-owned entry was overwritten")
-		}
-	})
+	if len(fh.v4forced) != 0 || len(fh.v4deleted) != 0 {
+		t.Errorf("removed an entry owned by %q: deleted=%v forced=%v", bpf.OwnerRPC, fh.v4deleted, fh.v4forced)
+	}
+	if fh.v4created["10.0.0.0/24"] != rpcEntry {
+		t.Error("the RPC-owned entry was overwritten")
+	}
 }
 
 // Two paths can share a SID while carrying different colors. The survivor of

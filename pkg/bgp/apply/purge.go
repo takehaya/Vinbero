@@ -24,12 +24,11 @@ type HeadendPurgeOps interface {
 }
 
 // IsBuiltinRouteOwner reports whether owner is one of the per-route headend
-// owners the applier of localASN writes: the VPN trigger owner, a
-// pre-aggregation (per RD) VPN owner, or a MUP downlink owner. The MUP gate
-// owners are not: gates are shared with plugins and recovered on their own.
+// owners the applier of localASN writes: the VPN trigger owner or a MUP
+// downlink owner. The MUP gate owners are not: gates are shared with plugins
+// and recovered on their own.
 func IsBuiltinRouteOwner(localASN uint32, owner bpf.OwnerTag) bool {
 	return owner == bpf.OwnerBGPVPN(localASN, "") ||
-		bpf.IsLegacyBGPVPNOwner(localASN, owner) ||
 		strings.HasPrefix(string(owner), string(bpf.OwnerBGPMUP(localASN, "")))
 }
 
