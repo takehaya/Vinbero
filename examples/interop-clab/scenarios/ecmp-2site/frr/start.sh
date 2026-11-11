@@ -58,11 +58,16 @@ ip link set eth2 up 2>/dev/null || true
 # on-link, and its NDP -- which nothing on the core link answers --
 # fails, blackholing every return packet.
 
-# FRR ships an entrypoint that starts the daemons selected in
-# /etc/frr/daemons. watchfrr then keeps them alive.
+# FRR ships an entrypoint that starts watchfrr, which starts the daemons
+# selected in /etc/frr/daemons, applies frr.conf to them (`vtysh -b`) once
+# they are all started, and keeps them alive.
 /usr/lib/frr/frrinit.sh start
 
-# Give the daemons a moment, then load the integrated config so that
-# any ordering-sensitive SRv6/BGP statements apply cleanly.
-sleep 4
-vtysh -b || true
+# frr.conf is applied exactly once. A second `vtysh -b` re-enters the SRv6
+# locator's `prefix` line, which makes zebra withdraw and re-announce the
+# locator even though nothing changed; bgpd then drops and re-allocates the
+# VPN service SIDs. The iBGP session can be up by then, and an UPDATE FRR
+# 10.2 builds in that moment can carry the SID Structure with an
+# implicit-null label instead of the transposed function: the peer folds it
+# into the bare locator, and FRR never re-sends the route because it records
+# the label it meant to send.
