@@ -189,6 +189,11 @@ func run(cliCtx *cli.Context) error {
 	if err := vin.StartEncapNeighKeeper(ctx); err != nil {
 		return fmt.Errorf("start the encapsulation next-hop keeper: %w", err)
 	}
+	// internal.bpf.fib_lookup_global "auto": the global VRF's lookups take
+	// the direct lookup while the namespace allows it.
+	if err := vin.StartFibLookupMode(ctx); err != nil {
+		return fmt.Errorf("start the global FIB lookup mode: %w", err)
+	}
 
 	// The locator.Manager and vrfbgp.Manager are shared between the RPC
 	// server and the BGP route applier, so locators / VRF bindings

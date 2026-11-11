@@ -126,6 +126,39 @@ TBID を使えないのは、kernel が `BPF_FIB_LOOKUP_TBID` を受け付けな
 - 過去に VRF device か `ip rule` を作ったことのある node では、上の表で「たどる」経路が、一度も作ったことのない node より 1 packet あたり少し遅くなります。End.DT4 でテナントの VRF へ decap するには VRF device が要るので、VRF device を避ける必要はありません
 - node 間や実行間で転送性能を比べるときは、rule の履歴をそろえてください
 - 履歴の無い状態に戻せるのは、reboot か新しい netns だけです
+- rule をたどる分を避けたいときは、次の `internal.bpf.fib_lookup_global: "auto"` が使えます
+
+#### global VRF の direct lookup (`fib_lookup_global`)
+
+`internal.bpf.fib_lookup_global` は、上の表で flags 0 の lookup (vrf_id 0 のもの、TBID を使えないときの tenant の encap を除く) の引き方を決めます。既定の `"rules"` ではすべて flags 0 のままです。`"auto"` にすると、vinberod が自分の netns の状態を見て、full lookup (flags 0) と同じ答えになると確かめられる間だけ、その family の lookup を `BPF_FIB_LOOKUP_DIRECT` (table ID なし) で引きます。direct lookup は table を 1 つだけ引き、rule を読みません。引く table は、lookup の device が VRF device か VRF device に enslave された port ならその VRF の table、それ以外は main table です。対象は表の flags 0 の行すべてで、encap の外側 (vrf_id 0)、IPv6 と IPv4 の転送、隣接解決、VRF device 上の decap と End.T、BUM の uplink probe (XDP と tc) を含みます。tenant の encap は今までどおり `DIRECT | TBID` で main table を引きます。
+
+`"auto"` は table ID の lookup を前提にします。kernel が `BPF_FIB_LOOKUP_TBID` を受け付けない場合、起動時の確認が失敗した場合、`fib_lookup_tbid: "off"` の場合は、vinberod は起動時に warning を 1 行出して `"rules"` で動きます。この場合は VRF の table を閉じないので、下の条件を満たせないためです。
+
+vinberod が family ごとに direct lookup を使うのは、次の条件をすべて満たす間です。
+
+- その family の rule がすべて kernel 自身の入れる形をしている: すべての packet に一致し (送信元・宛先・`iif`・`oif`・`fwmark`・`uidrange`・`ipproto`・port・TOS などの selector が無く、`not` も無い)、動作が table の lookup で、`suppress_prefixlength` などが無い。table は local、main、(IPv4 のみ) default、または VRF device が足す l3mdev rule。main を引く rule があり、l3mdev rule は main の rule より前にある。local の rule の位置は問いません (VRF で local の rule を 32765 に移した構成も対象です)。vinberod が知らない属性を持つ rule は、この形ではないものとして扱います
+- local table (255) の経路が、1 つの address への経路 (自分の address、broadcast、anycast) と、kernel が入れる `127.0.0.0/8` (IPv4) と `ff00::/8` (IPv6) だけで、1 つの address への経路が 8192 本以下である。`local 10.0.0.0/8` のような prefix の経路 (AnyIP) があると、その family は対象外です
+- (IPv4) default table (253) に経路が無い
+- VRF device があるときは、その family の l3mdev rule があり、すべての VRF の table が送信元も TOS も無い unreachable、blackhole、prohibit の default 経路を持ち、(IPv4) throw の経路を持たない。Vinbero が作るか adopt して閉じた table はこの形です。`no_unreachable_default` の VRF があると、その family は対象外です
+
+data plane は、宛先が local table の経路 (上の 1 つの address、`127.0.0.0/8`、`ff00::/8`) に当たる packet を direct mode でも full lookup で引きます。vinberod は local table の 1 つの address への経路を data plane の map (`fib_local_v4_map`、`fib_local_v6_map`) に写します。
+
+この条件の下では、local table に当たらない宛先について、full lookup の rule のたどり方は kernel の関数から決まります。local と default の table は外れて次の rule へ進み (`fib_rules_lookup()` は `-EAGAIN`、IPv6 は null entry のときだけ次へ進みます)、l3mdev rule は lookup の device が VRF device か slave のときだけ一致して VRF の table を引き、閉じた VRF の table は必ずそこで答えを返します。それ以外の device は main table に着きます。どちらも direct lookup が引く table と同じで、table を引く関数 (`fib_table_lookup()`、`fib6_table_lookup()`) に渡る flow も、その後の multipath の選択 (`fib_select_path()`、`fib6_select_path()`、hash の入力) と neighbour の確認も同じです。そのため戻り値、next hop、出力 interface、neighbour の結果が一致します。IPv6 の送信元を条件にした経路、blackhole・unreachable・prohibit・throw の経路、multipath も table の中で同じように扱われます。
+
+一度も rule を足していない netns では、full lookup は rule をたどらない kernel の近道を通ります。この近道と direct lookup の答えが違うのは 1 つだけです。IPv4 で、main table の blackhole、unreachable、prohibit の経路に当たり、かつ default table (253) が以前に経路を入れて空になったまま残っている場合、近道は default table を引いて `NOT_FWDED` を返し packet を kernel に渡しますが、direct lookup はそのまま drop します。kernel も同じ近道で packet を捨てるので、違いは kernel が ICMP の到達不能を返すかどうかです。
+
+vinberod は、netns の rule、経路、link の変化を netlink で見張ります (`RTNLGRP_IPV4_RULE`、`RTNLGRP_IPV6_RULE`、`RTNLGRP_IPV4_ROUTE`、`RTNLGRP_IPV6_ROUTE`、`RTNLGRP_LINK` を 1 つの socket で購読します)。rule の追加と削除、local table・default table の経路の変化、VRF の table の default 経路と throw の経路の変化、VRF device の追加と削除を受け取ると、影響する family をすぐ full lookup に戻し、最後の変化から 200 ms 後に rule、VRF device、関係する table を読み直して、条件を満たせば direct lookup に戻します。main table などの経路の変化では何もしません。購読が切れたとき (受信 buffer のあふれなど)、読み直しが失敗したとき、data plane の map に書けなかったとき、起動直後と停止時は、両方の family が full lookup です。購読は 1 秒から倍々で 30 秒までの間隔で張り直し、張り直した後に全体を読み直してから direct lookup に戻ります。
+
+制限は次のとおりです。
+
+- 切り替えには窓があります。rule を足してから data plane が full lookup に戻るまでの間 (vinberod が netlink の通知を読んで map を書くまで) は、新しい rule は効きません。`ip rule add` が戻ってから map が書かれるまでを VM で 40 回測ると、中央値 0.3 µs、最大 1.7 µs でした。vinberod が CPU を得られなければ長くなり、上限は保証されません。policy routing を使う node では `"rules"` のままにしてください
+- direct lookup の間は、上の条件で読んだもの以外は見ていません。条件を外れる変化は通知で full lookup に戻すので、direct lookup が rule を無視したまま続くことはありませんが、rule を足した直後の窓の間だけは無視されます
+- 条件を満たさない family は、全体が full lookup です。開いた VRF の table が 1 つでもあれば、その family はほかの device の lookup も含めて full lookup になります
+- VRF の table の default 経路と throw の経路が変わるたびに、その table を読み直します。大きな VRF の table では読み直しに時間がかかり、その間は full lookup です
+
+どちらで引いているかは vinberod の log に出ます (`global VRF FIB lookups: direct lookup` / `full lookup` と理由、family ごとに状態が変わったときだけ)。
+
+`BPF_PROG_TEST_RUN` で `bpf_fib_lookup` を繰り返した測定 (VM、kernel 7.0、6.12、6.6) では、direct mode の 1 回の lookup (direct lookup と local の map の確認) は、rule を一度足した netns の full lookup より IPv6 で 36〜43 ns、IPv4 で 26〜42 ns 短く、一度も rule を足していない netns ではほぼ同じ (IPv4 で -1〜+1 ns、IPv6 で 4〜8 ns 短い) でした。`"rules"` の program では direct lookup の部分を verifier が取り除き、lookup ごとに残るのは設定を読む 2 命令だけです。実際の `vinbero_main` (H.Encaps と End.DT4) を同じ方法で測ると、`"rules"` と変更前の差は 1 packet あたり ±3 ns の測定のばらつきの中でした。
 
 ### encap の next hop の neighbour
 

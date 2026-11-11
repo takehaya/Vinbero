@@ -43,6 +43,18 @@ type BpfConfig struct {
 	// FibLookupTBIDOff is the outcome the daemon sets at load (not read
 	// from the file): the tenant lookup falls back to the ingress device.
 	FibLookupTBIDOff bool `yaml:"-"`
+	// FibLookupGlobal chooses how the global VRF's (vrf 0) FIB lookups are
+	// made. "rules" (the default) runs each as the kernel's full lookup,
+	// ip rules included. "auto" has the daemon watch the namespace's ip
+	// rules, local table, IPv4 default table and VRF tables, and run the
+	// lookups of an address family as a direct lookup of the one table the
+	// full lookup would end in while that gives the same answer
+	// (pkg/fibmode); otherwise they stay the full lookup. "auto" needs
+	// BPF_FIB_LOOKUP_TBID (fib_lookup_tbid), without which it is "rules".
+	FibLookupGlobal string `yaml:"fib_lookup_global,omitempty" default:"rules"`
+	// FibLookupGlobalAuto is the outcome the daemon sets at load (not read
+	// from the file): the program may switch to the direct lookup.
+	FibLookupGlobalAuto bool `yaml:"-"`
 }
 
 // ServerConfig holds the gRPC/Connect server configuration

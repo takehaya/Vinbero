@@ -53,3 +53,47 @@ func TestResolveFibLookupTBID(t *testing.T) {
 		t.Error("the default constant set must not carry fib_lookup_tbid")
 	}
 }
+
+// "rules" (or nothing) keeps the full lookup; "auto" enables the direct
+// mode only with table-ID lookups, and otherwise stays "rules" with one
+// warning; anything else is a config error. Only "auto" with table-ID
+// lookups sets the program's constant.
+func TestResolveFibLookupGlobal(t *testing.T) {
+	for _, c := range []struct {
+		name, setting string
+		tbidOff       bool
+		auto          bool
+		warn          string
+		wantErr       bool
+	}{
+		{"default", "", false, false, "", false},
+		{"rules", "rules", false, false, "", false},
+		{"auto", "auto", false, true, "", false},
+		{"auto without table-ID lookups", "auto", true, false, "table-ID FIB lookups are off", false},
+		{"rules without table-ID lookups", "rules", true, false, "", false},
+		{"typo", "direct", false, false, "", true},
+	} {
+		core, logs := observer.New(zap.WarnLevel)
+		opts := &config.BpfConfig{FibLookupGlobal: c.setting, FibLookupTBIDOff: c.tbidOff}
+		err := resolveFibLookupGlobal(opts, zap.New(core))
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, want error %v", c.name, err, c.wantErr)
+			continue
+		}
+		if opts.FibLookupGlobalAuto != c.auto {
+			t.Errorf("%s: FibLookupGlobalAuto = %v, want %v", c.name, opts.FibLookupGlobalAuto, c.auto)
+		}
+		switch {
+		case c.warn == "" && logs.Len() != 0:
+			t.Errorf("%s: warnings %v, want none", c.name, logs.All())
+		case c.warn != "" && logs.FilterMessageSnippet(c.warn).Len() != 1:
+			t.Errorf("%s: warnings %v, want one containing %q", c.name, logs.All(), c.warn)
+		}
+		cfg := &config.Config{}
+		cfg.InternalConfig.BpfOptions = *opts
+		v, set := cfg.BpfConstants()["fib_lookup_global_auto"]
+		if set != c.auto || set && v != uint8(1) {
+			t.Errorf("%s: constants %v", c.name, cfg.BpfConstants())
+		}
+	}
+}

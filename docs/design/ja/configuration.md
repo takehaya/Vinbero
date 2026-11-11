@@ -34,6 +34,7 @@ internal:
 | `verifier_log_level` | int | `0` | eBPF verifier のログレベル。0 で無効、1 で branch、2 で命令単位 |
 | `verifier_log_size` | uint32 | `0` | verifier log バッファの初期サイズ。0 で cilium/ebpf の既定に任せ、上限は 64 MiB |
 | `fib_lookup_tbid` | string | `auto` | tenant VRF の AC から来たパケットの encap の外側の引き方。`auto` は kernel の `bpf_fib_lookup` が `BPF_FIB_LOOKUP_TBID` を受け付ければ main table を直接引き、VRF の table を unreachable default で閉じる。`off` は受け付けない kernel と同じく入口の interface で引き、VRF の table を閉じない ([vrf.md](vrf.md#encap-の外側の経路)) |
+| `fib_lookup_global` | string | `rules` | global VRF (vrf_id 0) の FIB lookup の引き方。`rules` はすべて kernel の full lookup (ip rule を通す)。`auto` は vinberod が netns の ip rule、local table、IPv4 の default table、VRF の table を見張り、full lookup と同じ答えになる間だけ family ごとに direct lookup (rule を読まない) で引く。`fib_lookup_tbid` が使えないときは `rules` になる ([vrf.md](vrf.md#global-vrf-の-direct-lookup-fib_lookup_global)) |
 
 ```yaml
 internal:

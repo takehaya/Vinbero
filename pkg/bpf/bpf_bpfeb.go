@@ -165,6 +165,13 @@ type BpfFdbKey struct {
 	Mac  [6]uint8
 }
 
+type BpfFibGlobalMode struct {
+	_   structs.HostLayout
+	V4  uint8
+	V6  uint8
+	Pad [2]uint8
+}
+
 type BpfHeadendEntry struct {
 	_            structs.HostLayout
 	Mode         uint8
@@ -205,6 +212,14 @@ type BpfHeadendV6Key struct {
 	Prefixlen uint32
 	Instance  [4]uint8
 	Addr      [16]uint8
+}
+
+type BpfIn6Addr struct {
+	_    structs.HostLayout
+	In6U struct {
+		_       structs.HostLayout
+		U6Addr8 [16]uint8
+	}
 }
 
 type BpfIngressAcKey struct {
@@ -433,6 +448,9 @@ type BpfMapSpecs struct {
 	FdbEventRb             *ebpf.MapSpec `ebpf:"fdb_event_rb"`
 	FdbMap                 *ebpf.MapSpec `ebpf:"fdb_map"`
 	FdbOwnerMap            *ebpf.MapSpec `ebpf:"fdb_owner_map"`
+	FibGlobalModeMap       *ebpf.MapSpec `ebpf:"fib_global_mode_map"`
+	FibLocalV4Map          *ebpf.MapSpec `ebpf:"fib_local_v4_map"`
+	FibLocalV6Map          *ebpf.MapSpec `ebpf:"fib_local_v6_map"`
 	HeadendL2ExtMap        *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map           *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendL2Progs         *ebpf.MapSpec `ebpf:"headend_l2_progs"`
@@ -470,11 +488,12 @@ type BpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
-	BumModeDefault *ebpf.VariableSpec `ebpf:"bum_mode_default"`
-	BumXdpEnabled  *ebpf.VariableSpec `ebpf:"bum_xdp_enabled"`
-	BumXdpNative   *ebpf.VariableSpec `ebpf:"bum_xdp_native"`
-	EnableStats    *ebpf.VariableSpec `ebpf:"enable_stats"`
-	FibLookupTbid  *ebpf.VariableSpec `ebpf:"fib_lookup_tbid"`
+	BumModeDefault      *ebpf.VariableSpec `ebpf:"bum_mode_default"`
+	BumXdpEnabled       *ebpf.VariableSpec `ebpf:"bum_xdp_enabled"`
+	BumXdpNative        *ebpf.VariableSpec `ebpf:"bum_xdp_native"`
+	EnableStats         *ebpf.VariableSpec `ebpf:"enable_stats"`
+	FibLookupGlobalAuto *ebpf.VariableSpec `ebpf:"fib_lookup_global_auto"`
+	FibLookupTbid       *ebpf.VariableSpec `ebpf:"fib_lookup_tbid"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -522,6 +541,9 @@ type BpfMaps struct {
 	FdbEventRb             *ebpf.Map `ebpf:"fdb_event_rb"`
 	FdbMap                 *ebpf.Map `ebpf:"fdb_map"`
 	FdbOwnerMap            *ebpf.Map `ebpf:"fdb_owner_map"`
+	FibGlobalModeMap       *ebpf.Map `ebpf:"fib_global_mode_map"`
+	FibLocalV4Map          *ebpf.Map `ebpf:"fib_local_v4_map"`
+	FibLocalV6Map          *ebpf.Map `ebpf:"fib_local_v6_map"`
 	HeadendL2ExtMap        *ebpf.Map `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map           *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendL2Progs         *ebpf.Map `ebpf:"headend_l2_progs"`
@@ -582,6 +604,9 @@ func (m *BpfMaps) Close() error {
 		m.FdbEventRb,
 		m.FdbMap,
 		m.FdbOwnerMap,
+		m.FibGlobalModeMap,
+		m.FibLocalV4Map,
+		m.FibLocalV6Map,
 		m.HeadendL2ExtMap,
 		m.HeadendL2Map,
 		m.HeadendL2Progs,
@@ -620,11 +645,12 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
-	BumModeDefault *ebpf.Variable `ebpf:"bum_mode_default"`
-	BumXdpEnabled  *ebpf.Variable `ebpf:"bum_xdp_enabled"`
-	BumXdpNative   *ebpf.Variable `ebpf:"bum_xdp_native"`
-	EnableStats    *ebpf.Variable `ebpf:"enable_stats"`
-	FibLookupTbid  *ebpf.Variable `ebpf:"fib_lookup_tbid"`
+	BumModeDefault      *ebpf.Variable `ebpf:"bum_mode_default"`
+	BumXdpEnabled       *ebpf.Variable `ebpf:"bum_xdp_enabled"`
+	BumXdpNative        *ebpf.Variable `ebpf:"bum_xdp_native"`
+	EnableStats         *ebpf.Variable `ebpf:"enable_stats"`
+	FibLookupGlobalAuto *ebpf.Variable `ebpf:"fib_lookup_global_auto"`
+	FibLookupTbid       *ebpf.Variable `ebpf:"fib_lookup_tbid"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.

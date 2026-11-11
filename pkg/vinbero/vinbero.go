@@ -12,6 +12,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/fibmode"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"go.uber.org/zap"
@@ -56,6 +57,9 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 	}
 
 	if err := resolveFibLookupTBID(&cfg.InternalConfig.BpfOptions, bpf.ProbeFibLookupTBID, logger); err != nil {
+		return nil, err
+	}
+	if err := resolveFibLookupGlobal(&cfg.InternalConfig.BpfOptions, logger); err != nil {
 		return nil, err
 	}
 
@@ -181,6 +185,35 @@ func resolveFibLookupTBID(opts *config.BpfConfig, probe func() (bool, error), lo
 	return nil
 }
 
+// resolveFibLookupGlobal decides, after resolveFibLookupTBID and before the
+// programs load, whether the global VRF's lookups may run as direct lookups
+// (FibLookupGlobalAuto sets the program's fib_lookup_global_auto). "auto"
+// needs the table-ID lookups: without them the VRF tables are not closed,
+// and a lookup on a VRF device or an enslaved port would have to go on to
+// the main table, which a direct lookup does not do. It then stays "rules",
+// logged once here.
+func resolveFibLookupGlobal(opts *config.BpfConfig, logger *zap.Logger) error {
+	switch opts.FibLookupGlobal {
+	case "", "rules":
+		return nil
+	case "auto":
+	default:
+		return fmt.Errorf(`internal.bpf.fib_lookup_global %q: want "rules" or "auto"`, opts.FibLookupGlobal)
+	}
+	if opts.FibLookupTBIDOff {
+		logger.Warn(`internal.bpf.fib_lookup_global is "auto" but table-ID FIB lookups are off (see the fib_lookup_tbid line above): the global VRF keeps the full lookup ("rules")`)
+		return nil
+	}
+	opts.FibLookupGlobalAuto = true
+	return nil
+}
+
+// FibLookupGlobalAuto reports whether the data plane may run the global
+// VRF's lookups as direct lookups (pkg/fibmode decides when).
+func (v *Vinbero) FibLookupGlobalAuto() bool {
+	return v.cfg.InternalConfig.BpfOptions.FibLookupGlobalAuto
+}
+
 // FibLookupTBID reports whether tenant encapsulations look the outer header
 // up in the main table directly, which is what lets VRF tables be closed.
 func (v *Vinbero) FibLookupTBID() bool {
@@ -224,6 +257,17 @@ func (v *Vinbero) StartEncapNeighKeeper(ctx context.Context) error {
 	k := bpf.NewEncapNeighKeeper(v.mapOps, v.logger)
 	v.mapOps.SetEncapChangeHook(k.Notify)
 	return k.Run(ctx)
+}
+
+// StartFibLookupMode follows the network namespace and switches each address
+// family of the global VRF's lookups between the full and the direct lookup
+// (pkg/fibmode). A no-op unless internal.bpf.fib_lookup_global is "auto"
+// and the kernel has table-ID lookups.
+func (v *Vinbero) StartFibLookupMode(ctx context.Context) error {
+	if !v.FibLookupGlobalAuto() {
+		return nil
+	}
+	return fibmode.New(v.mapOps, v.logger).Start(ctx)
 }
 
 const defaultStatePath = "/var/lib/vinbero/state.json"

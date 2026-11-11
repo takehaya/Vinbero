@@ -330,7 +330,8 @@ static __always_inline int endpoint_resolve_adjacency(
     if (inner_src6)
         __builtin_memcpy(fib_params.ipv6_src, inner_src6, sizeof(fib_params.ipv6_src));
     __builtin_memcpy(fib_params.ipv6_dst, nexthop, sizeof(fib_params.ipv6_dst));
-    if (bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0) != BPF_FIB_LKUP_RET_SUCCESS)
+    __u32 flags = srv6_fib_global_flags(AF_INET6, fib_params.ipv6_dst);
+    if (bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), flags) != BPF_FIB_LKUP_RET_SUCCESS)
         return -1;
     __builtin_memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
     __builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
