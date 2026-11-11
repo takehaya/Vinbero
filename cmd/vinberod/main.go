@@ -457,6 +457,10 @@ func run(cliCtx *cli.Context) error {
 		// ordinary service SID. Vinbero's own behaviors are not claimable.
 		claimRegistry := demux.NewClaimRegistry(gobgp.BuiltinEndpointBehaviors())
 		routeDemux.SetClaimRegistry(claimRegistry)
+		// A claimed VPN path takes its prefix from the applier only in the
+		// VRFs that import it; another tenant's route for the same prefix
+		// is still the applier's.
+		routeDemux.SetVPNImportResolver(applier.ImportVRFs)
 		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
 			return fmt.Errorf("register BGP applier: %w", err)
 		}

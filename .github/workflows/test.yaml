@@ -123,8 +123,10 @@ jobs:
         # controller and parity tests instead of skipping them.
         # sdk/go/cplaneharness runs in the "Unit Test (cplane harness)" job.
         run: |
-          # Assigned on its own line so a failing go list fails the step
-          # instead of leaving go test without package arguments.
+          set -o pipefail
+          # pipefail makes a failing go list fail the step (otherwise the
+          # pipeline takes grep's status and go test runs a partial list);
+          # test -n catches an empty list.
           pkgs=$(go list ./... | grep -v '/sdk/go/cplaneharness$')
           test -n "$pkgs"
           VINBERO_CPLANE_PARITY=1 go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m $pkgs

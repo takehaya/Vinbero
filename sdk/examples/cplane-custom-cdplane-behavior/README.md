@@ -54,7 +54,7 @@ Advertiser and local endpoint, registered with `--locator LOC2 --vrf vrf-cust --
 | `routing.decap_vrf` | Required with SID allocation, and requests one; selects a host-authorized VRF grant, separate from endpoint aux bytes |
 | `routing.prefix`, `routing.next_hop` | Both required to advertise an IPv4 VPN prefix; next hop must be a usable native IPv6 address |
 | `routing.vrf` | VRF to advertise into; defaults to the scope's only VRF |
-| `routing.headend_vrf` | VRF of the headend entries for received routes; the global VRF when omitted |
+| `routing.headend_vrf` | VRF of the headend entries for received routes; the global VRF when omitted. The behavior claim keeps the built-in applier off a received prefix only in the VRFs that import the route, so name one of those |
 | `endpoint.allowed_underlay_prefix` | Required with SID allocation; allowed outer IPv6 source prefix, including `::/0` to permit all sources |
 
 Prefixes are masked to their network address.

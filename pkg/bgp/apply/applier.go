@@ -219,7 +219,7 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 	case ev.SRPolicy != nil:
 		a.srPolicy.apply(*ev.SRPolicy, ev.IsWithdraw)
 	case ev.VPN != nil:
-		a.applyVPN(ev.VPN, ev.Source, ev.IsWithdraw)
+		a.applyVPN(ev.VPN, ev.Source, ev.IsWithdraw, ev.ExcludedVRFs)
 	case ev.Unicast != nil:
 		a.applyUnicast(ev.Unicast, ev.IsWithdraw)
 	case ev.EVPN != nil:
@@ -413,7 +413,18 @@ func (a *Applier) vpnImportVRFs(vr *bgp.VPNRoute) ([]uint32, bool) {
 	return ids, true
 }
 
-func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
+// ImportVRFs is the VRFs a received VPN route is placed in: those whose
+// binding imports one of its route targets, the global VRF when no binding
+// declares the family, and none when the route matches no import RT. The
+// demux uses it to tell which VRFs a plugin's claimed path takes over.
+func (a *Applier) ImportVRFs(vr *bgp.VPNRoute) []uint32 {
+	vrfs, _ := a.vpnImportVRFs(vr)
+	return vrfs
+}
+
+// applyVPN places or removes one received path. excluded are VRFs that keep
+// out of it although they import it (see bgp.RouteEvent.ExcludedVRFs).
+func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool, excluded []uint32) {
 	a.vpnMu.Lock()
 	defer a.vpnMu.Unlock()
 	defer a.flushTrackedFailure(&a.vpnWriteFailed)
@@ -437,6 +448,11 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	// binding under fam keeps the historical default-allow, so vpnv4 /
 	// vpnv6 gate independently as bindings arrive per family.
 	vrfs, importAllowed := a.vpnImportVRFs(vr)
+	if len(excluded) > 0 {
+		// A plugin programs the prefix in these VRFs. The UPDATE replaces
+		// the path's placement, so it also leaves the ones it was in.
+		vrfs = slices.DeleteFunc(slices.Clone(vrfs), func(v uint32) bool { return slices.Contains(excluded, v) })
+	}
 	path, diagnostic := selectVPNPath(vr, importAllowed)
 	switch diagnostic {
 	case vpnImportDenied:

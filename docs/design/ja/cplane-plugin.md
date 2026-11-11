@@ -241,16 +241,25 @@ built-in applier に配りません。
 
 UPDATE で behavior が変わった場合も担当を切り替えます。built-in に渡した
 path が claimed へ変わったら、以前の配送内容を withdraw として渡してから
-新しい UPDATE を plugin に配ります。VPN の抑止は family と prefix の単位で、
-RD と VRF を区別しません。その prefix の path に claimed が 1 本でもあれば
-built-in へ渡した path をすべて撤去します。通常の path の
-UPDATE でこの抑止を抜けることはできず、最後の claimed path が消えたら
-残っている通常の path を built-in に再配送します。
-この抑止は built-in の import RT / SID 検査より前で、demux は経路がどの VRF に
-入るかを知らないので、別 VRF 向けの claimed path でも同じ prefix を抑止します。
-2 つの tenant が同じ prefix を使う構成で、片方の経路を plugin の behavior で
-claim すると、もう片方の tenant の同じ prefix の経路も built-in に届きません。plugin が停止・復元失敗していても claim を
-保持している間は built-in に切り替えません。
+新しい UPDATE を plugin に配ります。
+
+VPN の抑止は VRF の単位です。demux は built-in と同じ import RT の規則で、
+claimed path が入る VRF を求めます。どの VRF binding もその family を宣言して
+いなければ global VRF です。同じ family と prefix の通常の path は、RD が違っても
+その VRF には built-in が置きません。headend の key は `{vrf, prefix}` なので、
+plugin が書く entry と同じ VRF で衝突するためです。通常の path を import する
+VRF がほかにもあれば、そこには built-in が置きます。2 つの tenant が同じ prefix を
+使っていて片方の経路を claim しても、もう片方の tenant の経路は built-in に届きます。
+1 つの claimed path を複数の VRF が import していれば、そのすべての VRF で抑止します。
+どの VRF も import しない claimed path は何も抑止しません。
+通常の path の UPDATE でこの抑止を抜けることはできず、VRF の最後の claimed path が
+消えたら、残っている通常の path をその VRF に再配送します。binding や import RT が
+変わったときの VPN の RIB replay は各 path の VRF を求め直すので、抑止する VRF も
+それに合わせて変わります。VPN 以外の family は NLRI 単位で抑止します。
+plugin が headend を書く VRF は plugin の設定で決まり、claimed path の import 先とは
+関係しません。claimed path を import しない VRF に plugin が書くと、そこで built-in が
+同じ prefix の entry を持っていれば owner が違うので plugin の宣言が失敗します。
+plugin が停止・復元失敗していても claim を保持している間は built-in に切り替えません。
 
 unregister の Refresh では behavior claim を保持し、その claim に該当する保持経路の再広告を防ぎます。
 claim の解放そのものでは replay しません。
