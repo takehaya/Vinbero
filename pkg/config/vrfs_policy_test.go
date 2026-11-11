@@ -14,8 +14,12 @@ func TestVRFsPolicyDeclared(t *testing.T) {
 		{"vrfs:\n  default_deny: false\n", true},
 		{"vrfs:\n  deny_action: drop\n", true},
 		{"vrfs:\n  default_deny: true\n", true},
+		{"vrfs:\n  default_deny: ~\n", true},
+		{"vrfs:\n  default_deny:\n", true},
+		{"vrfs:\n  deny_action: null\n", true},
 		{"base: &b\n  default_deny: false\nvrfs:\n  <<: *b\n", true},
-		{"base: &b\n  deny_action: pass\nvrfs: *b\n", true},
+		{"base: &b\n  default_deny: false\nvrfs: *b\n", true},
+		{"base: &b\n  default_deny: false\nvrfs:\n  <<: [*b]\n", true},
 	} {
 		cfg, err := Load(tc.yaml)
 		if err != nil {
