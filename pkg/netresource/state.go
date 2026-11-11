@@ -249,10 +249,11 @@ func (m *ResourceManager) persist() error {
 	m.mu.RLock()
 	data, err := json.MarshalIndent(m.state, "", "  ")
 	m.mu.RUnlock()
-	if err != nil {
-		return err
+	if err == nil {
+		err = writeFileAtomic(m.statePath, data)
 	}
-	return writeFileAtomic(m.statePath, data)
+	m.fileBehind.Store(err != nil)
+	return err
 }
 
 // writeFileAtomic writes data to path through a same-directory temp file and

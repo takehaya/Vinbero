@@ -140,6 +140,8 @@ RPC は、`headend_l2_map` と `state.json` の両方を書けたときだけ成
 - `hl2 flush`: 全回線に削除中の印を付けてから map を空にし、記録を消します。失敗時の扱いは削除と同じです
 - interface が消えた回線の削除: 名前がもう解決できなくても、その名前と VLAN の記録が残っていれば (link watcher が消す前など) 消して成功を返します。記録も entry も無ければ従来どおり `not_found` です
 
+binding と同じく、state.json の rename が済んだ後に directory の fsync だけが失敗した場合は、エラーを返しても file が新しい内容を持つことがあります。次に state.json を書いたときに、メモリの内容にそろいます。
+
 作成の map への書き込みと保存の間で daemon が強制終了すると、pin した map には記録の無い entry が残ります。RPC は成功を返していません。記録の無い entry (この field を知らない版が pin した map に残したもの) は取り込まず、そのまま残します。作り直すと記録されます。
 
 - `runtime_l2_circuits` が無い state.json は、保存した回線が無いものとして読みます

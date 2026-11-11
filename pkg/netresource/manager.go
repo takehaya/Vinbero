@@ -18,6 +18,10 @@ type ResourceManager struct {
 	state     *ManagedState
 	mu        sync.RWMutex
 	writeMu   sync.Mutex // serializes persist (see there)
+	// fileBehind is set when a write of the state file failed, so the file
+	// may lack what memory holds; the next save then writes even a record
+	// equal to the one in memory. Changed under writeMu.
+	fileBehind atomic.Bool
 	// configNoUnreachable is the config's no_unreachable_default by VRF
 	// name (SetConfigUnreachableDefault); Reconcile applies it.
 	configNoUnreachable map[string]bool
@@ -256,7 +260,7 @@ func (m *ResourceManager) SaveRuntimeVrfBindings(bindings []ManagedVrfBinding) e
 	defer m.writeMu.Unlock()
 	m.mu.Lock()
 	prev := m.state.RuntimeVrfBindings
-	if (len(prev) == 0 && c == nil) || reflect.DeepEqual(prev, c) {
+	if ((len(prev) == 0 && c == nil) || reflect.DeepEqual(prev, c)) && !m.fileBehind.Load() {
 		m.mu.Unlock()
 		return nil
 	}
@@ -267,10 +271,12 @@ func (m *ResourceManager) SaveRuntimeVrfBindings(bindings []ManagedVrfBinding) e
 		err = writeFileAtomic(m.statePath, data)
 	}
 	if err != nil {
+		m.fileBehind.Store(true)
 		m.mu.Lock()
 		m.state.RuntimeVrfBindings = prev
 		m.mu.Unlock()
 		return fmt.Errorf("persist state after updating VRF bindings: %w", err)
 	}
+	m.fileBehind.Store(false)
 	return nil
 }

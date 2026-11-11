@@ -172,9 +172,13 @@ func (c *L2Circuits) Create(ckt L2Circuit) error {
 		return undo(err)
 	}
 	// The interface can vanish between the lookup and the write, and the
-	// link watcher would then not see the entry.
-	if _, found, err := c.linkByIndex(ifindex); err == nil && !found {
+	// link watcher would then not see the entry. A rename the watcher
+	// recorded since the lookup is kept: the record takes the name and
+	// address the interface has now.
+	if link, found, err := c.linkByIndex(ifindex); err == nil && !found {
 		return undo(ErrL2InterfaceGone)
+	} else if err == nil {
+		ckt.Link.Name, ckt.Link.MAC = link.Name, link.MAC
 	}
 	if c.store == nil {
 		return nil

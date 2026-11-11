@@ -228,6 +228,19 @@ func TestL2CircuitsCreateSaveFailure(t *testing.T) {
 	}
 }
 
+// A rename between the RPC's lookup and the write is recorded: the circuit
+// carries the name the interface has once it is written.
+func TestL2CircuitsCreateRecordsRenameDuringCreate(t *testing.T) {
+	asked := LinkID{Name: "veth0", Ifindex: 7, MAC: macA}
+	c, _, s := newTestCircuits(map[uint32]LinkID{7: {Name: "veth0x", Ifindex: 7, MAC: macB}})
+	if err := c.Create(circuitOn(asked, 0, 100, esi1)); err != nil {
+		t.Fatal(err)
+	}
+	if s.file[0].Interface != "veth0x" || s.file[0].MAC != macB.String() {
+		t.Errorf("saved %+v, want the name and address after the rename", s.file[0])
+	}
+}
+
 // A circuit written while its interface was deleted is taken back and not
 // saved; a map write that fails is not saved either.
 func TestL2CircuitsCreateInterfaceGoneAndWriteFailure(t *testing.T) {

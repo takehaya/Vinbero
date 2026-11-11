@@ -73,14 +73,15 @@ func (m *ResourceManager) L2Circuits() []ManagedL2Circuit {
 // SaveL2Circuits records the L2 headend circuits and writes the state file.
 // Like SaveRuntimeVrfBindings, a failed write puts the previous record back,
 // so the caller can undo its change and memory and file stay the same. A
-// record equal to the saved one is not written again.
+// record equal to the one in memory is not written again, unless an earlier
+// write failed.
 func (m *ResourceManager) SaveL2Circuits(circuits []ManagedL2Circuit) error {
 	c := cloneL2Circuits(circuits)
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
 	m.mu.Lock()
 	prev := m.state.RuntimeL2Circuits
-	if reflect.DeepEqual(prev, c) {
+	if reflect.DeepEqual(prev, c) && !m.fileBehind.Load() {
 		m.mu.Unlock()
 		return nil
 	}
@@ -91,11 +92,13 @@ func (m *ResourceManager) SaveL2Circuits(circuits []ManagedL2Circuit) error {
 		err = writeFileAtomic(m.statePath, data)
 	}
 	if err != nil {
+		m.fileBehind.Store(true)
 		m.mu.Lock()
 		m.state.RuntimeL2Circuits = prev
 		m.mu.Unlock()
 		return fmt.Errorf("persist state after updating L2 circuits: %w", err)
 	}
+	m.fileBehind.Store(false)
 	return nil
 }
 

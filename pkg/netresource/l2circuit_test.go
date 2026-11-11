@@ -84,13 +84,13 @@ func TestL2Circuits_SaveAndDropFailure(t *testing.T) {
 	if err := m.SaveL2Circuits(sampleCircuits()[:1]); err != nil {
 		t.Fatal(err)
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
 	if err := os.Chmod(filepath.Join(dir, "sub"), 0o500); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chmod(filepath.Join(dir, "sub"), 0o755) }()
-	if os.Geteuid() == 0 {
-		t.Skip("root writes into a read-only directory")
-	}
 	if err := m.SaveL2Circuits(sampleCircuits()); err == nil {
 		t.Fatal("save into a read-only directory succeeded")
 	}
@@ -102,5 +102,20 @@ func TestL2Circuits_SaveAndDropFailure(t *testing.T) {
 	}
 	if got := m.L2Circuits(); len(got) != 0 {
 		t.Errorf("after a failed drop: %+v", got)
+	}
+	// The file still has the dropped circuit: a save equal to memory writes
+	// it all the same.
+	if err := os.Chmod(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SaveL2Circuits(nil); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.L2Circuits(); len(got) != 0 {
+		t.Errorf("the file kept %+v after a save equal to memory", got)
 	}
 }
