@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/netlinksub"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -69,6 +71,8 @@ type FDBWatcher struct {
 	// subscribe opens the FDB event stream (netlink.NeighSubscribeWithOptions);
 	// tests replace it.
 	subscribe func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, options netlink.NeighSubscribeOptions) error
+	// subSt follows the subscription and logs its state changes.
+	subSt *netlinksub.State
 	// started is set once Start subscribed. Guarded by mu.
 	started      bool
 	done         chan struct{}
@@ -96,6 +100,7 @@ func NewFDBWatcher(mapOps *bpf.MapOperations, logger *zap.Logger) *FDBWatcher {
 		allowed:    make(map[int]uint16),
 		neighList:  netlink.NeighList,
 		subscribe:  netlink.NeighSubscribeWithOptions,
+		subSt:      netlinksub.New(logger, "FDB"),
 		deviceAddr: linkHardwareAddr,
 		done:       make(chan struct{}),
 	}
@@ -143,22 +148,37 @@ func (w *FDBWatcher) UnregisterBridge(ifindex int) {
 	delete(w.allowed, ifindex)
 }
 
-// Start begins watching FDB updates.
+// Start begins watching FDB updates in the calling thread's network
+// namespace. It subscribes, then replays the bridges' existing FDB as adds
+// before it returns; the updates that arrived meanwhile are applied after
+// the replay, so the latest state wins. A subscription that ends (e.g. a
+// receive buffer overflow) is subscribed again (netlinksub), and the FDB is
+// replayed again, so a MAC learned or moved in between still arrives. A MAC
+// the bridge removed in between stays in fdb_map until an aging pass removes
+// it (fdb_aging_seconds, or the local aging that runs for xdp-mode BDs and
+// MAC sinks).
 func (w *FDBWatcher) Start(ctx context.Context) error {
-
-	updates := make(chan netlink.NeighUpdate, 256)
-
-	if err := w.subscribe(updates, w.done, netlink.NeighSubscribeOptions{
-		ListExisting: true,
-	}); err != nil {
+	if w.subSt == nil {
+		w.subSt = netlinksub.New(w.logger, "FDB")
+	}
+	ns, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("FDB watcher: %w", err)
+	}
+	updates, stop, err := w.subscribeFDB()
+	if err != nil {
+		_ = ns.Close()
 		return err
 	}
+	listing := netlinksub.NewListing(w.logger, "FDB")
+	again := listing.Result(w.replayFDB())
 	w.mu.Lock()
 	w.started = true
 	w.mu.Unlock()
 
 	w.wg.Go(func() {
-		w.processUpdates(ctx, updates)
+		defer func() { _ = ns.Close() }()
+		w.follow(ctx, ns, updates, stop, listing, again)
 	})
 
 	// Start aging timer if configured
@@ -173,6 +193,78 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// subscribeFDB subscribes to neighbour updates in the calling thread's
+// network namespace. Closing stop ends the subscription.
+func (w *FDBWatcher) subscribeFDB() (<-chan netlink.NeighUpdate, chan struct{}, error) {
+	updates := make(chan netlink.NeighUpdate, 256)
+	stop := make(chan struct{})
+	if err := w.subscribe(updates, stop, netlink.NeighSubscribeOptions{
+		ErrorCallback:     w.subSt.OnError,
+		ReceiveBufferSize: 1 << 20, // a burst of learning must not overflow it
+	}); err != nil {
+		close(stop)
+		return nil, nil, fmt.Errorf("subscribe to FDB updates: %w", err)
+	}
+	return updates, stop, nil
+}
+
+// replayFDB delivers the existing FDB entries of the registered bridges as
+// adds. It lists them with a request of its own: the library's ListExisting
+// would send the request to every other subscriber of the neighbour group
+// (netlinksub). What an interrupted dump returned is delivered too, and the
+// error is returned for a retry.
+func (w *FDBWatcher) replayFDB() error {
+	neighs, err := w.neighList(0, unix.AF_BRIDGE)
+	for i := range neighs {
+		w.handleNeighUpdate(netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH, Neigh: neighs[i]})
+	}
+	if err != nil {
+		return fmt.Errorf("list the existing FDB: %w", err)
+	}
+	return nil
+}
+
+// follow applies the subscription's updates until the watcher stops. It
+// subscribes again in ns each time the subscription ends and replays the FDB
+// then, and repeats a replay that failed when again fires.
+func (w *FDBWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-chan netlink.NeighUpdate, stop chan struct{}, listing *netlinksub.Listing, again <-chan time.Time) {
+	if err := enterNetns(ns); err != nil {
+		w.logger.Warn("FDB watcher: cannot enter the network namespace it watches; a resubscribe may watch another", zap.Error(err))
+	}
+	quit := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-w.done:
+		}
+		close(quit)
+	}()
+	for {
+		select {
+		case <-quit:
+			close(stop)
+			go drain(updates)
+			return
+		case <-again:
+			again = listing.Result(w.replayFDB())
+		case update, ok := <-updates:
+			if ok {
+				w.handleNeighUpdate(update)
+				continue
+			}
+			close(stop)
+			if !w.subSt.Again(quit, func() error {
+				var err error
+				updates, stop, err = w.subscribeFDB()
+				return err
+			}) {
+				return
+			}
+			again = listing.Result(w.replayFDB())
+		}
+	}
 }
 
 // SetXDPLearnedBDs installs the predicate that marks xdp-mode BDs. Call
@@ -347,7 +439,7 @@ func (w *FDBWatcher) SetAgingSeconds(seconds int) {
 // by EVPN RT2 auto-advertise. A second call replaces it, and a nil sink
 // removes it, leaving any sink added through AddMACSink in place. It is safe
 // to call at any time (guarded by w.mu), but setting it after Start means the
-// boot-time ListExisting replay has already run, so MACs present at that point
+// boot-time replay of the existing FDB has already run, so MACs present at that point
 // are not delivered to the sink.
 func (w *FDBWatcher) SetMACSink(sink MACSink) {
 	w.mu.Lock()
@@ -525,22 +617,6 @@ func (w *FDBWatcher) withdrawAged(aged []bpf.AgedFdbEntry) {
 	w.logger.Info("FDB aging: deleted stale entries", zap.Int("count", len(aged)))
 }
 
-func (w *FDBWatcher) processUpdates(ctx context.Context, updates <-chan netlink.NeighUpdate) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-w.done:
-			return
-		case update, ok := <-updates:
-			if !ok {
-				return
-			}
-			w.handleNeighUpdate(update)
-		}
-	}
-}
-
 func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 	neigh := update.Neigh
 
@@ -674,7 +750,7 @@ func isUnicastMAC(mac net.HardwareAddr) bool {
 
 // DumpBridge replays a registered bridge's existing kernel FDB through the same
 // sync-then-advertise path as a live add, for EVPN RT2 auto-advertise. The
-// boot-time ListExisting replay in Start only reaches the sink if it was set
+// boot-time replay of the existing FDB in Start only reaches the sink if it was set
 // before Start; a bridge registered later (or whose sink is wired after Start)
 // needs this to pick up MACs already learned. Each MAC is re-synced into the BPF
 // fdb_map (idempotent, and a backstop for a failed Start-time Put) and advertised

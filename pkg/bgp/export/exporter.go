@@ -158,7 +158,7 @@ func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manage
 // redistribute set, enables the IPv6 unicast underlay if configured, and begins
 // watching the kernel routing tables. EnableVRF mints each VRF's End.DT4/DT6
 // service SID and returns the table the watcher must observe; the watcher's
-// ListExisting replay then advertises prefixes already present at boot. A
+// replay of the existing routes then advertises prefixes already present at boot. A
 // binding with no redistribute set is left receive-only. If any step fails, the
 // VRFs already enabled in this call are unwound so a partial startup leaves no
 // orphaned SID.
@@ -446,9 +446,9 @@ func (e *Exporter) vrfAdvertiseUnchanged(b vrfbgp.Binding) bool {
 // enableAndWatch enables one VRF binding and registers its table with the
 // watcher, disabling the VRF on a RegisterTable failure so no SID leaks. With
 // replay=true it also dumps the table's existing routes -- needed for a runtime
-// add, where the subscription's ListExisting (which only fires at Start) did not
-// cover a table registered now. The boot path (Start) passes replay=false: its
-// ListExisting already covers every table registered before Start.
+// add, where the watcher's replay of the existing routes (which only runs at
+// Start) did not cover a table registered now. The boot path (Start) passes
+// replay=false: that replay already covers every table registered before Start.
 func (e *Exporter) enableAndWatch(b vrfbgp.Binding, replay bool) error {
 	table, err := e.EnableVRF(b)
 	if err != nil {
@@ -528,7 +528,7 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 	}
 	if added {
 		if _, dup := st.advertised[key]; dup {
-			// Already advertised (a ListExisting refresh or a duplicate
+			// Already advertised (a replay of the existing routes or a duplicate
 			// RTM_NEWROUTE); the gobgp path is unchanged, so skip the redundant
 			// AddPath and log.
 			return

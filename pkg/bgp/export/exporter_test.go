@@ -486,7 +486,7 @@ func TestOnRouteAddIsIdempotent(t *testing.T) {
 	}
 	p := netip.MustParsePrefix("10.0.0.0/24")
 	e.OnRoute(testTable, p, true)
-	e.OnRoute(testTable, p, true) // duplicate NEWROUTE / ListExisting refresh
+	e.OnRoute(testTable, p, true) // duplicate NEWROUTE / replay of the existing routes
 	if len(adv.advertised) != 1 {
 		t.Errorf("a duplicate add should advertise once, got %d", len(adv.advertised))
 	}

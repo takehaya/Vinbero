@@ -68,7 +68,7 @@ func openNetns(path string) (*netlink.Handle, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open netns %s: %w", path, err)
 	}
-	h, err := netlink.NewHandleAt(ns)
+	h, err := netlink.NewHandleAt(ns, unix.NETLINK_ROUTE)
 	if err != nil {
 		_ = ns.Close()
 		return nil, nil, fmt.Errorf("netlink in netns %s: %w", path, err)

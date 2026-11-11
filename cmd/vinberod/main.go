@@ -652,7 +652,7 @@ func run(cliCtx *cli.Context) error {
 
 		// Auto-advertise: the exporter enables each VRF binding with a
 		// redistribute set and starts watching. Starting after the demux means
-		// its ListExisting replay advertises boot-time prefixes through an
+		// its replay of the existing routes advertises boot-time prefixes through an
 		// already-running advertiser; the deferred Stop withdraws them before
 		// the session drops.
 		if exporter != nil {
@@ -664,7 +664,7 @@ func run(cliCtx *cli.Context) error {
 		// EVPN RT2 auto-advertise: feed the FDBWatcher's local MAC events to the
 		// EVPN exporter. The sink is set here, after the FDBWatcher has already
 		// started (StartFDBWatcher, above), so MACs present at that boot
-		// ListExisting replay are NOT captured; a MAC learned after a
+		// replay of the existing FDB are NOT captured; a MAC learned after a
 		// VrfBridgeAttach enables its bridge domain is. VrfBridgeAttach / VrfBgpBind
 		// replay a bridge's existing FDB via the coordinator, so a bridge that
 		// predates the bind is still picked up.

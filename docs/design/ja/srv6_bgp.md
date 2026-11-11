@@ -118,6 +118,8 @@ service SID は RFC 9252 §4 の transposition で運ばれ、SID の一部が M
 
 広報は VRF ごとに行います。auto-advertise は binding の VRF の kernel table を見て、その VRF の RD、export RT、その VRF の End.DT4/DT6 の SID で経路を出します。2 つの VRF が同じ prefix を持っていても、RD が違えば別の経路として広報され、受信側では RT で別々の VRF に入ります。同じ RD を 2 つの VRF に付けると、同じ prefix の経路は BGP で 1 つになるので、VRF ごとに別の RD を使います。
 
+auto-advertise は kernel の経路の event を購読してから、binding の table の既存の経路を別の request で読んで広報します。購読が終わったとき (受信 buffer の溢れなど) は、encap の next hop の keeper と同じ待ち方と log で購読し直し ([vrf.md](vrf.md#encap-の-next-hop-の-neighbour))、table を読み直します。広報済みで table から消えた prefix を先に取り消し、その間に増えた経路をそれから広報します (`max_prefixes` の枠を先に空けるためです)。table の読み込みが失敗したとき (kernel が dump を中断したときを含みます) は、購読し直しと同じ待ち方で読み直し、warning (`netlink listing incomplete; retrying`) を error が変わったときだけ出します。
+
 ## color: 通す経路の意図を付ける
 
 color extended community (RFC 9012) は、経路に特定の path を通すという意図を付ける 32bit のタグです。VPN 経路に color が付いていると、その経路宛のトラフィックを、bare な service SID へ直行させるのではなく、指定の path 上に乗せたい、という意味になります。
