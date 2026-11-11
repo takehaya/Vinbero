@@ -62,6 +62,17 @@ The core End SID is in `fd00:300::/48`; FRR's End and service SID are in
 `fd00:200::/48`. The pe-tokyo and core static routes carry each to its next
 hop.
 
+## The global VRF
+
+This scenario has no VRF binding with import route targets, so every
+received VPN route is accepted (default-allow) and installed in the global
+VRF. The CE port (`eth2`) has no access circuit, so its packets are looked up
+in the global VRF too. `test.sh` checks the routes there: `headend-v4 list --vrf global`. To run it
+as a tenant VRF instead, the CE port needs an access circuit of the VRF
+(`vbctl vrf ac-add`) and the VRF a binding that imports the routes' route
+targets; the routes are then installed in that VRF only, and no packet of
+the global VRF reaches them.
+
 ## Run
 
 Needs Docker, `containerlab`, and `sudo`. From `examples/interop-clab/`:

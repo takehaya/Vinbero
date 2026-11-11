@@ -81,19 +81,19 @@ fi
 # --- 2. Color routes resolve onto the learned policies ---------------------
 echo ""
 echo "[2] color routes resolve onto the learned policies"
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '10.2.0.0/24'" \
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '10.2.0.0/24'" \
    && dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -q '\*'; then
     ok "pe-tokyo: 10.2.0.0/24 in headend-v4 map, policy has an active candidate"
 else
     ng "pe-tokyo: 10.2.0.0/24 not steered"
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
 fi
-if retry bash -c "docker exec $PE_OSAKA vbctl headend-v4 list 2>/dev/null | grep -q '10.1.0.0/24'" \
+if retry bash -c "docker exec $PE_OSAKA vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '10.1.0.0/24'" \
    && dexec "$PE_OSAKA" vbctl sr-policy list 2>/dev/null | grep -q '\*'; then
     ok "pe-osaka: 10.1.0.0/24 in headend-v4 map, policy has an active candidate"
 else
     ng "pe-osaka: 10.1.0.0/24 not steered"
-    dexec "$PE_OSAKA" vbctl headend-v4 list || true
+    dexec "$PE_OSAKA" vbctl headend-v4 list --vrf global || true
 fi
 
 # --- 3. Data plane: bidirectional, steered through the waypoint ------------

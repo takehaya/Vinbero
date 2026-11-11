@@ -10,8 +10,10 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
-// vpnFamilies are the families the VPN loc-rib replay re-evaluates.
-var vpnFamilies = []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6}
+// vpnFamilies are the families the loc-rib replay re-evaluates when the
+// import filter changes: the routes placed in the VRFs that import them,
+// L3VPN and MUP.
+var vpnFamilies = []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6, bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6}
 
 // vpnImportFilterHook turns the binding manager's import filter changes into
 // VPN loc-rib replay requests. The import-RT filter decides a route once,

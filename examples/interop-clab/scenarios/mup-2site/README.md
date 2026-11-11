@@ -62,7 +62,12 @@ mup-pe's DSD `65100:12`. VPN membership is decided by RT alone (RFC 4364
 its VRF at runtime (`vbctl vrf-bgp bind`) with both RTs as `mup_ipv4` imports,
 which activates the session-route import filter (discovery routes bypass it);
 importing the uplink RT is what feeds the T2ST to mup-pe as the RFC 9433 §6.6
-UPF anchor.
+UPF anchor. The sessions therefore belong to mup-pe's VRF (`vrf-cust`): the
+T1ST downlink is a headend entry of `vrf-cust`, and mup-pe's DN port (`eth2`)
+is an access circuit of `vrf-cust` (`vbctl vrf ac-add` in
+`mup-pe/start.sh`), so the DN's packets are looked up there. mup-gw has no
+MUP binding, so its sessions are accepted by default-allow and its gate and
+F-TEID entries are in the global VRF.
 
 Resolution is order-independent: a session that arrives before its discovery
 route is deferred and installed once the route appears, and withdrawing the

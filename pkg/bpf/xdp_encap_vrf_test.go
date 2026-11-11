@@ -84,6 +84,8 @@ func (e *encapVrfEnv) redirectedToGateway(ret uint32, out []byte) bool {
 func TestXDPProgEncapOuterLookupFromTenantVRF(t *testing.T) {
 	h := newXDPTestHelper(t)
 	e := newEncapVrfEnv(t)
+	// The same packets go from the tenant AC (vrf 1) and from ports in vrf 0.
+	h.headendVRFs = []uint32{0, 1}
 
 	srcAddr, _ := ParseIPv6("fc00:e01::1")
 	segments, numSegments, _ := ParseSegments([]string{"fc00:e00::1"})
@@ -172,6 +174,7 @@ func TestXDPProgEncapOuterLookupFromTenantVRF(t *testing.T) {
 func TestXDPProgEncapOuterLookupWithoutTBID(t *testing.T) {
 	h := newXDPTestHelperWithConstants(t, map[string]any{"fib_lookup_tbid": uint8(0)})
 	e := newEncapVrfEnv(t)
+	h.headendVRFs = []uint32{0, 1}
 	src, _ := ParseIPv6("fc00:e01::1")
 	segments, numSegments, _ := ParseSegments([]string{"fc00:e00::1"})
 	h.createHeadendEntry("10.99.0.0/24", src, [16]byte{}, segments, numSegments, true)

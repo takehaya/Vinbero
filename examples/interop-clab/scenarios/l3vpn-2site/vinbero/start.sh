@@ -57,12 +57,13 @@ ethtool -K eth2 rxvlan off 2>/dev/null || true
 # in a dedicated routing table. The VRF device itself is created through
 # Vinbero (`vbctl vrf create` below, after the daemon is up) so it is a
 # first-class VRF object with a vrf_id; the route can go into table 100
-# already (tables exist implicitly, no device needed). eth2 is
-# intentionally NOT enslaved to the VRF: the H.Encaps path (CE -> FRR)
-# leaves the encapsulated IPv6 packet to the *main* table for the
-# fd00:200::/48 underlay route, while the decap path (FRR -> CE) hands
-# the End.DT4 BPF FIB lookup the VRF device so it resolves the customer
-# prefix from table 100 instead.
+# already (tables exist implicitly, no device needed). eth2 is neither
+# enslaved to the VRF nor one of its access circuits: this is a global-VRF
+# example (see README), so the CE's packets are looked up in the global
+# VRF's headend entries, where the received VPN routes are installed, and
+# the encapsulated packet's outer header in the main table. The decap path
+# (FRR -> CE) hands the End.DT4 BPF FIB lookup the VRF device so it
+# resolves the customer prefix from table 100.
 ip route replace 10.1.0.0/24 dev eth2 table 100
 
 # --- static underlay routes ------------------------------------------------

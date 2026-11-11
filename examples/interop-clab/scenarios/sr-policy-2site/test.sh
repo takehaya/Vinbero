@@ -120,11 +120,11 @@ fi
 # --- 3. FRR color route received + policy has an ACTIVE candidate ----------
 echo ""
 echo "[3] FRR -> Vinbero  (color-100 route resolves onto the policy)"
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
     ok "FRR's $OSAKA_PREFIX installed in Vinbero headend-v4 map"
 else
     ng "FRR's $OSAKA_PREFIX missing from Vinbero headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
 fi
 srp_active() {
     dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -q '\*'

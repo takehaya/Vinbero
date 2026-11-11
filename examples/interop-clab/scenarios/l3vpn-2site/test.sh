@@ -112,12 +112,12 @@ frr_has_export() {
 retry frr_has_export || true
 
 # 2a. FRR's VPNv4 route (ce-osaka subnet) lands in Vinbero's headend-v4 map.
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
     ok "FRR VPNv4 route $OSAKA_PREFIX installed in Vinbero headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list | sed 's/^/      /'
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global | sed 's/^/      /'
 else
     ng "FRR VPNv4 route $OSAKA_PREFIX missing from Vinbero headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
 fi
 
 # frr_route_sid digs the first path's remoteSid out of vtysh JSON
@@ -136,7 +136,7 @@ print(rds[0]['paths'][0].get('remoteSid','') if rds else '')"
 #     full SID, not the bare on-wire locator.
 frr_wire_sid=$(dexec "$PE_OSAKA" vtysh -c "show bgp ipv4 vpn $OSAKA_PREFIX json" 2>/dev/null \
   | frr_route_sid 2>/dev/null)
-vin_seg=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
+vin_seg=$(dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global 2>/dev/null \
   | awk -v p="$OSAKA_PREFIX" '$1==p {print $NF}')
 if [ "$vin_seg" = "$FRR_FULL_SID" ] && [ "$frr_wire_sid" != "$FRR_FULL_SID" ]; then
     ok "Vinbero folded the transposed SID: wire=$frr_wire_sid -> full=$vin_seg"
@@ -196,7 +196,7 @@ fi
 
 # (b) the learned VPN routes are installed on both PEs.
 gate_vin_headend() {
-    dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null | grep -q "$OSAKA_PREFIX"
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global 2>/dev/null | grep -q "$OSAKA_PREFIX"
 }
 gate_frr_rib() {
     dexec "$PE_OSAKA" ip route show vrf vrf-cust "$TOKYO_PREFIX" 2>/dev/null \

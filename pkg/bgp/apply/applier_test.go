@@ -483,6 +483,9 @@ func TestApplier_VPNv4Advertise(t *testing.T) {
 	}
 }
 
+// A withdraw of a route this process never placed touches nothing: an
+// entry a previous run left in a pinned map is removed by the boot
+// (PurgeBuiltinHeadends), and the VRF it was in is not known here.
 func TestApplier_VPNWithdraw(t *testing.T) {
 	fh := newFakeHeadend()
 	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
@@ -492,9 +495,19 @@ func TestApplier_VPNWithdraw(t *testing.T) {
 		IsWithdraw: true,
 		VPN:        &bgp.VPNRoute{Family: bgp.FamilyVPNv6, Prefix: "2001:db8::/48", RD: "65000:200"},
 	})
-	if len(fh.v6deleted) != 1 || fh.v6deleted[0] != "2001:db8::/48" {
-		t.Errorf("DeleteHeadendV6 = %v, want [2001:db8::/48]", fh.v6deleted)
+	if len(fh.v6deleted) != 0 {
+		t.Errorf("DeleteHeadendV6 = %v, want nothing for an untracked route", fh.v6deleted)
 	}
+}
+
+// vrfKey is the fake's key of prefix in the VRF named vrfName.
+func vrfKey(t *testing.T, vm *vrfbgp.Manager, vrfName, prefix string) string {
+	t.Helper()
+	id, ok := vm.VRF().IDForName(vrfName)
+	if !ok {
+		t.Fatalf("no VRF %q", vrfName)
+	}
+	return fakeHeadendKey(id, prefix)
 }
 
 func TestApplier_VPNRouteWithoutSIDSkipped(t *testing.T) {
@@ -579,8 +592,11 @@ func TestApplier_ImportRTFilter(t *testing.T) {
 			SRv6SID: "fd00:1:1:e::", RTs: []string{"65000:100"},
 		},
 	})
-	if _, ok := fh.v4created["10.10.0.0/24"]; !ok {
-		t.Errorf("route with a matched RT must be installed")
+	if _, ok := fh.v4created[vrfKey(t, vm, "vrf-a", "10.10.0.0/24")]; !ok {
+		t.Errorf("route with a matched RT must be installed in the VRF that imports it")
+	}
+	if _, ok := fh.v4created["10.10.0.0/24"]; ok {
+		t.Errorf("an imported route must not be installed in the global VRF")
 	}
 }
 
@@ -625,7 +641,7 @@ func TestApplier_ImportRTFilterPerFamily(t *testing.T) {
 			SRv6SID: "fd00:1:1:10::", RTs: []string{"65000:600"},
 		},
 	})
-	if _, ok := fh.v6created["2001:db8:6::/64"]; !ok {
+	if _, ok := fh.v6created[vrfKey(t, vm, "vrf-v6only", "2001:db8:6::/64")]; !ok {
 		t.Error("vpnv6 must accept a route whose RT the family-bound VRF imports")
 	}
 

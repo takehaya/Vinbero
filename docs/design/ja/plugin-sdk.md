@@ -141,11 +141,14 @@ struct headend_v4_key {
 // headend_v6_key は addr[16]、prefixlen は 32 + IPv6 prefix 長
 ```
 
-LPM の比較対象は `instance` から始まるので、vrf_id の 32 bit が必ず先に完全一致し、その後で宛先の prefix を比べます。`/p` の entry は `prefixlen = 32 + p` で格納されます。data plane は入口の VRF に関係なく vrf_id 0 (global VRF) で引きます。operator や control plane plugin が VRF を指定した entry は vrf_id 0 以外に入りますが、転送には使われません。プラグインがパケットの宛先で引く場合も vrf_id 0 で引きます。
+LPM の比較対象は `instance` から始まるので、vrf_id の 32 bit が必ず先に完全一致し、その後で宛先の prefix を比べます。`/p` の entry は `prefixlen = 32 + p` で格納されます。data plane は、front door が入口の AC から決めた vrf_id (`tailcall_ctx.vrf_id`、AC の無い入口は 0 = global VRF) で引きます。その VRF に一致する entry が無ければ、global VRF を引き直しません。プラグインがパケットの宛先で引く場合も、context の vrf_id で引きます。
 
 ```c
+struct tailcall_ctx *tctx = tailcall_ctx_read();
+if (!tctx)
+    return XDP_PASS;
 struct headend_v4_key key = { .prefixlen = HEADEND_KEY_VRF_BITS + 32 };
-__u32 vrf = bpf_htonl(0);
+__u32 vrf = bpf_htonl(tctx->vrf_id);
 __builtin_memcpy(key.instance, &vrf, sizeof(key.instance));
 __builtin_memcpy(key.addr, &iph->daddr, sizeof(key.addr));
 struct headend_entry *he = bpf_map_lookup_elem(&headend_v4_map, &key);

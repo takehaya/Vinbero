@@ -25,7 +25,7 @@ case "$node" in
     pe1)
         ctl "$PE1" plugin cplane register --name custom-cdplane-behavior "${args[@]}" \
             --config "$policy" --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
-            --capability headend --headend-prefix 10.2.0.0/24
+            --capability headend --headend-prefix 10.2.0.0/24 --vrf vrf-cust
         ;;
     pe2)
         ctl "$PE2" plugin cplane register --name custom-cdplane-behavior "${args[@]}" \

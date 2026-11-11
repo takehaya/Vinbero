@@ -49,9 +49,10 @@ WASM registrations without any write capability cannot import the apply function
 Each is also given a scope, which says where that capability may be
 exercised. pe-tokyo's plugin may install headend entries only inside
 10.2.0.0/16, so it cannot write a longer prefix over traffic this node
-already forwards -- every headend entry sits in the one global VRF and is
-matched on its destination, so that would win on longest match without ever
-touching the entry it shadows.
+already forwards -- pe-tokyo's customer port has no access circuit, so its
+packets and the plugin's entries are in the global VRF, where a longer
+prefix would win on longest match without ever touching the entry it
+shadows.
 pe-osaka's plugin may originate only into `vrf-cust`, allocate only from
 `LOC2`, and point a SID only at slot 32. The route distinguisher and route
 targets come from the VRF's binding rather than from the plugin, because
@@ -120,7 +121,12 @@ the traffic into the VRF.
 The customer interface is also `vrf-cust`'s access circuit (`vbctl vrf
 ac-add`). Vinbero ends the VRF's table in an unreachable default, so the
 reply from ce-osaka is encapsulated as a tenant packet: its outer header is
-looked up in the main table, not through the enslaved interface.
+looked up in the main table, not through the enslaved interface. The
+return route pe-osaka receives from pe-tokyo is imported into `vrf-cust`
+(the binding imports its route target), the VRF ce-osaka's packets are
+looked up in, so `test.sh` reads it with `headend-v4 list --vrf vrf-cust`.
+pe-tokyo has no import binding and no AC: its received routes and the
+plugin's entries are in the global VRF (`--vrf global`).
 
 ## Run
 

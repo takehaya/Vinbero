@@ -82,6 +82,9 @@ echo "[2] ECMP aggregation (two PEs -> one group)"
 group_json() {
     dexec "$PE_TOKYO" "$VBCTL" --json headend-group list 2>/dev/null
 }
+# A bare prefix is a trigger of the global VRF (one of a tenant VRF shows as
+# "<prefix> vrf <name>"): with no import binding the route is installed
+# there, and the CE's port has no AC, so its packets are looked up there.
 group_has_two_members() {
     group_json | python3 -c "
 import sys, json

@@ -40,7 +40,7 @@ XDPがテナントの口からkernelへ渡したパケットは、kernelのVRF t
 
 - host2は、host1宛ての通信をrouter1のEnd.DX4のSID `fc00:1::1` へカプセル化して送ります。これは別のPEのSIDで、router3ではmain tableにしか経路がありません。Vinberoがvrf100を管理する前は、パケットはmain tableへ進んでhost1に届きます
 - `vbctl vrf create --name vrf100 --table-id 100` でdeviceをadoptすると、table 100にIPv4とIPv6の `unreachable default` が入ります。同じパケットはVRF tableで止まります
-- host2からhost1への通信を運んでいたtable 100のkernelのseg6 routeも、外側のヘッダをmain tableで引く必要があるので、Vinberoが代わりにカプセル化します。`vbctl hv4 create` で、vrf100のACから来たパケットをカプセル化し、外側のヘッダはmain tableで引きます
+- host2からhost1への通信を運んでいたtable 100のkernelのseg6 routeも、外側のヘッダをmain tableで引く必要があるので、Vinberoが代わりにカプセル化します。`vbctl hv4 create --vrf vrf100` で、vrf100のACから来たパケットをカプセル化し、外側のヘッダはmain tableで引きます。パケットは入口のVRFのheadendエントリで引かれるので、エントリはvrf100に作ります
 - host1からhost2への通信（vrf100へのEnd.DT4）は変わらず届きます
 - router3は、カプセル化の外側のnext hop（静的経路で届くrouter2）をmanagedのneighbourとして保ちます。テストはそのneighbourのエントリーを消し、host2のpingだけを送ります。ほかの通信が無くても、pingは再び届きます。続いて経路をrouter2の別のアドレス（まだエントリーが無いもの）に移し、pingが再び届くことを確かめます
 

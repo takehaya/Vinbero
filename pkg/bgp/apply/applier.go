@@ -393,38 +393,24 @@ func (a *Applier) removeVPNRoute(rk vpnRouteKey, keep []uint32) []uint32 {
 	return left
 }
 
-// dropUntrackedVPN removes the global trigger of a prefix this process
-// never tracked. With pinned maps an entry installed before a restart
-// outlives the accumulator, and a withdraw (or an UPDATE that no longer
-// installs) arriving before the route is re-advertised is the only chance to
-// remove it. It is a no-op when the entry is already absent, and does
-// nothing while a global destination for the prefix exists: that trigger
-// belongs to the paths still tracked there.
-func (a *Applier) dropUntrackedVPN(rk vpnRouteKey) {
-	if len(a.vpnGroups.placed[rk]) > 0 {
-		return
-	}
-	if _, tracked := a.vpnGroups.dests[rk.dest(vrf.GlobalVRFID)]; tracked {
-		return
-	}
-	if err := a.deleteTrigger(vrf.GlobalVRFID, rk.family, rk.prefix); err != nil {
-		a.logger.Error("remove untracked VPN prefix",
-			zap.String("prefix", rk.prefix), zap.Error(err))
-	}
-}
-
 // vpnImportVRFs returns the VRFs a received VPN route is placed in, and
-// whether any VRF accepts it. A family no binding declares is default-allow
-// and places every route in the global VRF.
-//
-// Every accepted route is placed in the global VRF alone: the headend
-// lookup matches every packet there, whatever its ingress VRF.
+// whether any VRF accepts it: every VRF whose binding imports one of its
+// route targets, each with its own ECMP group and trigger. A family no
+// binding declares is default-allow and places every route in the global
+// VRF.
 func (a *Applier) vpnImportVRFs(vr *bgp.VPNRoute) ([]uint32, bool) {
 	targets, defaultAllow := a.vrfBindings.ImportTargetsForFamily(vr.RTs, vr.Family)
-	if !defaultAllow && len(targets) == 0 {
+	if defaultAllow {
+		return []uint32{vrf.GlobalVRFID}, true
+	}
+	if len(targets) == 0 {
 		return nil, false
 	}
-	return []uint32{vrf.GlobalVRFID}, true
+	ids := make([]uint32, len(targets))
+	for i, t := range targets {
+		ids[i] = t.ID
+	}
+	return ids, true
 }
 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
@@ -440,8 +426,9 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 		// Withdraw bypasses the import-RT filter so a route accepted
 		// earlier is always torn down, from every VRF it was placed in, and
 		// drops only this path: the prefix survives on whatever other PEs
-		// still advertise it.
-		a.dropUntrackedVPN(rk)
+		// still advertise it. An entry a previous run wrote is not this
+		// process's to find: the boot removes them all
+		// (PurgeBuiltinHeadends) before the data plane is attached.
 		a.removeVPNRoute(rk, nil)
 		return
 	}
@@ -472,7 +459,6 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 			zap.String("nexthop", vr.NextHop))
 	}
 	if path == nil {
-		a.dropUntrackedVPN(rk)
 		a.removeVPNRoute(rk, nil)
 		return
 	}

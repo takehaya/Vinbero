@@ -74,7 +74,7 @@ register() {
 }
 
 headend_sid() {
-    ctl "$PE1" --json headend-v4 list | jq -er '.[] | select(.trigger_prefix == "10.2.0.0/24") | .segments[0]'
+    ctl "$PE1" --json headend-v4 list --vrf vrf-cust | jq -er '.[] | select(.trigger_prefix == "10.2.0.0/24") | .segments[0]'
 }
 
 ready() {
@@ -87,7 +87,7 @@ ready() {
     [[ "$sid" == fd00:200:* ]] || return 1
     ctl "$PE2" --json sid list | jq -e --arg sid "$sid/128" \
         'any(.[]; .trigger_prefix == $sid and .action == 32)' >/dev/null || return 1
-    ctl "$PE2" --json headend-v4 list | jq -e \
+    ctl "$PE2" --json headend-v4 list --vrf vrf-cust | jq -e \
         'any(.[]; .trigger_prefix == "10.1.0.0/24")' >/dev/null
 }
 
@@ -215,7 +215,7 @@ print_success "JSON-file aux operations passed; Cplane-owned policy rejected man
 ctl "$PE2" plugin cplane unregister --name custom-cdplane-behavior
 withdrawn() {
     local entries sids
-    entries=$(ctl "$PE1" --json headend-v4 list) || return 1
+    entries=$(ctl "$PE1" --json headend-v4 list --all-vrfs) || return 1
     sids=$(ctl "$PE2" --json sid list) || return 1
     jq -e 'all((. // [])[]; .trigger_prefix != "10.2.0.0/24")' <<< "$entries" >/dev/null &&
         jq -e --arg sid "$sid/128" 'all((. // [])[]; .trigger_prefix != $sid)' <<< "$sids" >/dev/null

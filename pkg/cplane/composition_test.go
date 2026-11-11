@@ -222,7 +222,7 @@ func TestCompositionPermissionAndCleanup(t *testing.T) {
 	if err := putComposition(p, &v1.PluginApplyChunk{DesiredRevision: 3}); err == nil {
 		t.Fatal("cleanup failure hidden")
 	}
-	if len(f.uplinks) != 1 || f.owner4["192.0.2.1/32"] != headend.MUPGateOwner {
+	if len(f.uplinks) != 1 || f.owner4["vrf 7 192.0.2.1/32"] != headend.MUPGateOwner {
 		t.Fatal("released FT dependency")
 	}
 	f.failFTDelete = false
@@ -298,7 +298,9 @@ func TestSharedMUPGateRetainsOtherOwner(t *testing.T) {
 	p, f := compositionOps(t)
 	builtin := bpf.OwnerBGPMUPGate(65000)
 	mode := uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
-	if err := p.headend.SetGateReferences(AFv4, 0, "192.0.2.1/32", mode, builtin, 1); err != nil {
+	// The built-in applier holds the gate of the same VRF as the
+	// composition's uplinks (vrf 7).
+	if err := p.headend.SetGateReferences(AFv4, 7, "192.0.2.1/32", mode, builtin, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := putComposition(p, desiredComposition(1)); err != nil {
@@ -307,15 +309,15 @@ func TestSharedMUPGateRetainsOtherOwner(t *testing.T) {
 	if err := p.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if f.owner4["192.0.2.1/32"] != headend.MUPGateOwner {
+	if f.owner4["vrf 7 192.0.2.1/32"] != headend.MUPGateOwner {
 		t.Fatal("deleted sibling gate")
 	}
-	f.failDel = "192.0.2.1/32"
-	if err := p.headend.SetGateReferences(AFv4, 0, "192.0.2.1/32", mode, builtin, 0); err == nil {
+	f.failDel = "vrf 7 192.0.2.1/32"
+	if err := p.headend.SetGateReferences(AFv4, 7, "192.0.2.1/32", mode, builtin, 0); err == nil {
 		t.Fatal("delete failure ignored")
 	}
 	f.failDel = ""
-	if err := p.headend.SetGateReferences(AFv4, 0, "192.0.2.1/32", mode, builtin, 0); err != nil {
+	if err := p.headend.SetGateReferences(AFv4, 7, "192.0.2.1/32", mode, builtin, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.v4) != 0 {
@@ -386,7 +388,7 @@ func TestCompositionForwardingInventorySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.owner4["192.0.2.1/32"] != headend.MUPGateOwner {
+	if f.owner4["vrf 7 192.0.2.1/32"] != headend.MUPGateOwner {
 		t.Fatal("recovery removed gate")
 	}
 	f.failFTDelete = true

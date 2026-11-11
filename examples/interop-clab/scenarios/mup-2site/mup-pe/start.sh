@@ -59,6 +59,11 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 /usr/local/bin/vbctl sid create \
     --trigger-prefix fd00:d:0:1::/128 --action END_DT4 --vrf-name vrf-cust || true
 
+# eth2 (the data network port) is vrf-cust's access circuit. The T1ST
+# downlinks belong to vrf-cust (the binding below imports their RT), so they
+# are installed there, and the DN's packets have to be looked up there.
+/usr/local/bin/vbctl vrf ac-add --vrf vrf-cust --interface eth2 || true
+
 # Bind the MUP service instance (the DN VRF that End.DT4 decaps into) at
 # runtime via the operator surface. The rd must be the RD the controller
 # stamps on the T1ST/T2ST session routes (65100:1 in mup-c/start.sh): a

@@ -2336,7 +2336,12 @@ func TestXDPProgHMGtp4DTeidVRFScope(t *testing.T) {
 	const teid = uint32(0x12345678)
 	srcAddr, _ := ParseIPv6("fc00::1")
 
+	// The gate is a headend entry, looked up in the packet's ingress VRF
+	// like any other: each VRF with uplinks has its own. vrf 3 has uplinks
+	// but no gate.
+	h.headendVRFs = []uint32{0, 1, 2}
 	h.createMupUplinkGate("192.0.2.0/24")
+	h.headendVRFs = nil
 
 	directDefault, _ := ParseIPv6("fc00:a::1") // global VRF (vrf 0)
 	directVrf1, _ := ParseIPv6("fc00:b::2")    // vrf 1
@@ -2410,6 +2415,19 @@ func TestXDPProgHMGtp4DTeidVRFScope(t *testing.T) {
 		ret, _ := h.runOnIfindex(pkt, 1)
 		if ret != XDP_PASS {
 			t.Errorf("Expected XDP_PASS (no session in vrf 2), got %d", ret)
+		}
+	})
+
+	t.Run("no gate in the VRF, no uplink", func(t *testing.T) {
+		// vrf 3 has a session but no gate of its own: the gate of vrf 0 is
+		// not looked up, so GTP-U passes unprocessed.
+		h.createMupUplinkSessionInstance(3, n3Endpoint, teid, 32, srcAddr, segsVrf1, n1, MupArgsOffsetNone)
+		if err := h.mapOps.SetIngressVrf(map[IngressACKey]uint32{{Ifindex: 1, VlanId: 0}: 3}); err != nil {
+			t.Fatalf("SetIngressVrf: %v", err)
+		}
+		ret, out := h.runOnIfindex(pkt, 1)
+		if ret != XDP_PASS || !bytes.Equal(out[:len(pkt)], pkt) {
+			t.Errorf("vrf 3 without a gate: ret %d, want XDP_PASS with the frame untouched", ret)
 		}
 	})
 }

@@ -232,21 +232,9 @@ func TestVPNGroup_UpgradesOffTheLegacyPerRDOwner(t *testing.T) {
 		}
 	})
 
-	t.Run("withdraw removes a legacy entry", func(t *testing.T) {
-		// The prefix was installed before the upgrade and withdrawn before it
-		// was ever re-advertised, so nothing is tracked and the old owner is
-		// the only thing standing between it and a permanent stale entry.
-		fh := newFakeHeadend()
-		fh.v4owners["10.0.0.0/24"] = bpf.OwnerBGPVPN(65000, "65000:1")
-		fh.v4created["10.0.0.0/24"] = &bpf.HeadendEntry{}
-
-		a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
-		a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "", "fd00::1", true))
-
-		if _, still := fh.v4created["10.0.0.0/24"]; still {
-			t.Error("legacy entry survived its withdraw")
-		}
-	})
+	// A legacy entry whose prefix is withdrawn before it is advertised
+	// again is not this process's to find: the boot removes every entry the
+	// applier's owners wrote, the legacy ones included (TestPurgeBuiltinHeadends).
 
 	t.Run("another owner's entry is left alone", func(t *testing.T) {
 		// An operator's RPC-installed entry for the same prefix must not be

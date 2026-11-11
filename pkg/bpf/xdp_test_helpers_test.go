@@ -58,6 +58,9 @@ type xdpTestHelper struct {
 	t      testing.TB
 	objs   *BpfObjects
 	mapOps *MapOperations
+	// headendVRFs are the VRFs the L3 headend create helpers write in
+	// (vrfsForHeadend).
+	headendVRFs []uint32
 }
 
 func newXDPTestHelper(tb testing.TB) *xdpTestHelper {
@@ -878,22 +881,35 @@ func (h *xdpTestHelper) createHeadendEntryWithMode(prefix string, srcAddr, dstAd
 		DstAddr:     dstAddr,
 		Segments:    segments,
 	}
-	var err error
-	if isIPv4 {
-		err = h.mapOps.CreateHeadendV4(prefix, entry, OwnerRPC)
-	} else {
-		err = h.mapOps.CreateHeadendV6(prefix, entry, OwnerRPC)
-	}
-	if err != nil {
-		h.t.Fatalf("Failed to create headend entry: %v", err)
-	}
-	h.t.Cleanup(func() {
+	for _, vrf := range h.vrfsForHeadend() {
+		var err error
 		if isIPv4 {
-			_ = h.mapOps.DeleteHeadendV4(prefix, OwnerRPC)
+			err = h.mapOps.CreateHeadendV4In(vrf, prefix, entry, OwnerRPC)
 		} else {
-			_ = h.mapOps.DeleteHeadendV6(prefix, OwnerRPC)
+			err = h.mapOps.CreateHeadendV6In(vrf, prefix, entry, OwnerRPC)
 		}
-	})
+		if err != nil {
+			h.t.Fatalf("Failed to create headend entry: %v", err)
+		}
+		h.t.Cleanup(func() {
+			if isIPv4 {
+				_ = h.mapOps.DeleteHeadendV4In(vrf, prefix, OwnerRPC)
+			} else {
+				_ = h.mapOps.DeleteHeadendV6In(vrf, prefix, OwnerRPC)
+			}
+		})
+	}
+}
+
+// vrfsForHeadend is where the create helpers write an L3 headend entry:
+// headendVRFs, or the global VRF when it is empty. A test that sends the
+// same packet from a tenant AC sets it, as the data plane looks a packet up
+// in its ingress VRF only.
+func (h *xdpTestHelper) vrfsForHeadend() []uint32 {
+	if len(h.headendVRFs) == 0 {
+		return []uint32{0}
+	}
+	return h.headendVRFs
 }
 
 // verifyOuterIPv6HeaderNoSRH verifies IPv6 header where nexthdr is inner proto (not routing)
@@ -1112,10 +1128,12 @@ const (
 func (h *xdpTestHelper) createMupUplinkGate(prefix string) {
 	h.t.Helper()
 	entry := &HeadendEntry{Mode: modeHMGTP4DTeid}
-	if err := h.mapOps.CreateHeadendV4(prefix, entry, OwnerRPC); err != nil {
-		h.t.Fatalf("Failed to create MUP uplink gate entry: %v", err)
+	for _, vrf := range h.vrfsForHeadend() {
+		if err := h.mapOps.CreateHeadendV4In(vrf, prefix, entry, OwnerRPC); err != nil {
+			h.t.Fatalf("Failed to create MUP uplink gate entry: %v", err)
+		}
+		h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV4In(vrf, prefix, OwnerRPC) })
 	}
-	h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV4(prefix, OwnerRPC) })
 }
 
 // createMupUplinkSession installs an F-TEID uplink session into
@@ -1157,10 +1175,12 @@ func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, s
 		Segments:    segments,
 		ArgsOffset:  argsOffset,
 	}
-	if err := h.mapOps.CreateHeadendV4(prefix, entry, OwnerRPC); err != nil {
-		h.t.Fatalf("Failed to create GTP headend entry: %v", err)
+	for _, vrf := range h.vrfsForHeadend() {
+		if err := h.mapOps.CreateHeadendV4In(vrf, prefix, entry, OwnerRPC); err != nil {
+			h.t.Fatalf("Failed to create GTP headend entry: %v", err)
+		}
+		h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV4In(vrf, prefix, OwnerRPC) })
 	}
-	h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV4(prefix, OwnerRPC) })
 }
 
 // createSidFunctionGTP4E creates a SID function entry for End.M.GTP4.E

@@ -119,7 +119,7 @@ L3 headend の表 (`headend_v4_map` / `headend_v6_map`) は `{vrf_id, prefix}` �
 
 - operator の RPC と vbctl (`Headendv4Create` などの `vrf_name`、`vbctl headend-v4 create --vrf X`)。省略するか `global` を指定すると global VRF (vrf_id 0) です。それ以外の名前は既存の VRF でなければならず、未知の名前は拒否します。要求が VRF を作ることはありません (名前の打ち間違いで見えない entry ができるのを防ぐためです)。
 - control plane plugin の宣言 (`PluginHeadendEntry.vrf`)。global VRF には grant が要りません。それ以外の VRF は plugin の scope の VRF list に入っている必要があります ([cplane-plugin.md](cplane-plugin.md#headend-の-vrf-と-prefix))。
-- BGP の applier は global VRF に書きます。
+- BGP の applier は、受信した VPN 経路 (vpnv4 / vpnv6) を、import RT が一致するすべての VRF に書きます。VRF ごとに ECMP group と trigger を持つので、同じ prefix でも VRF が違えば別の entry で、別の PE の path が混ざることはありません。その family を RT 付きで宣言する binding が 1 つも無い間は default-allow で、global VRF に書きます。MUP のセッション (T1ST の downlink と T2ST の gate) は、import RT が一致した 1 つの VRF (複数一致すれば VRF 名が最小のもの) に書きます ([srv6_bgp.md](srv6_bgp.md))。
 
 `vrf_name` を省略した要求は、どの操作でも global VRF を扱います。一覧 (`Headendv4List`、`vbctl headend-v4 list`) と Flush (`vbctl headend-v4 flush --yes`) も global VRF だけです。全 VRF を扱うには `all_vrfs` (`--all-vrfs`) を指定します。`vrf_name` と同時には指定できません。一覧の各 entry は VRF を持ちます。応答の `vrf_name` は global VRF では空、`vrf_id` は VRF の id です。Create は `vrf_id` を省略するか、`vrf_name` が指す VRF と同じ id を受け付けるので、一覧の entry をそのまま送り返せます。違う id は拒否します。
 
@@ -127,7 +127,22 @@ Flush は、その VRF (または全 VRF) にある RPC の entry と owner の�
 
 control plane plugin が存在しない VRF を宣言すると、その集合は拒否されます。host が受け取った入力を渡す plugin (input policy を持つもの。composition はこれです) と、公開前に宣言した集合は、host が保持して次の event で再試行します。それ以外の plugin の集合は保持しないので、plugin は VRF ができてから宣言し直します。
 
-data plane は入口の VRF に関係なく vrf_id 0 で headend の表を引きます。そのため global VRF 以外の entry は保存、一覧、削除はできますが、転送には使われません。
+data plane は、front door が入口の AC から決めた vrf_id で headend の表を引きます。tenant VRF のパケットはその VRF の entry だけに一致し、一致しなければ global VRF を引き直さずに kernel へ渡します (XDP_PASS)。AC の無い入口のパケットは global VRF の entry を引きます。
+
+### access circuit の無い binding
+
+binding は経路をその VRF に入れますが、その VRF の entry を引くのは VRF の AC から入ったパケットだけです。VRF の member (kernel device に enslave した port) にしても、AC を宣言しなければ XDP はそのパケットを global VRF に分類します。vinberod は AC を暗黙に作りません。どの port が tenant のものかは operator が決めることだからです。そのため起動時に、L3VPN か MUP の family を import RT 付きで宣言している binding のうち、VRF に AC が 1 つも無いものを VRF ごとに 1 行 warning に出します。
+
+```text
+VRF BGP binding has no access circuits; imported L3 routes are installed in this VRF, but no ingress is classified to it; configure vrf ac-add or vrfs.entries[].acs
+  vrf=tenant-a vrf_id=7 families=[vpnv4]
+```
+
+起動は止めません。EVPN だけの binding は bridge domain と circuit で転送するので対象外です。直すには、tenant の port を VRF の AC にします (`vbctl vrf ac-add --vrf X --interface I`、config の `vrfs.entries[].acs`)。
+
+### 起動時の BGP の entry の削除
+
+BGP を有効にして起動すると、vinberod は data plane を attach する前に、前回の起動でこの node の BGP applier が書いた headend の entry (VPN の trigger と MUP の downlink) と MUP uplink の F-TEID entry を、すべての VRF から消します。pin した map では entry が再起動を越えて残り、binding が停止中に変わった場合などに、経路がもう import されない VRF に残るためです。残ると、その VRF のパケットが別の tenant の PE へ encap されます。経路は BGP から受信し直して書き直します。そのため `pin_maps` を有効にした再起動でも、BGP 由来の転送は経路を受信し直すまで止まります。operator、plugin、MUP gate の entry は消しません (uplink の無い gate は何も転送しません)。消せない entry があれば起動を止めます。
 
 ## kernel device facet
 
@@ -172,7 +187,7 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 1. ingress AC が残っている → 拒否 (`vrf ac-remove` で先に外す)
 2. vrf-bgp binding が存在する → 拒否 (`vrf-bgp unbind` で先に外す。vpnv4 / vpnv6 の RT を持つ最後の binding を外すと、その family は default-allow に戻り、受信済みの経路がすべて入ります。[srv6_bgp.md](srv6_bgp.md#binding-と-locator-の変更による再評価))
 3. bridge facet が付いている → 拒否 (`vrf bridge-detach` で先に外す)
-4. その vrf_id の headend entry がある → 拒否。vrf_id は二度と使わないので、残すと名前で消せない entry になるためです。拒否の理由は owner ごとの件数と、それを消す操作を示します
+4. その vrf_id の headend entry がある → 拒否。vrf_id は二度と使わないので、残すと名前で消せない entry になるためです。拒否の理由は owner ごとの件数と、それを消す操作を示します。BGP の entry は binding を外すと非同期に消える (loc-rib を評価し直して取り消す) ので、unbind の直後は拒否されることがあります。消えてから削除をやり直します
    - operator の entry: `vbctl headend-v4 delete --vrf X` か `headend-v4 flush --yes --vrf X` (v6 も同じ)
    - owner の無い entry: `headend-v4 flush --yes --vrf X`
    - control plane plugin の entry: plugin が宣言から外すか、`vbctl cplane unregister --name P` で登録を外す

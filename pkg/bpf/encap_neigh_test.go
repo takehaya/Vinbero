@@ -224,6 +224,9 @@ func (e *encapNeighEnv) neighCount() int {
 func TestEncapNeighKeeperResolvesTenantNexthop(t *testing.T) {
 	h := newXDPTestHelper(t)
 	e := newEncapNeighEnv(t)
+	// The packet comes from the tenant AC, so the entry is in its VRF; the
+	// keeper reads every VRF.
+	h.headendVRFs = []uint32{1}
 
 	src, _ := ParseIPv6("fc00:e01::1")
 	segments, numSegments, _ := ParseSegments([]string{"fc00:e00::1"})

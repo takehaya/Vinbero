@@ -182,7 +182,7 @@ func (c *Controller) headendEntries() []cplane.HeadendEntry {
 	sort.Strings(prefixes)
 	entries := make([]cplane.HeadendEntry, 0, len(prefixes))
 	for _, prefix := range prefixes {
-		entries = append(entries, cplane.HeadendEntry{TriggerPrefix: prefix, Segments: []string{chosen[prefix].sid}})
+		entries = append(entries, cplane.HeadendEntry{TriggerPrefix: prefix, Segments: []string{chosen[prefix].sid}, VRF: c.config.HeadendVRF})
 	}
 	return entries
 }

@@ -70,7 +70,9 @@ here; see mup-2site for the full bidirectional path):
   direct SID `fd00:d:0:2::` → vrf-b → dn-b.
 
 `test.sh` asserts the control plane (both T2STs installed under distinct
-vrf_ids behind one shared gate) and, for each VPN, that the burst reaches its
+vrf_ids, each behind a gate of its own VRF: the gate is a headend entry, and
+a packet is looked up in the headend entries of the VRF its AC classifies it
+to, so vpn-a and vpn-b each have one and the global VRF none) and, for each VPN, that the burst reaches its
 own DN and that the other DN — which would happily accept the byte-identical
 inner packet — captures nothing (no cross-VRF leak).
 

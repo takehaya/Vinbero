@@ -275,7 +275,7 @@ sequenceDiagram
     V-->>Op: [{mode: H.Encaps, prefix: "10.0.0.0/24"},<br/>{mode: H.Encaps.Red, prefix: "10.1.0.0/24"}]
 ```
 
-headend の entry は `{vrf_id, prefix}` で区別されます。`vrf_name` を省略した要求は、List と Flush を含めて global VRF (vrf_id 0) の entry を扱い、全 VRF は `all_vrfs` で指定します。名前を指定するとその VRF の entry になり、存在しない VRF は拒否します (VRF は作りません)。data plane は vrf_id 0 で引くので、global VRF 以外の entry は転送に使われません ([vrf.md](vrf.md#headend-entry-の-vrf))。
+headend の entry は `{vrf_id, prefix}` で区別されます。`vrf_name` を省略した要求は、List と Flush を含めて global VRF (vrf_id 0) の entry を扱い、全 VRF は `all_vrfs` で指定します。名前を指定するとその VRF の entry になり、存在しない VRF は拒否します (VRF は作りません)。data plane はパケットを入口の AC の VRF の entry で引きます ([vrf.md](vrf.md#headend-entry-の-vrf))。
 
 ```mermaid
 sequenceDiagram

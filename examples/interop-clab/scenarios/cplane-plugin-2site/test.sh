@@ -167,19 +167,19 @@ fi
 echo ""
 echo "[3] pe-tokyo: the plugin installed the forwarding state"
 
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
     ok "$OSAKA_PREFIX is in pe-tokyo's headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list | sed 's/^/      /'
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global | sed 's/^/      /'
 else
     ng "$OSAKA_PREFIX missing from pe-tokyo's headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
     dexec "$PE_TOKYO" grep -i "plugin" /var/log/vinberod.log | tail -20 || true
 fi
 
 # It must steer into the SID the plugin advertised, which is the address
 # pe-osaka's daemon allocated for it. This is where the two halves meet, so
 # the rest of the checks are written against what the wire actually says.
-PLUGIN_SID=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
+PLUGIN_SID=$(dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global 2>/dev/null \
     | awk -v p="$OSAKA_PREFIX" '$1==p {print $NF}')
 # An empty extraction must fail hard, not fall through: a later
 # grep -q "${PLUGIN_SID}/128" would otherwise become grep -q "/128" and
@@ -275,7 +275,7 @@ echo "[4] data plane: ce-tokyo -> ce-osaka over plugin-installed state"
 # produce a spurious failure.
 echo "  gating on readiness..."
 
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
     echo "  gate: pe-tokyo headend entry present"
 else
     ng "gate: pe-tokyo headend entry never appeared"
@@ -289,11 +289,11 @@ else
 fi
 
 # The return direction is an ordinary L3VPN route, no plugin involved.
-if retry bash -c "docker exec $PE_OSAKA vbctl headend-v4 list 2>/dev/null | grep -q '$TOKYO_PREFIX'"; then
+if retry bash -c "docker exec $PE_OSAKA vbctl headend-v4 list --vrf vrf-cust 2>/dev/null | grep -q '$TOKYO_PREFIX'"; then
     echo "  gate: pe-osaka learned the return route"
 else
     ng "gate: pe-osaka never learned $TOKYO_PREFIX"
-    dexec "$PE_OSAKA" vbctl headend-v4 list || true
+    dexec "$PE_OSAKA" vbctl headend-v4 list --vrf vrf-cust || true
 fi
 
 # Underlay reachability, so the encapsulated packet has somewhere to go.
@@ -332,7 +332,7 @@ if retry_n 20 ping_ok; then
 else
     ng "ce-tokyo cannot reach ce-osaka"
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" || true
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
     dexec "$PE_OSAKA" vbctl sid list || true
 fi
 
@@ -354,11 +354,11 @@ echo ""
 echo "[5] unregistering removes what the plugin owned"
 
 if dexec "$PE_TOKYO" vbctl plugin cplane unregister --name custom-behavior >/dev/null 2>&1; then
-    if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+    if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
         ok "the plugin's headend entry went with it"
     else
         ng "the plugin's headend entry survived unregistration"
-        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+        dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
     fi
 else
     ng "could not unregister the plugin"
@@ -398,11 +398,11 @@ if dexec "$PE_TOKYO" vbctl plugin cplane register \
     --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.json \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend >/dev/null 2>&1; then
-    if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+    if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
         ok "$OSAKA_PREFIX was not installed under a scope that does not cover it"
     else
         ng "the plugin installed $OSAKA_PREFIX outside its scope"
-        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+        dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
     fi
     if retry_n 10 docker exec "$PE_TOKYO" grep -q "outside this plugin's scope" /var/log/vinberod.log; then
         ok "the daemon logged the out-of-scope refusal"
@@ -420,11 +420,11 @@ if dexec "$PE_TOKYO" vbctl plugin cplane register \
     --name custom-behavior "${backend_args[@]}" \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend --headend-prefix 10.2.0.0/16 >/dev/null 2>&1; then
-    if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+    if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
         ok "$OSAKA_PREFIX came back once the scope covered it"
     else
         ng "$OSAKA_PREFIX did not return under a covering scope"
-        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+        dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
     fi
 else
     ng "could not re-register the plugin with a covering scope"

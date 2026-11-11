@@ -194,7 +194,13 @@ func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 			// longer match any import filter. Dispatching it as a withdraw
 			// removes exactly this NLRI's tracked state (a no-op when
 			// nothing was installed).
-			a.logger.Warn("MUP route matches no VRF import RT; removing any previous session",
+			// A loc-rib replay revisits every route no VRF imports;
+			// warning for each would repeat the whole rib.
+			log := a.logger.Warn
+			if a.replaying.Load() {
+				log = a.logger.Debug
+			}
+			log("MUP route matches no VRF import RT; removing any previous session",
 				zap.String("type", r.Type.String()),
 				zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
 			withdraw = true
@@ -693,9 +699,9 @@ type (
 
 // mupHeadendVRF is the VRF of the headend map a MUP session whose route
 // resolved to instance writes: the downlink entry of a T1ST and the gate of
-// a T2ST. Every one is a global VRF entry, because the headend lookup
-// matches every packet in the global VRF whatever its ingress VRF.
-func (a *Applier) mupHeadendVRF(instance uint32) uint32 { return vrf.GlobalVRFID }
+// a T2ST. It is the session's own VRF, where the packets it serves (DN
+// traffic toward the UE, GTP-U from the access side) are looked up.
+func (a *Applier) mupHeadendVRF(instance uint32) uint32 { return instance }
 
 // mupT2STDataPlane bundles the family-specific data-plane selectors for an
 // uplink session: the F-TEID map writers, the gate behavior/prefix, and the gate
@@ -802,7 +808,9 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 // instances share the gate's VRF it is left alone, so the endpoint's last
 // session moving does not delete and recreate it -- a window where GTP-U
 // passes unprocessed.
-func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
+//
+// It reports false when a write failed and the session stayed where it was.
+func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) bool {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
@@ -811,7 +819,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	if err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-		return
+		return true
 	}
 	entry.ArgsOffset = bpf.MupArgsOffsetNone
 	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
@@ -821,8 +829,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		if err := a.acquireMUPGate(newGate, dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
 			a.logger.Error("re-key MUP T2ST gate (keeping old instance)",
 				zap.String("endpoint", r.Endpoint), zap.Uint32("vrf_id", newGate), zap.Error(err))
-			a.mupFailed()
-			return
+			return a.mupFailed()
 		}
 	}
 	if err := dp.uplinkCreate(inst, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
@@ -832,8 +839,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		if moveGate && !a.releaseMUPGate(newGate, dp.gatePrefix, gateOwner, dp.deleteGate) {
 			a.oweMUPGateRelease(mupGateKey{vrf: newGate, prefix: dp.gatePrefix})
 		}
-		a.mupFailed()
-		return
+		return a.mupFailed()
 	}
 	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		a.logger.Error("remove old-instance MUP T2ST uplink entry (retaining for retry)",
@@ -843,9 +849,13 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		// old entry is still there.
 		a.rememberMUPOwnedCleanup(mupRecoveryKey{st.instance, endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)})
 	}
+	// The session has moved; a release still owed is reported as a failed
+	// write so the tracked pass runs again to pay it.
+	moved := true
 	if moveGate {
 		if !a.releaseMUPGate(st.gateVRF, dp.gatePrefix, gateOwner, dp.deleteGate) {
 			a.oweMUPGateRelease(mupGateKey{vrf: st.gateVRF, prefix: dp.gatePrefix})
+			moved = false
 		}
 		st.gateVRF = newGate
 	}
@@ -854,6 +864,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	a.logger.Info("MUP T2ST uplink re-keyed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 		zap.Uint32("from_vrf_id", old), zap.Uint32("vrf_id", inst))
+	return moved
 }
 
 // mupVRFForRoute resolves the VRF a MUP session belongs to: the id of the
@@ -875,19 +886,37 @@ func (a *Applier) mupVRFForRoute(fam bgp.Family, r *bgp.MUPRoute) (id uint32, ac
 	return id, true
 }
 
-// ReconcileMUPUplinkInstances re-keys every installed T2ST whose resolved
-// vrf_id changed after a VRF binding mutation (an RT change can move a session
-// to a different VRF, or an unbind back to the global VRF). It does NOT touch
-// ingress_vrf_map — that is owned by vrf.Manager and programmed from the VRFs'
-// ACs (VrfService), independent of which binding a route matches. Safe to call
-// from RPC goroutines (mupMu).
+// ReconcileMUPUplinkInstances moves every tracked MUP session to the VRF its
+// route resolves to after a VRF binding mutation (an RT change can move a
+// session to a different VRF, or an unbind back to the global VRF): a T2ST's
+// F-TEID entry and gate are re-keyed, a T1ST's downlink entry is written in
+// the new VRF and removed from the old one. A session no binding accepts any
+// more (its family is declared and no import RT matches it, without
+// mup_default_allow) is removed, as an UPDATE with such RTs would be; a later
+// binding that imports it again brings it back through the MUP loc-rib
+// replay. It does NOT touch ingress_vrf_map — that is owned by vrf.Manager
+// and programmed from the VRFs' ACs (VrfService), independent of which
+// binding a route matches. Safe to call from RPC goroutines (mupMu).
 func (a *Applier) ReconcileMUPUplinkInstances() {
 	a.mupMu.Lock()
 	defer a.mupMu.Unlock()
+	defer a.flushTrackedFailure(&a.mupWriteFailed)
+	release := a.vrfBindings.VRF().HoldIDs()
+	defer release()
 	a.retryMUPOwnedCleanup()
-	for _, st := range a.mupT2ST {
-		id, _ := a.mupVRFForRoute(st.fam, &st.route)
-		if id == st.instance {
+	for key, st := range a.mupT2ST {
+		id, accepted := a.mupVRFForRoute(st.fam, &st.route)
+		if !accepted && !st.withdrawn {
+			a.logger.Warn("MUP session no longer matches a VRF import RT; removing it",
+				zap.String("type", "T2ST"), zap.String("rd", st.route.RD),
+				zap.String("endpoint", st.route.Endpoint), zap.Strings("rts", st.route.RTs))
+			st.withdrawn = true
+			if (st.installedSID == "" && !st.gateHeld) || a.uninstallMUPT2ST(st) {
+				delete(a.mupT2ST, key)
+			}
+			continue
+		}
+		if st.withdrawn || id == st.instance {
 			continue
 		}
 		if st.installedSID == "" {
@@ -897,7 +926,22 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 			st.instance = id
 			continue
 		}
-		a.rekeyMUPT2ST(st, id)
+		a.rekeyMUPT2ST(st, id) // a failed move is retried by reconcileMUPT2ST
+	}
+	for key, st := range a.mupT1ST {
+		if _, accepted := a.mupVRFForRoute(st.fam, &st.route); !accepted {
+			a.logger.Warn("MUP session no longer matches a VRF import RT; removing it",
+				zap.String("type", "T1ST"), zap.String("rd", st.route.RD),
+				zap.String("ue_prefix", st.route.Prefix), zap.Strings("rts", st.route.RTs))
+			if st.installedSID != "" {
+				a.uninstallMUPT1ST(st)
+			}
+			delete(a.mupT1ST, key)
+			continue
+		}
+		// Writes the downlink in the session's current VRF and removes it
+		// from the one it was in.
+		a.reconcileMUPT1ST(key)
 	}
 }
 
@@ -962,7 +1006,6 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated in applyMUPT2ST
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
 	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
-
 	sid := a.resolveDirectSID(r)
 	if sid == "" {
 		if (st.installedSID != "" || st.gateHeld) && !a.uninstallMUPT2ST(st) {
@@ -980,6 +1023,28 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 		return true
 	}
 	st.deferLogged = false
+	// A move to another VRF that failed earlier is retried here, so the
+	// tracked pass converges on the VRF the bindings name. It runs only
+	// once the SID resolves: an unresolvable session is removed from where
+	// it is, above, whether or not it could move.
+	if id, accepted := a.mupVRFForRoute(st.fam, r); accepted && id != st.instance {
+		if st.installedSID != "" {
+			if !a.rekeyMUPT2ST(st, id) {
+				return false
+			}
+		} else {
+			st.instance = id
+		}
+	}
+	// A gate kept after a failed rollback may be in the VRF the session
+	// was in before: the session's gate is the one of its current VRF.
+	if st.installedSID == "" && st.gateHeld && st.gateVRF != a.mupHeadendVRF(st.instance) {
+		if !a.releaseMUPGate(st.gateVRF, dp.gatePrefix, gateOwner, dp.deleteGate) {
+			return a.mupFailed()
+		}
+		st.gateHeld = false
+	}
+
 	src, ok := a.mupEncapSource(st, "endpoint", r.Endpoint)
 	if !ok {
 		// Waiting for the source locator is not a failed write.

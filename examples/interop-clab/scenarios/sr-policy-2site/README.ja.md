@@ -33,6 +33,10 @@ graph LR
 
 core の End SID は `fd00:300::/48`、FRR の End と service SID は `fd00:200::/48` にあり、pe-tokyo と core の static route がそれぞれ次ホップへ運びます。
 
+## global VRF
+
+このシナリオには import route target を持つ VRF binding が無いので、受信した VPN 経路はすべて受け入れられ (default-allow)、global VRF に入ります。CE 側の口 (`eth2`) にも access circuit が無いので、そのパケットも global VRF で引かれます。`test.sh` はその経路を global VRF で確認します (`headend-v4 list --vrf global`)。テナントの VRF として動かすには、CE 側の口をその VRF の access circuit にし (`vbctl vrf ac-add`)、経路の route target を import する binding を VRF に置きます。経路はその VRF にだけ入り、global VRF のパケットからは届かなくなります。
+
 ## 実行
 
 Docker・`containerlab`・`sudo` が必要。`examples/interop-clab/` から:

@@ -115,7 +115,13 @@ func run(cliCtx *cli.Context) error {
 		bindingVRFs = append(bindingVRFs, b.VRFName)
 	}
 	err = bringUpDataPlane(func() error {
-		return restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetMapOperations(), vin.GetResourceManager(), lg)
+		if err := restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetMapOperations(), vin.GetResourceManager(), lg); err != nil {
+			return err
+		}
+		if !cliCtx.Bool("bgp-enabled") {
+			return nil
+		}
+		return purgeBGPHeadends(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg)
 	}, func() error {
 		if err := vin.AttachConfigDevices(); err != nil {
 			return fmt.Errorf("attach devices: %w", err)
@@ -236,6 +242,10 @@ func run(cliCtx *cli.Context) error {
 				return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
 			}
 		}
+		// A binding imports routes into its VRF, but only packets that
+		// enter on one of the VRF's ACs are looked up there. No AC is made
+		// for it: which port belongs to a tenant is the operator's choice.
+		vrfBgpMgr.WarnBindingsWithoutAC(nil, lg)
 
 		bgpSession = gobgp.NewSession(lg)
 		// The operator's own advertisements, made over RPC, originate
@@ -802,6 +812,26 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 		return fmt.Errorf("vrf: %w", err)
 	}
 	lg.Info("VRF ingress classification programmed", zap.Int("vrfs", len(mgr.List())))
+	return nil
+}
+
+// purgeBGPHeadends removes, before the data plane is attached, every headend
+// entry the BGP applier of localASN wrote in an earlier run, in every VRF
+// (apply.PurgeBuiltinHeadends). With pinned maps such an entry may sit in a
+// VRF its route is no longer imported into -- the global VRF of a run that
+// placed every route there, or a VRF whose binding changed while the
+// daemon was down -- and would forward that VRF's packets to another
+// tenant's PE until the route is received again. The routes are rebuilt as
+// BGP delivers them. A failure is fatal for the same reason.
+func purgeBGPHeadends(ops apply.HeadendPurgeOps, localASN uint32, lg *zap.Logger) error {
+	n, err := apply.PurgeBuiltinHeadends(ops, localASN)
+	if err != nil {
+		return fmt.Errorf("remove the headend entries an earlier run's BGP applier wrote: %w", err)
+	}
+	if n > 0 {
+		lg.Info("removed the headend entries an earlier run's BGP applier wrote; BGP installs them again as routes arrive",
+			zap.Int("entries", n))
+	}
 	return nil
 }
 

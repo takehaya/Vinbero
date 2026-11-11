@@ -60,7 +60,12 @@ DSD)。したがって上の 2 つの解決はどちらも RD をまたぐ (RT-s
 `vbctl vrf-bgp bind` で VRF を runtime に bind し、両 RT を `mup_ipv4` の
 import として宣言してセッション経路の import filter を有効にする (discovery
 経路は filter を通らない)。uplink RT の import が T2ST を mup-pe へ届け、
-RFC 9433 §6.6 の UPF anchor になる。
+RFC 9433 §6.6 の UPF anchor になる。そのためセッションは mup-pe の VRF
+(`vrf-cust`) に属する。T1ST の downlink は `vrf-cust` の headend エントリで、
+mup-pe の DN 側の口 (`eth2`) を `vrf-cust` の access circuit にする
+(`mup-pe/start.sh` の `vbctl vrf ac-add`) ので、DN のパケットはそこで引かれる。
+mup-gw には MUP の binding が無いので、セッションは default-allow で受け入れ
+られ、gate と F-TEID は global VRF に入る。
 
 解決は到着順に依存しない。discovery 経路より先に届いたセッションは deferred と
 なり、経路が届いた時点で install する。discovery 経路を withdraw すると依存する

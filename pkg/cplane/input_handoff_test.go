@@ -38,6 +38,12 @@ func (f *handoffMaps) CreateHeadendV4(prefix string, entry *bpf.HeadendEntry, ow
 	return f.serviceFake.CreateHeadendV4(prefix, entry, owner)
 }
 
+// CreateHeadendV4In runs the hook too: a backend with VRFs is written
+// through the per-VRF methods.
+func (f *handoffMaps) CreateHeadendV4In(v uint32, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	return f.CreateHeadendV4(serviceVRFKey(v, prefix), entry, owner)
+}
+
 func (f *handoffMaps) DeleteMupUplinkV4Owned(id uint32, ep string, teid uint32, bits uint8, owner bpf.OwnerTag) error {
 	f.uplinkDeletes++
 	return f.serviceFake.DeleteMupUplinkV4Owned(id, ep, teid, bits, owner)

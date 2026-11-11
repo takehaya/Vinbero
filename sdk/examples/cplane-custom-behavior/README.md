@@ -202,6 +202,7 @@ value, leave the key out and the plugin takes it from the registration:
 |---|---|---|
 | `behavior` | endpoint behavior codepoint to steer | the claimed behavior if exactly one is claimed; `0xFE01` if none |
 | `headend_prefixes` | IPv4 receive prefixes (CIDR) | the IPv4 prefixes of the headend scope; none at all if the scope has only IPv6 prefixes |
+| `headend_vrf` | VRF the headend entries of received routes are declared in; packets are looked up in the VRF of the access circuit they enter on, so a receiver serving a tenant names the tenant's VRF (the registration must grant it with `--vrf`) | the global VRF; it is not taken from the scope's VRFs, which also serve advertisements and decapsulation |
 | `locator` | locator to take a local SID from | the scope's locator, if it lists exactly one |
 | `slot` | eBPF endpoint slot the SID dispatches to, in [32,64) | the scope's endpoint slot, if it lists exactly one |
 | `decap_vrf` | VRF a plugin-dispatched End.DT4 decapsulates into | no decap grant |

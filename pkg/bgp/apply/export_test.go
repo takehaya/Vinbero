@@ -1,6 +1,8 @@
 package apply
 
 import (
+	"strings"
+
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/fib"
 )
@@ -15,10 +17,20 @@ func NewFakeDataPlane() *FakeDataPlane { return newFakeHeadend() }
 
 func NewFakeFib() fib.Injector { return &fakeFib{} }
 
-// HeadendV4 returns the trigger entry installed for prefix.
-func (f *fakeHeadend) HeadendV4(prefix string) (*bpf.HeadendEntry, bool) {
-	e, ok := f.v4created[prefix]
+// HeadendV4 returns the trigger entry installed for prefix in vrfID.
+func (f *fakeHeadend) HeadendV4(vrfID uint32, prefix string) (*bpf.HeadendEntry, bool) {
+	e, ok := f.v4created[fakeHeadendKey(vrfID, prefix)]
 	return e, ok
+}
+
+// HeadendV4Anywhere reports whether prefix has a trigger in any VRF.
+func (f *fakeHeadend) HeadendV4Anywhere(prefix string) bool {
+	for k := range f.v4created {
+		if k == prefix || strings.HasSuffix(k, " "+prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // EcmpGroup returns the members installed for group id.

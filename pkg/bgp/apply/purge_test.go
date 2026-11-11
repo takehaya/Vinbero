@@ -7,10 +7,33 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
-// purgeMaps models the owner inventory of both headend maps, keyed by id.
+// purgeMaps models the owner inventory of both headend maps, keyed by id,
+// and of the MUP uplink v4 map.
 type purgeMaps struct {
-	v4, v6 map[bpf.HeadendID]bpf.OwnerTag
-	failOn bpf.HeadendID
+	v4, v6  map[bpf.HeadendID]bpf.OwnerTag
+	uplinks map[bpf.MupUplinkV4Key]bpf.OwnerTag
+	failOn  bpf.HeadendID
+}
+
+func (m *purgeMaps) ListMupUplinkV4Owners() (map[bpf.MupUplinkV4Key]bpf.OwnerTag, error) {
+	return m.uplinks, nil
+}
+
+func (m *purgeMaps) ListMupUplinkV6Owners() (map[bpf.MupUplinkV6Key]bpf.OwnerTag, error) {
+	return nil, nil
+}
+
+func (m *purgeMaps) DeleteMupUplinkV4Owned(instance uint32, ep string, teid uint32, bits uint8, owner bpf.OwnerTag) error {
+	k := recoveryKey4(instance, ep, teid, bits)
+	if m.uplinks[k] != owner {
+		return bpf.ErrEntryOwnerMismatch
+	}
+	delete(m.uplinks, k)
+	return nil
+}
+
+func (m *purgeMaps) DeleteMupUplinkV6Owned(uint32, string, uint32, uint8, bpf.OwnerTag) error {
+	return nil
 }
 
 func (m *purgeMaps) ListHeadendV4OwnerIDs() (map[bpf.HeadendID]bpf.OwnerTag, error) {
@@ -67,6 +90,10 @@ func TestPurgeBuiltinHeadends(t *testing.T) {
 	}
 	m := &purgeMaps{v4: map[bpf.HeadendID]bpf.OwnerTag{}, v6: map[bpf.HeadendID]bpf.OwnerTag{
 		{VRF: 9, Prefix: "2001:db8::/64"}: vpn,
+	}, uplinks: map[bpf.MupUplinkV4Key]bpf.OwnerTag{
+		recoveryKey4(0, "192.0.2.1", 7, 32): mup,
+		recoveryKey4(5, "192.0.2.1", 7, 32): mup,
+		recoveryKey4(5, "192.0.2.9", 7, 32): bpf.OwnerPluginBundle("p"),
 	}}
 	for id, o := range keep {
 		m.v4[id] = o
@@ -75,8 +102,11 @@ func TestPurgeBuiltinHeadends(t *testing.T) {
 		m.v4[id] = o
 	}
 	n, err := PurgeBuiltinHeadends(m, asn)
-	if err != nil || n != len(gone4)+1 {
-		t.Fatalf("removed %d, err %v; want %d, nil", n, err, len(gone4)+1)
+	if err != nil || n != len(gone4)+3 {
+		t.Fatalf("removed %d, err %v; want %d, nil", n, err, len(gone4)+3)
+	}
+	if len(m.uplinks) != 1 {
+		t.Errorf("uplinks left = %v, want the plugin's only", m.uplinks)
 	}
 	if len(m.v6) != 0 || len(m.v4) != len(keep) {
 		t.Fatalf("left v4 %v v6 %v, want only %v", m.v4, m.v6, keep)
