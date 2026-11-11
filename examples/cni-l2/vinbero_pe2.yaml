@@ -1,0 +1,69 @@
+# PE2: both bridge domains and both EVPN bindings are declared here, so they
+# survive a daemon restart. The CNI network configurations only name the VRF,
+# the bridge and the bd_id.
+internal:
+  devices: [eth1]
+  bpf:
+    device_mode: generic
+  server:
+    bind: "127.0.0.1:8085"
+  logger:
+    level: info
+    format: text
+    no_color: true
+settings:
+  state_path: __STATE_PATH__
+  pin_maps:
+    enabled: false
+  l2:
+    bum_mode: tc
+vrfs:
+  entries:
+    - name: tenant-l2
+      bridge:
+        name: br-l2
+        bd_id: 100
+    - name: tenant-l2b
+      bridge:
+        name: br-l2b
+        bd_id: 200
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.2"
+    listen_port: 179
+    source_locator: LOC1
+    auto_advertise: true
+    evpn_auto_advertise: true
+    next_hop: "2001:db8:ff::2"
+  locators:
+    - name: LOC1
+      prefix: fd00:2::/48
+      block_len: 32
+      node_len: 16
+      function_len: 16
+      argument_len: 64
+      behavior: classic
+  vrf_bindings:
+    - vrf_name: tenant-l2
+      rd: "65100:2"
+      default_locator: LOC1
+      families:
+        evpn:
+          route_targets:
+            - rt: "65000:100"
+              direction: both
+    - vrf_name: tenant-l2b
+      rd: "65100:1012"
+      default_locator: LOC1
+      families:
+        evpn:
+          route_targets:
+            - rt: "65000:200"
+              direction: both
+  peers:
+    - neighbor: "2001:db8:ff::1"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families: [evpn]

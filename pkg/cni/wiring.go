@@ -84,20 +84,27 @@ func (p *Plugin) Add(args *skel.CmdArgs) (*current.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ipam %s: %w", conf.IPAM.Type, err)
 	}
-	addr, routes, err := podAddress(ipamRes)
-	if err != nil {
-		_ = p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData)
-		return nil, err
-	}
 	hostIf, tmpIf := vethNames(args.ContainerID, args.IfName)
 	a := Attachment{
 		ContainerID: args.ContainerID,
 		IfName:      args.IfName,
 		Network:     conf.Name,
+		Mode:        conf.Mode,
 		VRF:         conf.VRF,
 		TableID:     conf.TableID,
+		Bridge:      conf.Bridge,
+		BdID:        conf.BdID,
 		HostVeth:    hostIf,
-		Address:     addr,
+	}
+	var routes []netip.Prefix
+	if conf.Mode == ModeL2 {
+		a.Address, err = podAddressL2(ipamRes)
+	} else {
+		a.Address, routes, err = podAddress(ipamRes)
+	}
+	if err != nil {
+		_ = p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData)
+		return nil, err
 	}
 	// Record before touching anything, so a DEL after a failed ADD finds
 	// what to undo.
@@ -105,7 +112,12 @@ func (p *Plugin) Add(args *skel.CmdArgs) (*current.Result, error) {
 		_ = p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData)
 		return nil, fmt.Errorf("record attachment: %w", err)
 	}
-	res, err := p.setup(ctx, daemon, store, conf, args, &a, tmpIf, routes)
+	var res *current.Result
+	if conf.Mode == ModeL2 {
+		res, err = p.setupL2(ctx, daemon, store, conf, args, &a, tmpIf)
+	} else {
+		res, err = p.setup(ctx, daemon, store, conf, args, &a, tmpIf, routes)
+	}
 	if res != nil && conf.DNS.IsEmpty() {
 		res.DNS = ipamRes.DNS
 	}
@@ -139,7 +151,8 @@ func (p *Plugin) setup(ctx context.Context, daemon Daemon, store *Store, conf *N
 	}
 	if conf.WantsBinding() {
 		if err := daemon.EnsureBinding(ctx, Binding{
-			VRF: conf.VRF, RD: conf.RD, RTs: conf.RTs, Locator: conf.Locator, MaxPrefixes: conf.MaxPrefixes,
+			VRF: conf.VRF, RD: conf.RD, RTs: conf.RTs, Locator: conf.Locator,
+			MaxPrefixes: conf.MaxPrefixes, Redistribute: []string{"static"},
 		}); err != nil {
 			return nil, err
 		}
@@ -246,7 +259,8 @@ func (p *Plugin) Del(args *skel.CmdArgs) error {
 		host, _ := vethNames(args.ContainerID, args.IfName)
 		a = Attachment{
 			ContainerID: args.ContainerID, IfName: args.IfName,
-			VRF: conf.VRF, TableID: conf.TableID, HostVeth: host,
+			Mode: conf.Mode, VRF: conf.VRF, TableID: conf.TableID,
+			Bridge: conf.Bridge, BdID: conf.BdID, HostVeth: host,
 		}
 	}
 	return p.teardown(context.Background(), p.Daemon(conf.Server), store, conf, args, a)
@@ -254,7 +268,13 @@ func (p *Plugin) Del(args *skel.CmdArgs) error {
 
 // teardown undoes an attachment in the reverse order of setup and drops the
 // record once every step succeeded; on error the record stays for a retry.
+// It dispatches on the recorded mode, so DEL of an L2 attachment made by a
+// newer plugin, and of an L3 one made by an older plugin with no mode field,
+// both undo the right wiring.
 func (p *Plugin) teardown(ctx context.Context, daemon Daemon, store *Store, conf *NetConf, args *skel.CmdArgs, a Attachment) error {
+	if a.isL2() {
+		return p.teardownL2(ctx, daemon, store, conf, args, a)
+	}
 	var errs []error
 	if a.Address.IsValid() {
 		errs = append(errs, p.Net.DelHostRoute(HostConfig{
@@ -304,6 +324,9 @@ func (p *Plugin) Check(args *skel.CmdArgs) error {
 	}
 	if !ok {
 		return fmt.Errorf("no attachment recorded for container %s interface %s", args.ContainerID, args.IfName)
+	}
+	if a.isL2() {
+		return p.checkL2(context.Background(), p.Daemon(conf.Server), conf, args, a)
 	}
 	if a.VRF != conf.VRF || a.TableID != conf.TableID {
 		return fmt.Errorf("attachment is in vrf %s table %d, the network configuration says vrf %s table %d",

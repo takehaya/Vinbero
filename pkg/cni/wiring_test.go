@@ -61,6 +61,25 @@ func (f fakeNet) DeleteVeth(hostIf string) error {
 func (f fakeNet) CheckPod(p PodConfig) error   { return f.r.do("check-pod %s %s", p.IfName, p.Address) }
 func (f fakeNet) CheckHost(h HostConfig) error { return f.r.do("check-host %s %s", h.Veth, h.PodIP) }
 
+func (f fakeNet) LinkUp(ifname string) error { return f.r.do("link-up %s", ifname) }
+func (f fakeNet) ConfigurePodL2(p PodL2Config) error {
+	return f.r.do("pod-l2 %s %s", p.IfName, p.Address)
+}
+func (f fakeNet) HardenBridge(bridge string) error         { return f.r.do("harden %s", bridge) }
+func (f fakeNet) CheckBridgeHardening(bridge string) error { return f.r.do("check-harden %s", bridge) }
+func (f fakeNet) AddStaticFDB(hostIf string, mac net.HardwareAddr) error {
+	return f.r.do("fdb-add %s %s", hostIf, mac)
+}
+func (f fakeNet) DelStaticFDB(hostIf string, mac net.HardwareAddr) error {
+	return f.r.do("fdb-del %s %s", hostIf, mac)
+}
+func (f fakeNet) CheckPodL2(p PodL2Config) error {
+	return f.r.do("check-pod-l2 %s %s", p.IfName, p.Address)
+}
+func (f fakeNet) CheckL2Host(hostIf, bridge string) error {
+	return f.r.do("check-l2host %s %s", hostIf, bridge)
+}
+
 type fakeIPAM struct {
 	r        *recorder
 	ip       string
@@ -98,6 +117,7 @@ func (f staticDNSIPAM) Add(ctx context.Context, typ string, conf []byte) (*curre
 type fakeDaemon struct {
 	r        *recorder
 	attached map[string]bool
+	circuits map[string]uint32
 }
 
 func (f *fakeDaemon) EnsureVRF(_ context.Context, name string, table uint32) error {
@@ -125,6 +145,32 @@ func (f *fakeDaemon) DetachDevice(_ context.Context, ifname string) error {
 }
 func (f *fakeDaemon) DeviceAttached(_ context.Context, ifname string) (bool, error) {
 	return f.attached[ifname], f.r.do("rpc device-list")
+}
+func (f *fakeDaemon) EnsureBridgeDomain(_ context.Context, vrf, bridge string, bdID uint32) error {
+	return f.r.do("rpc bd-verify %s %s %d", vrf, bridge, bdID)
+}
+func (f *fakeDaemon) AddBridgeMember(_ context.Context, vrf, ifname string) error {
+	return f.r.do("rpc bridge-member-add %s %s", vrf, ifname)
+}
+func (f *fakeDaemon) RemoveBridgeMember(_ context.Context, vrf, ifname string) error {
+	return f.r.do("rpc bridge-member-remove %s %s", vrf, ifname)
+}
+func (f *fakeDaemon) CreateL2Circuit(_ context.Context, ifname string, bdID uint32) error {
+	if err := f.r.do("rpc hl2-create %s bd=%d", ifname, bdID); err != nil {
+		return err
+	}
+	if f.circuits == nil {
+		f.circuits = map[string]uint32{}
+	}
+	f.circuits[ifname] = bdID
+	return nil
+}
+func (f *fakeDaemon) DeleteL2Circuit(_ context.Context, ifname string) error {
+	delete(f.circuits, ifname)
+	return f.r.do("rpc hl2-delete %s", ifname)
+}
+func (f *fakeDaemon) L2CircuitPresent(_ context.Context, ifname string, bdID uint32) (bool, error) {
+	return f.circuits[ifname] == bdID && bdID != 0, f.r.do("rpc hl2-list")
 }
 
 func newTestPlugin(t *testing.T, ip string) (*Plugin, *recorder, string) {
@@ -497,7 +543,7 @@ func TestPodAddress(t *testing.T) {
 }
 
 func TestCheckBinding(t *testing.T) {
-	want := Binding{VRF: "v", RD: "65000:1", Locator: "LOC1"}
+	want := Binding{VRF: "v", RD: "65000:1", Locator: "LOC1", Redistribute: []string{"static"}}
 	ok := bindingProto("65000:1", "LOC1", "static")
 	if err := checkBinding(ok, want); err != nil {
 		t.Errorf("matching binding: %v", err)
