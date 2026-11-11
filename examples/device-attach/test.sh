@@ -125,7 +125,7 @@ rm -f "$STATE_FILE"
 
 start_daemon
 add_sid
-r3 ping6 -c 1 -W 1 fc00:23::2 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router3" fc00:23::2
 
 check "config device listed with source config" test "$(device_source "$downlink")" = config
 check_not "End.DT4 unreachable before the uplink is attached" ping_h2

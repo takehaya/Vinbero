@@ -80,8 +80,8 @@ sleep 1
 
 # Pre-resolve NDP/ARP (bpf_fib_lookup needs resolved neighbours)
 print_info "Pre-resolving NDP/ARP..."
-ip netns exec "$ns_router3" ping6 -c 1 -W 1 fc00:23::2 > /dev/null 2>&1 || true
-ip netns exec "$ns_router3" ip vrf exec vrf100 ping -c 1 -W 1 172.0.2.1 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router3" fc00:23::2
+resolve_neigh "$ns_router3" 172.0.2.1 vrf100
 
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero /128 over /48)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (return, native)"

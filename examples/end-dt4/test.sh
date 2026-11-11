@@ -143,7 +143,7 @@ sleep 1
 
 # Pre-resolve NDP between routers (required for bpf_fib_lookup)
 print_info "Pre-resolving NDP..."
-ip netns exec "$ns_router3" ping6 -c 1 -W 1 fc00:23::2 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router3" fc00:23::2
 
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP End.DT4 VRF)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (return path, native baseline)"

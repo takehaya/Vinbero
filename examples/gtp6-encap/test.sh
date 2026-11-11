@@ -63,12 +63,15 @@ ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8083 sid create \
 
 print_success "All entries registered"
 
-# NDP pre-resolve (H.M.GTP6.D's bpf_fib_lookup + redirect toward the
-# End.M.GTP6.E SID needs the next-hop resolved).
+# Resolve the underlay next hops. The capture below sits on router2's link
+# from router1, so router1's entry for fc00:12::2 is the one the test depends
+# on: with it resolved, H.M.GTP6.D redirects the SRv6 packet straight out of
+# XDP (bpf_fib_lookup needs the next hop resolved), which is the path under
+# test. The other two complete the underlay in both directions.
 print_info "Resolving NDP entries..."
-ip netns exec "$ns_router1" ping6 -c 1 -W 1 fc00:12::2 > /dev/null 2>&1 || true
-ip netns exec "$ns_router2" ping6 -c 1 -W 1 fc00:23::3 > /dev/null 2>&1 || true
-sleep 1
+resolve_neigh "$ns_router1" fc00:12::2
+resolve_neigh "$ns_router2" fc00:23::1
+resolve_neigh "$ns_router3" fc00:23::2
 
 # Phase 3: data-plane test. host1 (gNB) sends a raw GTP-U/IPv6 packet to the
 # H.M.GTP6.D trigger; router1 rewrites it into SRv6 toward the End.M.GTP6.E SID
@@ -88,37 +91,33 @@ if ! python3 -c "from scapy.all import IPv6, UDP, ICMPv6EchoRequest, send, conf,
 fi
 
 print_info "Capturing SRv6 on the router1->router2 link while sending..."
-rm -f /tmp/gtp6_encap.pcap  # drop any stale capture so we never read a previous run's
-# tcpdump self-terminates after -c 3 (timeout caps it if fewer arrive, so a
-# capture miss surfaces in ~8s instead of always paying a fixed drain wait).
-ip netns exec "$ns_router2" \
-    timeout 8 tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp6_encap.pcap \
-    'ip6 and dst net fc00:3::/64' 2>/dev/null &
-TCPDUMP_PID=$!
-PIDS="$TCPDUMP_PID $PIDS"  # also kill it on early exit
-sleep 1
+# Every one of the 3 packets host1 sends must cross router1 -> router2 as
+# SRv6 toward the End.M.GTP6.E SID: the capture is listening before the first
+# one leaves and router1's next hop is resolved, so nothing on the path may
+# lose a packet. tcpdump ends by itself after -c 3.
+GTP6_PCAP=/tmp/gtp6_encap.pcap
+SENT=3
+rm -f "$GTP6_PCAP"  # drop any stale capture so we never read a previous run's
+capture_start "$ns_router2" "${TOPO_NS_PREFIX}rt2rt1" "$GTP6_PCAP" -c "$SENT" \
+    'ip6 and dst net fc00:3::/64' || { PIDS="$CAPTURE_PID $PIDS"; exit 1; }
+PIDS="$CAPTURE_PID $PIDS"  # also kill it on early exit
 
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu_v6.py" \
-    --dst 2001:db8:caf::1 --teid 0xAABBCCDD --qfi 5 --count 3
+    --dst 2001:db8:caf::1 --teid 0xAABBCCDD --qfi 5 --count "$SENT"
 
-wait $TCPDUMP_PID 2>/dev/null || true
-PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
+capture_stop "$CAPTURE_PID"
+PIDS="${PIDS/$CAPTURE_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
 
-CAPTURED=0
-if [ -f /tmp/gtp6_encap.pcap ]; then
-    # tcpdump's "reading from file ..." banner goes to stderr (dropped by
-    # 2>/dev/null), so wc -l counts only packet lines -> 0 for an empty capture.
-    CAPTURED=$(tcpdump -r /tmp/gtp6_encap.pcap 2>/dev/null | wc -l)
-fi
-if [ "$CAPTURED" -gt 0 ]; then
-    print_success "H.M.GTP6.D PASS: $CAPTURED SRv6 packets toward End.M.GTP6.E captured"
-    tcpdump -r /tmp/gtp6_encap.pcap -n 2>/dev/null | head -3
+CAPTURED=$(capture_count "$GTP6_PCAP")
+if [ "$CAPTURED" -eq "$SENT" ]; then
+    print_success "H.M.GTP6.D PASS: $CAPTURED of $SENT SRv6 packets toward End.M.GTP6.E captured"
+    tcpdump -r "$GTP6_PCAP" -n 2>/dev/null | head -3
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    print_error "H.M.GTP6.D FAIL: no SRv6 packets captured on the r1->r2 link"
+    print_error "H.M.GTP6.D FAIL: $CAPTURED of $SENT SRv6 packets toward End.M.GTP6.E captured on the r1->r2 link"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
-rm -f /tmp/gtp6_encap.pcap
+rm -f "$GTP6_PCAP" "$GTP6_PCAP.log"
 
 echo ""
 echo "=========================================="

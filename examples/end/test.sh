@@ -87,23 +87,26 @@ ns_router1="${TOPO_NS_PREFIX}router1"
 ns_router3="${TOPO_NS_PREFIX}router3"
 veth_rt1_rt2="${TOPO_NS_PREFIX}rt1rt2"
 veth_rt3_rt2="${TOPO_NS_PREFIX}rt3rt2"
-in_dump=$(mktemp)
-out_dump=$(mktemp)
+in_pcap=/tmp/vinbero_end_hlim_in.pcap
+out_pcap=/tmp/vinbero_end_hlim_out.pcap
 
-ip netns exec "$ns_router1" timeout 12 tcpdump -c 1 -nn -v -Q out -i "$veth_rt1_rt2" \
-  'ip6 and ip6[6] == 43' > "$in_dump" 2>/dev/null &
-in_pid=$!
-ip netns exec "$ns_router3" timeout 12 tcpdump -c 1 -nn -v -Q in -i "$veth_rt3_rt2" \
-  'ip6 and ip6[6] == 43' > "$out_dump" 2>/dev/null &
-out_pid=$!
-sleep 2
+# Both captures must be listening before the first ping leaves, or the
+# packet they are after can pass unseen.
+# A capture that never listens must not outlive the script (-c 1 only ends it
+# once a packet arrives), so stop what is running before the failure exits.
+capture_start "$ns_router1" "$veth_rt1_rt2" "$in_pcap" -c 1 -Q out 'ip6 and ip6[6] == 43' ||
+    { kill "$CAPTURE_PID" 2>/dev/null; exit 1; }
+in_pid=$CAPTURE_PID
+capture_start "$ns_router3" "$veth_rt3_rt2" "$out_pcap" -c 1 -Q in 'ip6 and ip6[6] == 43' ||
+    { kill "$in_pid" "$CAPTURE_PID" 2>/dev/null; exit 1; }
+out_pid=$CAPTURE_PID
 ip netns exec "$ns_host1" ping -c 3 -W 2 172.0.2.1 > /dev/null 2>&1 || true
-wait $in_pid 2>/dev/null || true
-wait $out_pid 2>/dev/null || true
+capture_stop "$in_pid"
+capture_stop "$out_pid"
 
-hlim_in=$(grep -o 'hlim [0-9]*' "$in_dump" | head -1 | cut -d' ' -f2)
-hlim_out=$(grep -o 'hlim [0-9]*' "$out_dump" | head -1 | cut -d' ' -f2)
-rm -f "$in_dump" "$out_dump"
+hlim_in=$(tcpdump -nn -v -r "$in_pcap" 2>/dev/null | grep -o 'hlim [0-9]*' | head -1 | cut -d' ' -f2)
+hlim_out=$(tcpdump -nn -v -r "$out_pcap" 2>/dev/null | grep -o 'hlim [0-9]*' | head -1 | cut -d' ' -f2)
+rm -f "$in_pcap" "$in_pcap.log" "$out_pcap" "$out_pcap.log"
 
 if [ -z "$hlim_in" ] || [ -z "$hlim_out" ]; then
     print_error "hop limit across router2: no SRv6 packet captured (in='$hlim_in' out='$hlim_out')"

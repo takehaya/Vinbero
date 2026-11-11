@@ -240,15 +240,18 @@ capture_count() {
     tcpdump -r "$1" 2> /dev/null | wc -l
 }
 
-# resolve_neigh <ns> <addr>: pings <addr> from <ns> until the kernel holds
-# a resolved neighbour entry for it; returns 1 after 5 tries. bpf_fib_lookup
-# redirects only toward a resolved neighbour, so a test of the XDP redirect
-# path resolves its next hops with this before sending.
+# resolve_neigh <ns> <addr> [vrf]: pings <addr> from <ns> (from inside <vrf>
+# when given) until the kernel holds a resolved neighbour entry for it;
+# returns 1 after 5 tries. bpf_fib_lookup redirects only toward a resolved
+# neighbour, so a test of the XDP redirect path resolves its next hops with
+# this before sending.
 resolve_neigh() {
-    local ns="$1" addr="$2" ping=ping
+    local ns="$1" addr="$2" vrf="${3:-}" ping=ping
+    local -a pre=()
     [[ "$addr" == *:* ]] && ping=ping6
+    [ -n "$vrf" ] && pre=(ip vrf exec "$vrf")
     for _ in $(seq 5); do
-        ip netns exec "$ns" "$ping" -c 1 -W 1 "$addr" > /dev/null 2>&1 || true
+        ip netns exec "$ns" "${pre[@]}" "$ping" -c 1 -W 1 "$addr" > /dev/null 2>&1 || true
         ip -n "$ns" neigh show to "$addr" | grep -qE 'REACHABLE|STALE|DELAY|PROBE' && return 0
     done
     print_error "$ns: neighbour $addr not resolved"

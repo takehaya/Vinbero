@@ -54,7 +54,7 @@ sleep 1
 # Pre-resolve NDP again right before the traffic: uT is fail-closed on
 # NO_NEIGH (the kernel cannot repeat a VRF-scoped lookup), so a cold
 # neighbour table would black-hole the first pings.
-ip netns exec "$ns_router2" ping6 -c 1 -W 1 fc00:23::1 > /dev/null 2>&1 || true
+resolve_neigh "$ns_router2" fc00:23::1
 
 # The main table blackholes fd00:aaaa:b003::/48 (setup.sh), so this ping
 # is only delivered if the shift-and-forward ran in table 100: End.T

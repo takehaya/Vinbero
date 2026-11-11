@@ -80,11 +80,8 @@ print_success "SID functions registered"
 # kernel route it by the DA instead, which is a different next hop. The
 # neighbours therefore have to be resolved before the traffic, exactly as
 # classic End.X requires.
-ip netns exec "$ns_router2" ping -6 -c 3 -W 2 fc00:23::1 > /dev/null 2>&1 ||
-    print_info "NDP warm-up towards fc00:23::1 failed; the fail-closed uA path will drop"
-ip netns exec "$ns_router2" ping -6 -c 3 -W 2 fc00:12::1 > /dev/null 2>&1 ||
-    print_info "NDP warm-up towards fc00:12::1 failed; the fail-closed uA path will drop"
-sleep 1
+resolve_neigh "$ns_router2" fc00:23::1
+resolve_neigh "$ns_router2" fc00:12::1
 
 # Both directions leave router2 over the adjacency named by the uA SID, not
 # by a FIB lookup on the shifted DA: router2 has no route to the terminal
