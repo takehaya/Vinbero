@@ -124,6 +124,9 @@ EOF
 
 settings:
   state_path: /tmp/vinbero_ebs_pe${i}_state.json
+  # Each daemon its own plugin store: the nine start at once.
+  cplane_plugins:
+    path: $TMP/pe$i-cplane-plugins
   enable_stats: true
   entries:
     sid_function:
