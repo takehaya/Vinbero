@@ -550,30 +550,42 @@ func TestXDPProgIngressVrfSelectsHeadendVRF(t *testing.T) {
 	}
 }
 
-// The IPv6 F-TEID uplink (H.M.GTP6.D with BGP MUP sessions) is looked up
-// under the packet's ingress VRF, like the IPv4 one: the same {endpoint,
-// TEID} in two VRFs picks each VRF's direct SID, and a VRF with a gate but no
-// session leaves the packet alone instead of borrowing another VRF's.
-func TestXDPProgHMGtp6DTeidVRFScope(t *testing.T) {
+// The F-TEID uplink sessions (H.M.GTP4.D and H.M.GTP6.D with BGP MUP) are
+// looked up under the packet's ingress VRF: the same {endpoint, TEID} in two
+// VRFs picks each VRF's direct SID, and a VRF with a gate but no session of
+// its own leaves the frame untouched instead of borrowing the global VRF's.
+func TestXDPProgMupUplinkVRFScope(t *testing.T) {
 	h := newXDPTestHelper(t)
 	const ifidx = 1
-	const n3Endpoint = "2001:db8:e::1"
 	const teid = uint32(0x12345678)
 	src, _ := ParseIPv6("fd00:200::1")
 	direct := map[uint32]string{0: "fd00:d:a::1", 1: "fd00:d:b::2"}
+	session := func(sid string) *HeadendEntry {
+		segs, n, _ := ParseSegments([]string{sid})
+		return &HeadendEntry{Mode: modeHEncaps, NumSegments: n, SrcAddr: src, Segments: segs, ArgsOffset: MupArgsOffsetNone}
+	}
 	for _, vrf := range []uint32{0, 1, 2} {
+		if err := h.mapOps.CreateHeadendV4In(vrf, "192.0.2.0/24", &HeadendEntry{Mode: modeHMGTP4DTeid}, OwnerRPC); err != nil {
+			t.Fatal(err)
+		}
 		if err := h.mapOps.CreateHeadendV6In(vrf, "2001:db8:e::/64", &HeadendEntry{Mode: modeHMGTP6DTeid}, OwnerRPC); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for vrf, sid := range direct {
-		segs, n, _ := ParseSegments([]string{sid})
-		entry := &HeadendEntry{Mode: modeHEncaps, NumSegments: n, SrcAddr: src, Segments: segs, ArgsOffset: MupArgsOffsetNone}
-		if err := h.mapOps.CreateMupUplinkV6(vrf, n3Endpoint, teid, 32, entry); err != nil {
+		if err := h.mapOps.CreateMupUplinkV4(vrf, "192.0.2.100", teid, 32, session(sid)); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.mapOps.CreateMupUplinkV6(vrf, "2001:db8:e::1", teid, 32, session(sid)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	pkt, err := buildGTPUv6Packet(net.ParseIP("2001:db8:1::9"), net.ParseIP(n3Endpoint), teid, 0,
+	gtp4, err := buildGTPUv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), teid, 9,
+		net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gtp6, err := buildGTPUv6Packet(net.ParseIP("2001:db8:1::9"), net.ParseIP("2001:db8:e::1"), teid, 0,
 		net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4())
 	if err != nil {
 		t.Fatal(err)
@@ -581,37 +593,47 @@ func TestXDPProgHMGtp6DTeidVRFScope(t *testing.T) {
 	if err := h.mapOps.SetIngressPolicy(true, false, 0); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
+	for _, fam := range []struct {
 		name string
-		acs  map[IngressACKey]uint32
-		want string // outer DA; "" = not encapsulated
-	}{
-		{"unmapped AC: global VRF", map[IngressACKey]uint32{}, direct[0]},
-		{"AC in vrf 1", map[IngressACKey]uint32{{Ifindex: ifidx}: 1}, direct[1]},
-		{"AC in vrf 2, which has no session", map[IngressACKey]uint32{{Ifindex: ifidx}: 2}, ""},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			if err := h.mapOps.SetIngressVrf(c.acs); err != nil {
-				t.Fatal(err)
-			}
-			ret, out := h.runOnIfindex(pkt, ifidx)
-			if c.want == "" {
-				if ret != XDP_PASS || !bytes.Equal(out[:len(pkt)], pkt) {
-					t.Errorf("ret %d, want XDP_PASS with the frame untouched", ret)
+		pkt  []byte
+	}{{"H.M.GTP4.D", gtp4}, {"H.M.GTP6.D", gtp6}} {
+		for _, c := range []struct {
+			name string
+			acs  map[IngressACKey]uint32
+			want string // outer DA; "" = not encapsulated
+		}{
+			{"unmapped AC: global VRF", map[IngressACKey]uint32{}, direct[0]},
+			{"AC in vrf 1", map[IngressACKey]uint32{{Ifindex: ifidx}: 1}, direct[1]},
+			{"AC in vrf 2, which has no session", map[IngressACKey]uint32{{Ifindex: ifidx}: 2}, ""},
+		} {
+			t.Run(fam.name+" "+c.name, func(t *testing.T) {
+				if err := h.mapOps.SetIngressVrf(c.acs); err != nil {
+					t.Fatal(err)
 				}
-				return
-			}
-			if got := outerDA(out, ethHeaderLen); !got.Equal(net.ParseIP(c.want)) {
-				t.Errorf("ret %d outer DA %v, want %s", ret, got, c.want)
-			}
-		})
+				ret, out := h.runOnIfindex(fam.pkt, ifidx)
+				if c.want == "" {
+					if ret != XDP_PASS || !bytes.Equal(out[:len(fam.pkt)], fam.pkt) {
+						t.Errorf("ret %d, want XDP_PASS with the frame untouched", ret)
+					}
+					return
+				}
+				if binary.BigEndian.Uint16(out[12:14]) != 0x86dd {
+					t.Fatalf("ret %d, not encapsulated", ret)
+				}
+				if got := outerDA(out, ethHeaderLen); !got.Equal(net.ParseIP(c.want)) {
+					t.Errorf("ret %d outer DA %v, want %s", ret, got, c.want)
+				}
+			})
+		}
 	}
 }
 
 // TestXDPProgEncapOuterLookupFromTenantVRF, for the other headends that
 // build an outer header for a packet of a tenant AC: H.Encaps.L2.Red (one and two
-// segments), H.Encaps of a single-tagged and of a QinQ frame, H.M.GTP6.D,
-// the End.AS (IPv4, IPv6, Ethernet), End.AD and End.AM return circuits, and
+// segments), H.Encaps of a single-tagged and of a QinQ frame, H.Encaps.Red
+// (IPv4, IPv6), H.Insert.Red (one and two segments), H.M.GTP6.D (prefix and
+// F-TEID), H.M.GTP4.D (F-TEID), the End.AS (IPv4, IPv6, Ethernet), End.AD
+// and End.AM return circuits, and
 // an L2 and an End.AS circuit on a VLAN tag the front door has no AC for
 // (the frame keeps the tenant VRF of the port's untagged AC). From the tenant VRF the outer
 // header resolves through the main table; the same packets with the port's
@@ -642,14 +664,33 @@ func TestXDPProgEncapOuterLookupFromTenantVRFOtherHeadends(t *testing.T) {
 	h.createHeadendL2EntryWithMode(e.tenant, vlanL2Red2, src, segs2, n2, 0, red)
 	h.createHeadendL2Entry(e.tenant, vlanNoAC, src, segs1, n1, 0)
 	h.createHeadendEntry("10.99.0.0/24", src, [16]byte{}, segs1, n1, true)
+	encRed := vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED
+	insRed := vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT_RED
+	h.createHeadendEntryWithMode("10.96.0.0/24", src, [16]byte{}, segs1, n1, true, encRed)
+	h.createHeadendEntryWithMode("2001:db8:96::/64", src, [16]byte{}, segs1, n1, false, encRed)
+	h.createHeadendEntryWithMode("2001:db8:95::/64", src, [16]byte{}, segs1, n1, false, insRed)
+	h.createHeadendEntryWithMode("2001:db8:94::/64", src, [16]byte{}, segs2, n2, false, insRed)
 
+	// GTP-U uplinks: prefix-keyed H.M.GTP6.D, and the F-TEID gates and
+	// sessions of both families.
+	mupSession := &HeadendEntry{Mode: modeHEncaps, NumSegments: n1, SrcAddr: src, Segments: segs1, ArgsOffset: MupArgsOffsetNone}
 	for _, vrf := range h.headendVRFs {
+		if err := h.mapOps.CreateHeadendV6In(vrf, "2001:db8:e2::/64", &HeadendEntry{
+			Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D),
+			NumSegments: n1, SrcAddr: src, Segments: segs1, ArgsOffset: 7,
+		}, OwnerRPC); err != nil {
+			t.Fatal(err)
+		}
 		if err := h.mapOps.CreateHeadendV6In(vrf, "2001:db8:e::/64", &HeadendEntry{Mode: modeHMGTP6DTeid}, OwnerRPC); err != nil {
 			t.Fatal(err)
 		}
-		if err := h.mapOps.CreateMupUplinkV6(vrf, "2001:db8:e::1", 0x12345678, 32, &HeadendEntry{
-			Mode: modeHEncaps, NumSegments: n1, SrcAddr: src, Segments: segs1, ArgsOffset: MupArgsOffsetNone,
-		}); err != nil {
+		if err := h.mapOps.CreateMupUplinkV6(vrf, "2001:db8:e::1", 0x12345678, 32, mupSession); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.mapOps.CreateHeadendV4In(vrf, "192.0.3.0/24", &HeadendEntry{Mode: modeHMGTP4DTeid}, OwnerRPC); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.mapOps.CreateMupUplinkV4(vrf, "192.0.3.100", 0x12345678, 32, mupSession); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -721,15 +762,29 @@ func TestXDPProgEncapOuterLookupFromTenantVRFOtherHeadends(t *testing.T) {
 	// Segment List[0]); de-masquerading restores Segment List[SL].
 	am := withVlanTag(mustPkt(buildSRv6Packet(net.ParseIP("fc00::1"), net.ParseIP("fc00:e00::3"),
 		[]net.IP{net.ParseIP("fc00:e00::3"), net.ParseIP("fc00:e00::4"), net.ParseIP("fc00:a15a::1")}, 1)), vlanAM)
-	gtp6 := mustPkt(buildGTPUv6Packet(net.ParseIP("2001:db8:1::9"), net.ParseIP("2001:db8:e::1"), 0x12345678, 0,
+	gtp6 := func(dst string) []byte {
+		return mustPkt(buildGTPUv6Packet(net.ParseIP("2001:db8:1::9"), net.ParseIP(dst), 0x12345678, 0,
+			net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4()))
+	}
+	gtp4teid := mustPkt(buildGTPUv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.3.100").To4(), 0x12345678, 9,
 		net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4()))
+	red4 := mustPkt(buildSimpleIPv4Packet(net.ParseIP("10.98.0.1"), net.ParseIP("10.96.0.1")))
+	red6 := mustPkt(buildSimpleIPv6Packet(net.ParseIP("2001:db8:97::1"), net.ParseIP("2001:db8:96::1")))
+	insRed1 := mustPkt(buildSimpleIPv6Packet(net.ParseIP("2001:db8:97::1"), net.ParseIP("2001:db8:95::1")))
+	insRed2 := mustPkt(buildSimpleIPv6Packet(net.ParseIP("2001:db8:97::1"), net.ParseIP("2001:db8:94::1")))
 	cases := []struct {
 		name string
 		pkt  []byte
 	}{
 		{"H.Encaps.L2.Red (one segment)", v4(vlanL2Red1)},
 		{"H.Encaps.L2.Red (two segments)", v4(vlanL2Red2)},
-		{"H.M.GTP6.D", gtp6},
+		{"H.M.GTP6.D (prefix)", gtp6("2001:db8:e2::1")},
+		{"H.M.GTP6.D (F-TEID)", gtp6("2001:db8:e::1")},
+		{"H.M.GTP4.D (F-TEID)", gtp4teid},
+		{"H.Encaps.Red (IPv4)", red4},
+		{"H.Encaps.Red (IPv6)", red6},
+		{"H.Insert.Red (one segment)", insRed1},
+		{"H.Insert.Red (two segments)", insRed2},
 		{"End.AS return (IPv4)", v4(vlanAS)},
 		{"End.AS return (IPv6)", v6(vlanAS6)},
 		{"End.AS return (Ethernet circuit)", v4(vlanASEth)},
