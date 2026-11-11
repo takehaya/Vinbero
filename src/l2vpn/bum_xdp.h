@@ -105,6 +105,13 @@ struct {
 // (bum_xdp_broadcast), so a BD with few peers does not pay for the empty
 // ones, and a slot key that misses tells the plan it holds another build's
 // devmap.
+//
+// The control plane rewrites the value in place, so a frame planned while
+// it does may read gen and mask of different builds. That costs copies,
+// never sends one wrong: probes under a gen the devmap does not carry miss
+// (tc path), and slot entries a smaller mask leaves out have no plan item,
+// whose copies the egress program drops unless the device is a local AC of
+// the BD (bum_egress.c).
 struct bum_slots {
     __u32 gen;                // BUM_SLOT_KEY's gen of the devmaps' slot keys
     __u32 mask;               // bit i = slot i has an entry in the flood devmap

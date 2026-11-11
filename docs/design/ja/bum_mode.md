@@ -46,7 +46,7 @@ xdp モードで 1 つの BD に入れられる数（ローカル AC のデバ�
 
 devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。内側の map の大きさは、入れるエントリー数（ローカル AC のデバイスとスロットの数）を 2 のべき乗に切り上げた値（最小 4）です。broadcast は DEVMAP_HASH のバケットをすべてたどるので、小さい BD は小さい devmap で済みます。
 
-組み立てるたびに番号を振り、スロットの key にその番号を入れます。差し替えの前に、その組み立てで devmap に入れたスロットの集合と番号を `bum_slots_map[bd_id]` に書きます。ingress program は、この集合のスロットだけを、その番号の key で devmap から引きます。1 つでも見つからなければ、引いた devmap は別の組み立てのもの（差し替えの最中や、デバイスの登録解除で kernel が消したエントリーがある場合）なので、そのフレームは tc モードの経路へ回します（`BUM_XDP_FALLBACK`）。plan の項目がないスロットのコピーを broadcast しないためです。集合が空の BD は、スロットのエントリーを持たない `bum_local_map[bd_id]` で broadcast します。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
+組み立てるたびに番号を振り、スロットの key にその番号を入れます。差し替えの前に、その組み立てで devmap に入れたスロットの集合と番号を `bum_slots_map[bd_id]` に書きます。組み立て直しの最中に読んだフレームは、番号と集合を別々の組み立てから読むことがあります。その場合も送り先を誤ることはありません。devmap にない番号なら key が見つからず tc モードの経路へ回り、集合が小さければ、入っていないスロットのコピーは plan に項目がなく、egress program が破棄します（次節の手順 3）。ingress program は、この集合のスロットだけを、その番号の key で devmap から引きます。1 つでも見つからなければ、引いた devmap は別の組み立てのもの（差し替えの最中や、デバイスの登録解除で kernel が消したエントリーがある場合）なので、そのフレームは tc モードの経路へ回します（`BUM_XDP_FALLBACK`）。plan の項目がないスロットのコピーを broadcast しないためです。集合が空の BD は、スロットのエントリーを持たない `bum_local_map[bd_id]` で broadcast します。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
 
 xdp モードで正しく扱えない BD には、control plane は devmap を作りません。次の 4 つです。
 
@@ -80,7 +80,7 @@ egress program の手順は次のとおりです。
 
 1. 担当する `seq` と送信元 AC を決めます。generic XDP では、この CPU の最新の seq（`bum_seq` の値 − 1）と `ctx->ingress_ifindex` です。native XDP では、コピーが運ぶ metadata から読みます（後述）。
 2. `bum_plan_ring[seq & 1023]` を引き、plan の `seq`、送信元 AC、フレーム長がコピーと一致するか確かめます。一致しなければ破棄し、`BUM_PLAN_STALE` を数えます。
-3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。項目がなければ、スロットのエントリーがないデバイス、つまりローカル AC へのコピーなので、そのまま `XDP_PASS` で送ります（ローカル AC のエントリーにも program を付ける native XDP で起きます）。
+3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。項目がなければ、スロットのエントリーがないデバイス、つまりローカル AC へのコピーなので、そのまま `XDP_PASS` で送ります（ローカル AC のエントリーにも program を付ける native XDP で起きます）。ただし、そのデバイスが BD のローカル AC（flood の devmap の key）でなければ破棄し、`BUM_PLAN_SURPLUS` を数えます。plan が組み立て直しの最中に読んだスロットの集合から漏れたスロットのコピーで、encap せずに uplink へ出してはいけないためです。
 4. `idx < n` なら、集合の `idx` 番目のスロットの peer へ encap し、FIB の出力先がエントリーの uplink と一致することを確かめてから、`XDP_PASS` で送ります。
 5. `idx == n` で `local` が 1 なら、そのデバイスのローカル AC へのコピーとして、そのまま `XDP_PASS` で送ります。コピーはどれも同じなので、どのコピーをローカル用にしても結果は変わりません。
 6. それ以外は破棄し、`BUM_PLAN_SURPLUS` を数えます。devmap のエントリーは uplink の先の peer の数だけあるので、split horizon や `flood_exclude` で ingress が除いた分だけコピーが余ります。入力ポートを除かずに broadcast したときの、送信元 AC 自身へのコピーもここで破棄されます。

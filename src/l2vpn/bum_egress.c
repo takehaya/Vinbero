@@ -128,6 +128,14 @@ static __always_inline int bum_plan_nth_slot(__u32 slots, __u32 idx)
     return -1;
 }
 
+// Whether ifindex is a local AC of the BD: a key of its flood devmap.
+static __always_inline bool bum_is_local_ac(__u16 bd_id, __u32 ifindex)
+{
+    __u32 key = bd_id;
+    void *flood = bpf_map_lookup_elem(&bum_flood_map, &key);
+    return flood && bpf_map_lookup_elem(flood, &ifindex) != NULL;
+}
+
 static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u32 ingress_if, __u32 egress_if)
 {
     void *data = (void *)(long)ctx->data;
@@ -162,13 +170,18 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     // not matter: the first one past the slots. The copies beyond that are
     // surplus, among them the ingress AC's own when the broadcast had to
     // include the ingress device (item.local is 0 there).
-    // A device without an item has no slot entry in the devmap: the copy is
-    // its local AC's (native XDP, where every entry carries this program).
+    // A device without an item is a local AC whose entry carries this
+    // program (native XDP), and the copy leaves as is. It can also be the
+    // uplink of a slot entry the plan does not cover: the plan read the
+    // BD's slots from bum_slots_map while a rebuild rewrote them, and a
+    // read of that value is not one load. Such a copy must not leave
+    // unencapsulated, so a device that is no AC of the BD drops it.
     if (!up) {
-        if (egress_if != ingress_if)
-            return XDP_PASS;
-        STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
-        return XDP_DROP;
+        if (egress_if == ingress_if || !bum_is_local_ac(plan->bd_id, egress_if)) {
+            STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
+            return XDP_DROP;
+        }
+        return XDP_PASS;
     }
     __u32 idx = up->next_idx++;
     if (idx >= up->n) {

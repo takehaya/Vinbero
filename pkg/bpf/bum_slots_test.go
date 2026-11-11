@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -267,5 +268,48 @@ func TestBumDevmapSyncAt32Slots(t *testing.T) {
 	}
 	if _, ok := s.unserved[bumTestBD]; ok {
 		t.Error("the BD still counts as falling back")
+	}
+}
+
+// A slot entry the plan does not cover, as when it read a smaller set of
+// slots than the devmap's while a rebuild rewrote bum_slots_map: its copy
+// reaches the egress program on an uplink with no plan item and is dropped,
+// never sent unencapsulated. A copy for a local AC of the BD without an
+// item still leaves as is.
+func TestBumUncoveredSlotIsDropped(t *testing.T) {
+	c := newEgressCase(t)
+	nh := c.nexthop.String()
+	l2 := bumFrame(t)
+	var noESI [ESILen]byte
+	up2 := dummyIfindex(t, "bumcov-up")
+	ac2 := dummyIfindex(t, "bumcov-ac")
+	c.h.bumAC(ac2)
+	c.uplinkOf["fc00::99"] = up2
+	c.peer(t, 0, l2EncapMode, []string{nh, lastSegment(0).String()}, noESI, false)
+	c.peer(t, 1, l2EncapMode, []string{"fc00::99", lastSegment(1).String()}, noESI, false)
+	c.ingress(t, l2)
+	full := bumSlotsOf(t, c.h.objs, bumTestBD)
+	if full.Mask != 0b11 {
+		t.Fatalf("bum_slots = %+v, want slots 0 and 1", full)
+	}
+	// The plan sees slot 0 only; the devmap still holds slot 1's entry.
+	if err := c.h.objs.BumSlotsMap.Put(uint32(bumTestBD), &BpfBumSlots{Gen: full.Gen, Mask: 0b01}); err != nil {
+		t.Fatal(err)
+	}
+	if ret, _ := c.h.run(l2); ret != XDP_REDIRECT {
+		t.Fatalf("ingress: action = %d, want XDP_REDIRECT", ret)
+	}
+	before := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS")
+	if ret, out := c.egress(t, 1, up2, false, l2); ret != XDP_DROP {
+		t.Fatalf("copy of the uncovered slot: action = %d (len %d), want XDP_DROP", ret, len(out))
+	}
+	if n := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS"); n != before+1 {
+		t.Errorf("BUM_PLAN_SURPLUS = %d, want %d", n, before+1)
+	}
+	if ret, out := c.egress(t, 1, ac2, false, l2); ret != XDP_PASS || !bytes.Equal(out[:len(l2)], l2) {
+		t.Errorf("copy for a local AC without an item: action = %d, want XDP_PASS and the frame unchanged", ret)
+	}
+	if ret, _ := c.egress(t, 1, c.uplink, false, l2); ret != XDP_PASS {
+		t.Errorf("copy of the covered slot: action = %d, want XDP_PASS", ret)
 	}
 }
