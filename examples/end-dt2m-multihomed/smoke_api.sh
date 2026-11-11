@@ -22,6 +22,7 @@ VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 NS="dt2m-smoke"
 DUMMY_IF="dt2m-dum0"
 CFG="/tmp/vinbero_smoke_api.yaml"
+STATE="/tmp/vinbero_smoke_api_state.json"
 LOG="/tmp/vinbero_smoke_api.log"
 BIND="127.0.0.1:18082"
 VINBERO_PID=""
@@ -36,9 +37,10 @@ cleanup() {
         wait "$VINBERO_PID" 2>/dev/null || true
     fi
     ip netns del "$NS" 2>/dev/null || true
-    rm -f "$CFG"
+    rm -f "$CFG" "$STATE"
 }
 trap cleanup EXIT
+rm -f "$STATE"
 
 assert_ok() {
     local desc="$1"; shift
@@ -89,6 +91,8 @@ internal:
     add_caller: false
 
 settings:
+  # The Ethernet Segments are saved here, apart from other daemons.
+  state_path: $STATE
   entries:
     sid_function:
       capacity: 1024

@@ -78,6 +78,13 @@ sudo ./teardown.sh
    - Switch the DF to PE2 with
      `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`,
      after which the traffic arrives via PE2.
+3. **Restart (phase E)**: PE1 runs with pinned maps. It is killed, its pinned
+   `headend_l2_map` is removed, and it is started again with nothing
+   configured again. ES-1 (with PE2 as its DF) and the L2 headend circuit
+   come back from PE1's state file (`esi_map` is not pinned, so the state
+   file is the only place they can come from); the End.DT2M SID and the BD
+   peers come back from the pinned maps. host2's broadcast still reaches
+   host1 through PE2 only, and PE1 still sends host1's broadcast to PE3 only.
 
 ## Status
 

@@ -27,7 +27,7 @@ graph LR
 1. BGP EVPN による MAC と flood 宛先の交換。各 PE は相手の customer MAC を RT2 で学習し (`fdb_map` の remote エントリが相手の End.DT2U SID を segment に持つ `bd_peer` を指す)、相手の BUM flood 宛先を RT3 で学習する (相手の End.DT2M SID へ向かう 2 つ目の `bd_peer`)。SAFI 70 のセッションと RT2 / RT3 の SRv6 L2 Service TLV + PMSI の decode がすべて動作する。
 2. データプレーンの双方向通信。`ce-tokyo` と `ce-osaka` が stretched L2 domain 越しに ping でき、フレームは相手の End.DT2U SID へ H.Encaps.L2 され (core 上で外側 DA を capture して確認)、相手側の bridge に decap される。BGP で学習した RT2 が実際に L2 転送経路を駆動する。
 3. BUM flood。customer host に static ARP はなく、ARP broadcast が EVPN 越しに相手の End.DT2M SID へ flood されて動的に解決し、その後ユニキャストが RT2 経路に乗る。
-4. 再起動をまたぐ binding。pe-osaka の vinberod を再起動し、`vbctl vrf-bgp bind` はやり直さない。binding は state file から戻り、LOC1 を登録し直すと、pe-tokyo の RT2 が ce-tokyo の MAC を再び bd 100 に入れる。
+4. 再起動をまたぐ binding と locator。pe-osaka の vinberod を再起動し、`vbctl vrf-bgp bind` も `vbctl locator create` もやり直さない。binding と LOC1 (source locator) は state file から戻り、pe-tokyo の RT2 が ce-tokyo の MAC を再び bd 100 に入れる。
 
 ## スコープ
 

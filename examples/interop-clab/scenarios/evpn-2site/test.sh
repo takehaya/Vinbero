@@ -12,8 +12,9 @@
 #      End.DT2U SID (outer DA on the core link);
 #   3. BUM flood: the CEs resolve ARP dynamically (no static ARP) -- the ARP
 #      broadcast is flooded over the EVPN, proving RT3 / End.DT2M works;
-#   4. the EVPN binding pe-osaka made over the API comes back from the state
-#      file when its vinberod restarts, and imports pe-tokyo's RT2 again.
+#   4. the EVPN binding and the locator pe-osaka made over the API come back
+#      from the state file when its vinberod restarts, and pe-tokyo's RT2 is
+#      imported again.
 #
 # Exit non-zero on the first failed assertion.
 set -u
@@ -197,12 +198,12 @@ rm -f "$fcap"
 # --- 4. The EVPN binding made over the API survives a daemon restart --------
 echo ""
 echo "[4] pe-osaka's vinberod restarts with its EVPN binding"
-# start.sh bound evi-100 with `vbctl vrf-bgp bind`. The daemon is restarted
-# and not bound again: the binding comes back from the state file, the bridge
-# facet with it. The maps are not pinned and LOC1 was registered over the
-# API, so LOC1 is registered again (the source locator RT2 installs need);
-# pe-tokyo's RT2 then installs ce-tokyo's MAC into bd 100 once more, which
-# only a binding importing 65000:100 into evi-100 allows.
+# start.sh bound evi-100 with `vbctl vrf-bgp bind` and registered LOC1 with
+# `vbctl locator create`. The daemon is restarted and nothing is done again:
+# the binding comes back from the state file, the bridge facet with it, and
+# so does LOC1, the source locator RT2 installs need. pe-tokyo's RT2 then
+# installs ce-tokyo's MAC into bd 100 once more, which only a binding
+# importing 65000:100 into evi-100 allows.
 osaka_pid=$(dexec "$PE_OSAKA" cat /var/run/vinberod.pid)
 dexec "$PE_OSAKA" kill -TERM "$osaka_pid"
 # start.sh has exited, so nothing reaps the old daemon: a zombie counts as
@@ -237,11 +238,12 @@ else
     ng "pe-osaka lost evi-100's binding over the restart"
 fi
 dexec "$PE_OSAKA" vbctl vrf-bgp list | sed 's/^/      /'
-dexec "$PE_OSAKA" vbctl locator create \
-    --name LOC1 \
-    --prefix fd00:200::/48 \
-    --block-len 32 --node-len 16 --function-len 16 --argument-len 64 \
-    --behavior classic >/dev/null
+if dexec "$PE_OSAKA" vbctl locator list 2>/dev/null | grep -q 'LOC1.*fd00:200::/48'; then
+    ok "pe-osaka restored LOC1 without a new locator create"
+else
+    ng "pe-osaka lost LOC1 over the restart"
+    dexec "$PE_OSAKA" vbctl locator list || true
+fi
 if retry osaka_learned_tokyo_mac; then
     ok "pe-osaka learned ce-tokyo's MAC ($CE_TOKYO_MAC) via RT2 again after the restart"
 else

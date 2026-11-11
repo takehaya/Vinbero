@@ -75,6 +75,12 @@ sudo ./teardown.sh
    - DF を PE2 に切り替え:
      `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`
      → 以降は PE2 経由で届く。
+3. **再起動 (Phase E)**: PE1 は map を pin して動かします。PE1 を kill し、
+   pin した `headend_l2_map` を消してから、何も設定し直さずに起動し直します。
+   ES-1 (DF は PE2) と L2 headend の回線は PE1 の state file から戻ります
+   (`esi_map` は pin しないので、戻る元は state file だけです)。End.DT2M SID と
+   BD peer は pin した map から戻ります。host2 の broadcast は引き続き PE2
+   経由でだけ host1 に届き、PE1 は host1 の broadcast を PE3 にだけ送ります。
 
 ## ステータス
 
