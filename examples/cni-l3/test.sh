@@ -94,7 +94,7 @@ bgp_sockets() {
     [[ -e "$work/bgp-sockets.txt" ]] && return 0
     for ns in "$PE1" "$PE2"; do
         echo "--- BGP sockets in $ns at the first timeout"
-        ip netns exec "$ns" ss -tno '( sport = :179 or dport = :179 )' 2>&1 || true
+        ip netns exec "$ns" ss -tano '( sport = :179 or dport = :179 )' 2>&1 || true
     done > "$work/bgp-sockets.txt"
 }
 
