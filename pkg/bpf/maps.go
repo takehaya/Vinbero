@@ -31,10 +31,8 @@ const (
 // The bd_peer index layout of one bridge domain. It must match MAX_BUM_NEXTHOPS
 // and the BD_PEER_* definitions in src/core/xdp_prog.h.
 //
-//   - [0, BdPeerFloodReserved): flood slots, for RT3 (End.DT2M) peers and
-//     the operator's and plugins' flood peers. The BUM loops scan
-//     [0, MaxBumNexthops) only; the rest of the range is kept free, so the
-//     flood count can grow without moving the ranges below.
+//   - [0, MaxBumNexthops): flood slots, for RT3 (End.DT2M) peers and the
+//     operator's and plugins' flood peers: the targets of the BUM loops.
 //   - [EsPeerIndexBase, +MaxEsPeersPerBd): the synthetic Ethernet Segment
 //     peers of EVPN aliasing, which only the BGP applier allocates. An FDB
 //     entry pointing here is a control-plane pointer MAC learning leaves
@@ -43,9 +41,8 @@ const (
 //     RT2 (End.DT2U) and plugin unicast-only peers (FloodExclude set). They
 //     are never flooded to and do not take a flood slot.
 const (
-	MaxBumNexthops       = 8
-	BdPeerFloodReserved  = 32
-	EsPeerIndexBase      = BdPeerFloodReserved
+	MaxBumNexthops       = 32
+	EsPeerIndexBase      = 32
 	MaxEsPeersPerBd      = 32
 	UnicastPeerIndexBase = EsPeerIndexBase + MaxEsPeersPerBd
 	MaxUnicastPeersPerBd = 64
@@ -57,7 +54,9 @@ const (
 
 // Compile-time checks of the layout: a negative array length does not build.
 var (
-	_ [BdPeerFloodReserved - MaxBumNexthops]struct{}
+	_ [EsPeerIndexBase - MaxBumNexthops]struct{}
+	// The flood slot sets (bum_slots_map, bd_flood_slots_map) are 32 bits.
+	_ [32 - MaxBumNexthops]struct{}
 	_ [bdPeerIndexInvalid - (UnicastPeerIndexBase + MaxUnicastPeersPerBd)]struct{}
 )
 
@@ -81,17 +80,17 @@ func (r BdPeerRange) String() string {
 }
 
 var (
-	// FloodPeerRange holds the flood slots in use.
+	// FloodPeerRange holds the flood slots.
 	FloodPeerRange = BdPeerRange{Name: "flood", Base: 0, Count: MaxBumNexthops}
-	// ReservedFloodPeerRange is the part of the flood range kept free.
-	ReservedFloodPeerRange = BdPeerRange{Name: "reserved flood", Base: MaxBumNexthops, Count: BdPeerFloodReserved - MaxBumNexthops}
 	// EsPeerRange holds the synthetic Ethernet Segment peers.
 	EsPeerRange = BdPeerRange{Name: "Ethernet Segment", Base: EsPeerIndexBase, Count: MaxEsPeersPerBd}
 	// UnicastPeerRange holds the known-unicast peers.
 	UnicastPeerRange = BdPeerRange{Name: "unicast", Base: UnicastPeerIndexBase, Count: MaxUnicastPeersPerBd}
 	// LegacyEsPeerRange is where the Ethernet Segment peers were placed
 	// when the flood slots and the RT2 peers shared [0, 8). Pinned maps of
-	// such a run can still hold them; the EVPN startup sweep removes them.
+	// such a run can still hold them; the EVPN startup sweep removes them,
+	// and the part inside the flood range only where the entry is one (an
+	// ECMP group, IsLegacyEsPeer).
 	LegacyEsPeerRange = BdPeerRange{Name: "Ethernet Segment of the earlier layout", Base: 8, Count: 32}
 )
 
@@ -3114,10 +3113,19 @@ func (m *MapOperations) createBdPeerLocked(bdID, index uint16, entry *HeadendEnt
 		if derr := m.objs.BdPeerMap.Delete(key); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
 			return derr
 		}
+		m.clearBdFloodSlotLocked(bdID, index)
 		return nil
 	}
 
+	// The slot's bit goes first: the tc path floods only to the slots
+	// bd_flood_slots_map lists.
+	if err := m.setBdFloodSlotLocked(bdID, index, true); err != nil {
+		return err
+	}
 	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
+		if !hadFwd {
+			m.clearBdFloodSlotLocked(bdID, index)
+		}
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
 	}
 
@@ -3296,6 +3304,7 @@ func (m *MapOperations) deleteBdPeerLocked(bdID, index uint16) (existed bool, er
 			// Already free. Any stale companions were still drained above,
 			// which is the only place that cleans them: the startup sweep
 			// enumerates via the forward map and cannot see them.
+			m.clearBdFloodSlotLocked(bdID, index)
 			return false, nil
 		}
 		// The peer is still forwarding: put its companion state back
@@ -3312,7 +3321,84 @@ func (m *MapOperations) deleteBdPeerLocked(bdID, index uint16) (existed bool, er
 		}
 		return true, derr
 	}
+	m.clearBdFloodSlotLocked(bdID, index)
 	return true, nil
+}
+
+// clearBdFloodSlotLocked clears the bit of a flood slot whose peer is gone.
+// A bit left set costs the tc path one lookup per frame until the next
+// create at that index or the next start, so a failure is not the delete's.
+func (m *MapOperations) clearBdFloodSlotLocked(bdID, index uint16) {
+	_ = m.setBdFloodSlotLocked(bdID, index, false)
+}
+
+// setBdFloodSlotLocked sets or clears the bit of a flood slot in
+// bd_flood_slots_map, the slots the tc path floods to. Indices outside the
+// flood range have no bit. The caller holds bdPeerLifecycle, which every
+// writer of the map holds.
+func (m *MapOperations) setBdFloodSlotLocked(bdID, index uint16, set bool) error {
+	if !FloodPeerRange.Contains(index) {
+		return nil
+	}
+	key := uint32(bdID)
+	var cur uint32
+	if err := m.objs.BdFloodSlotsMap.Lookup(key, &cur); err != nil {
+		return fmt.Errorf("read the flood slots of bd %d: %w", bdID, err)
+	}
+	next := cur &^ (1 << index)
+	if set {
+		next = cur | 1<<index
+	}
+	if next == cur {
+		return nil
+	}
+	if err := m.objs.BdFloodSlotsMap.Put(key, next); err != nil {
+		return fmt.Errorf("write the flood slots of bd %d: %w", bdID, err)
+	}
+	return nil
+}
+
+// RecoverBdFloodSlots rewrites bd_flood_slots_map from bd_peer_map: the
+// slots of every bridge domain's flood peers. The map is not pinned, so a
+// start over pinned peers fills it here, before the data plane runs.
+func (m *MapOperations) RecoverBdFloodSlots() error {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	peers, err := m.ListBdPeers()
+	if err != nil {
+		return err
+	}
+	slots := map[uint16]uint32{}
+	for k := range peers {
+		if FloodPeerRange.Contains(k.Index) {
+			slots[k.BdId] |= 1 << k.Index
+		}
+	}
+	var (
+		key uint32
+		cur uint32
+	)
+	it := m.objs.BdFloodSlotsMap.Iterate()
+	var stale []uint32
+	for it.Next(&key, &cur) {
+		if cur != 0 && cur != slots[uint16(key)] {
+			stale = append(stale, key)
+		}
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("read bd_flood_slots_map: %w", err)
+	}
+	for _, k := range stale {
+		if err := m.objs.BdFloodSlotsMap.Put(k, slots[uint16(k)]); err != nil {
+			return fmt.Errorf("write the flood slots of bd %d: %w", k, err)
+		}
+	}
+	for bd, v := range slots {
+		if err := m.objs.BdFloodSlotsMap.Put(uint32(bd), v); err != nil {
+			return fmt.Errorf("write the flood slots of bd %d: %w", bd, err)
+		}
+	}
+	return nil
 }
 
 // GetBdPeer retrieves a BD peer entry

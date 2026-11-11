@@ -4,7 +4,7 @@
 
 Bridge Domain の peer へ複数の経路（multipath）でつながっているときの、xdp モードの BUM 複製を確かめます。PE は transit のルーターへ 2 本の uplink を持ち、peer は `fc00:100::/32` の locator で、両方の uplink への経路があります。
 
-試験は `peer create` で peer を 8 個作り、Bridge Domain の flood スロット 8 つをすべて使います。1 つの Bridge Domain が flood するリモート PE は 8 台（計 9 node）までで、スロットは BGP が入れる EVPN の RT3 の peer と共有します（[bum_mode.md](../../docs/design/ja/bum_mode.md)）。
+試験は `peer create` で peer を 8 個作り、Bridge Domain の flood スロット 32 個のうち 8 個を使います。1 つの Bridge Domain が flood するリモート PE は 32 台（計 33 node）までで、スロットは BGP が入れる EVPN の RT3 の peer と共有します（[bum_mode.md](../../docs/design/ja/bum_mode.md)）。
 
 ```mermaid
 graph LR

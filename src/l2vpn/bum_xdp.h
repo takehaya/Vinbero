@@ -49,11 +49,15 @@ struct bd_config {
 
 _Static_assert(sizeof(struct bd_config) == 4, "bd_config layout");
 
-// Devmap key of remote flood slot i. Local ACs are keyed by their ifindex,
-// which never has the top bit set.
+// Devmap key of remote flood slot i in the devmaps of build gen (struct
+// bum_slots). Local ACs are keyed by their ifindex, which never has the top
+// bit set.
 #define BUM_SLOT_KEY_BASE 0x80000000u
-// Local ACs plus MAX_BUM_NEXTHOPS slots. Small on purpose: a broadcast
-// walks every bucket of the DEVMAP_HASH.
+#define BUM_SLOT_GEN_MASK 0x7fffffu
+#define BUM_SLOT_KEY(gen, i) (BUM_SLOT_KEY_BASE | (((gen) & BUM_SLOT_GEN_MASK) << 8) | (i))
+// The inner devmap template. The control plane sizes each BD's devmaps to
+// what they hold (bum_devmap.go): a broadcast walks every bucket of a
+// DEVMAP_HASH, so a small BD keeps a small one.
 #define BUM_DEVMAP_MAX_ENTRIES 32
 #define BUM_MAX_BDS 4096
 
@@ -95,6 +99,26 @@ struct {
     __array(values, struct bum_devmap);
 } bum_local_map SEC(".maps");
 
+// bd_id -> which flood slots the BD's flood devmap holds an entry for, and
+// the build number its slot keys carry. Written by the control plane before
+// it installs the devmaps of that build. The plan probes only these slots
+// (bum_xdp_broadcast), so a BD with few peers does not pay for the empty
+// ones, and a slot key that misses tells the plan it holds another build's
+// devmap.
+struct bum_slots {
+    __u32 gen;                // BUM_SLOT_KEY's gen of the devmaps' slot keys
+    __u32 mask;               // bit i = slot i has an entry in the flood devmap
+};
+
+_Static_assert(MAX_BUM_NEXTHOPS <= 32, "bum_slots.mask is a 32-bit slot set");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1 << 16);
+    __type(key, __u32);
+    __type(value, struct bum_slots);
+} bum_slots_map SEC(".maps");
+
 // Local MAC learned (or moved) by the XDP learner in an xdp-mode BD. The
 // kernel bridge never sees those frames, so this replaces its FDB netlink
 // events as the input of EVPN RT2 auto-advertise.
@@ -133,14 +157,17 @@ struct {
 //   bum_xdp_meta), which every copy carries. The flush runs on the same
 //   CPU within the same poll, well inside the ring.
 #define BUM_PLAN_RING_SIZE 1024
-#define BUM_PLAN_MAX_UPLINKS MAX_BUM_NEXTHOPS
+// Distinct uplinks one plan holds. A BD whose flood peers leave through
+// more takes the tc path (bum_devmap.go).
+#define BUM_PLAN_MAX_UPLINKS 8
 
 _Static_assert((BUM_PLAN_RING_SIZE & (BUM_PLAN_RING_SIZE - 1)) == 0, "ring size must be a power of two");
-_Static_assert(MAX_BUM_NEXTHOPS <= 8, "bum_plan_uplink.slots is an 8-bit slot set");
+_Static_assert(MAX_BUM_NEXTHOPS <= 32, "bum_plan_uplink.slots is a 32-bit slot set");
+_Static_assert(BUM_PLAN_MAX_UPLINKS <= MAX_BUM_NEXTHOPS, "an uplink item holds at least one slot");
 
 struct bum_plan_uplink {
     __u32 ifindex;            // uplink (devmap entry ifindex)
-    __u8 slots;               // flood slots to send through it, bit i = slot i
+    __u32 slots;              // flood slots to send through it, bit i = slot i
     __u8 n;                   // number of bits set in slots
     __u8 next_idx;            // copies handed out so far (egress)
     __u8 local;               // also a local AC of the BD: one copy leaves as is
@@ -154,11 +181,12 @@ struct bum_plan {
     __u16 len;                // frame length as broadcast
     __u8 n_uplinks;
     __u8 shared;              // remote copies seen on the ingress buffer
-    __u8 _pad[6];
+    __u8 hairpin;             // a planned slot's uplink is the source AC
+    __u8 _pad[5];
     struct bum_plan_uplink up[BUM_PLAN_MAX_UPLINKS];
 };
 
-_Static_assert(sizeof(struct bum_plan) == 96, "bum_plan layout");
+_Static_assert(sizeof(struct bum_plan) == 32 + 12 * BUM_PLAN_MAX_UPLINKS, "bum_plan layout");
 
 // Native XDP: the metadata the ingress program puts in front of a BUM frame
 // before the broadcast. The egress program strips it.
@@ -249,23 +277,77 @@ static __always_inline int bum_xdp_meta_write(struct xdp_md *ctx, __u64 seq, __u
 #define BUM_BCAST_NO_DEVMAP (-1)
 #define BUM_BCAST_NO_META   (-2)
 
+// The plan item of uplink: its index in [0, plan->n_uplinks), or
+// plan->n_uplinks when the plan has none yet, or BUM_PLAN_MAX_UPLINKS when
+// it has none and no room for one. A global function on purpose: the
+// verifier checks the search once, and the caller gets one bounded index
+// instead of a path per item.
+__noinline int bum_plan_uplink_item(const struct bum_plan *plan, __u32 uplink)
+{
+    if (!plan)
+        return BUM_PLAN_MAX_UPLINKS;
+    __u32 n = plan->n_uplinks;
+    for (__u32 u = 0; u < BUM_PLAN_MAX_UPLINKS; u++) {
+        if (u >= n || plan->up[u].ifindex == uplink)
+            return (int)u;
+    }
+    return BUM_PLAN_MAX_UPLINKS;
+}
+
+// Add flood slot index to plan item u unless its peer is missing,
+// flood_exclude, or on the source AC's Ethernet Segment (src_ext, NULL when
+// the AC has none): the tc path's per-peer checks. hairpin: the item's
+// uplink is the source AC. Inline on purpose: a global function would halve
+// what vinbero_main costs the verifier but add a call per peer to every
+// frame, and inline it stays well inside the limit on every kernel.
+static __always_inline void bum_plan_add_slot(struct bum_plan *plan, __u64 u, __u32 bd_id, __u32 index, bool hairpin,
+                                              const struct headend_l2_ext_val *src_ext, __u64 pkt_len)
+{
+    if (!plan || u >= BUM_PLAN_MAX_UPLINKS || index >= MAX_BUM_NEXTHOPS)
+        return;
+    struct bd_peer_key pk = { .bd_id = (__u16)bd_id, .index = (__u16)index };
+    struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &pk);
+    if (!peer || peer->flood_exclude)
+        return;
+    // RFC 9252 split horizon, same rule as tc_bum_clone_slot.
+    if (src_ext) {
+        struct bd_peer_l2_ext_key ek = { .bd_id = (__u16)bd_id, .index = (__u16)index };
+        struct bd_peer_l2_ext_val *pe = bpf_map_lookup_elem(&bd_peer_l2_ext_map, &ek);
+        if (pe && esi_equal(pe->esi, src_ext->esi)) {
+            STATS_INC(STATS_SPLIT_HORIZON_TX, pkt_len);
+            return;
+        }
+    }
+    plan->up[u].slots |= 1u << index;
+    plan->up[u].n++;
+    if (hairpin)
+        plan->hairpin = 1;
+}
+
 // Plan the frame's remote copies and broadcast it through the BD's flood
 // devmap. Plan and broadcast use the one devmap this function looked up, so
 // a concurrent rebuild of the BD cannot give them different member lists.
 //
-// A slot is planned when the devmap holds its entry -- whose ifindex is the
-// slot's uplink -- and it passes the tc path's per-peer checks: a bd_peer
-// exists, is not flood_exclude, and is not on the source AC's Ethernet
-// Segment. Every uplink of a slot entry gets a plan item, planned slots or
-// not, so the egress program can tell a device's surplus copies from the
-// copy of a local AC on the same device (item.local).
+// The slots probed are those bum_slots_map lists for the BD, under the slot
+// keys of that build. Every one of them must be in the devmap: a miss means
+// the devmap is another build's (a rebuild between the two lookups, or an
+// entry the kernel removed with its device), whose slot entries the plan may
+// not cover, so the frame takes the tc path instead. With no slots listed,
+// the frame goes out through the BD's local devmap, which holds no slot
+// entry of any build.
+//
+// A probed slot is planned when it passes the tc path's per-peer checks: a
+// bd_peer exists, is not flood_exclude, and is not on the source AC's
+// Ethernet Segment. Every uplink of a slot entry gets a plan item, planned
+// slots or not, so the egress program can tell a device's surplus copies
+// from the copy of a local AC on the same device (item.local).
 //
 // The broadcast excludes the ingress device, unless a planned slot uses it
 // as its uplink (an AC and an uplink on one port): then the ingress AC gets
 // a copy too, which the egress program drops (item.local is 0 for it).
 //
-// Returns the XDP action, BUM_BCAST_NO_DEVMAP when the BD has no devmap, or
-// BUM_BCAST_NO_META.
+// Returns the XDP action, BUM_BCAST_NO_DEVMAP when the BD has no devmap or
+// a slot key misses, or BUM_BCAST_NO_META.
 // A global function on purpose: the verifier checks it once, not once per
 // path of vinbero_main that reaches the flood.
 __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
@@ -276,6 +358,17 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     void *flood = bpf_map_lookup_elem(&bum_flood_map, &bd_key);
     if (!flood)
         return BUM_BCAST_NO_DEVMAP;
+    struct bum_slots *bs = bpf_map_lookup_elem(&bum_slots_map, &bd_key);
+    if (!bs)
+        return BUM_BCAST_NO_DEVMAP;
+    __u32 gen = bs->gen;
+    __u32 mask = bs->mask;
+    void *local = NULL;
+    if (!mask) {
+        local = bpf_map_lookup_elem(&bum_local_map, &bd_key);
+        if (!local)
+            return BUM_BCAST_NO_DEVMAP;
+    }
     __u32 zero = 0;
     __u64 *seqp = bpf_map_lookup_elem(&bum_seq, &zero);
     if (!seqp)
@@ -295,62 +388,57 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     plan->len = (__u16)pkt_len;
     plan->n_uplinks = 0;
     plan->shared = 0;
+    plan->hairpin = 0;
 
     struct headend_l2_key src_key = { .ifindex = src_if, .vlan_id = (__u16)vlan_id };
     struct headend_l2_ext_val *src_ext = bpf_map_lookup_elem(&headend_l2_ext_map, &src_key);
     bool src_esi_set = src_ext && !esi_is_zero(src_ext->esi);
 
-    bool hairpin = false;
-    __u32 n_up = 0;
+    // The item of the previous slot's uplink: peers behind one uplink
+    // need no search.
+    __u32 prev_uplink = 0;
+    __u64 prev_u = BUM_PLAN_MAX_UPLINKS;
     for (__u32 i = 0; i < MAX_BUM_NEXTHOPS; i++) {
-        __u32 dk = BUM_SLOT_KEY_BASE | i;
+        if (!(mask >> i))
+            break;
+        if (!(mask & (1u << i)))
+            continue;
+        __u32 dk = BUM_SLOT_KEY(gen, i);
         struct bpf_devmap_val *dv = bpf_map_lookup_elem(flood, &dk);
         if (!dv)
-            continue;
+            return BUM_BCAST_NO_DEVMAP;
         __u32 uplink = dv->ifindex;
-        __u32 u;
-        for (u = 0; u < BUM_PLAN_MAX_UPLINKS; u++) {
-            if (u == n_up) {
+        __u64 u = prev_u;
+        if (u >= BUM_PLAN_MAX_UPLINKS || uplink != prev_uplink) {
+            // 64 bits and opaque, so the bound checked below is the
+            // register the item accesses use, not a fresh zero extension.
+            u = (__u32)bum_plan_uplink_item(plan, uplink);
+            asm volatile("" : "+r"(u));
+            if (u >= BUM_PLAN_MAX_UPLINKS)
+                return BUM_BCAST_NO_DEVMAP; // the control plane keeps a BD within the items
+            if (u >= plan->n_uplinks) {
                 plan->up[u].ifindex = uplink;
                 plan->up[u].slots = 0;
                 plan->up[u].n = 0;
                 plan->up[u].next_idx = 0;
                 // Local ACs are keyed by their ifindex.
                 plan->up[u].local = uplink != src_if && bpf_map_lookup_elem(flood, &uplink) != NULL;
-                n_up++;
-                break;
+                plan->n_uplinks = (__u8)(u + 1);
             }
-            if (plan->up[u].ifindex == uplink)
-                break;
+            prev_uplink = uplink;
+            prev_u = u;
         }
-        if (u >= BUM_PLAN_MAX_UPLINKS)
-            continue; // unreachable: at most one uplink per slot
 
-        struct bd_peer_key pk = { .bd_id = (__u16)bd_id, .index = (__u16)i };
-        struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &pk);
-        if (!peer || peer->flood_exclude)
-            continue;
-        // RFC 9252 split horizon, same rule as tc_dispatch_bum_clones.
-        if (src_esi_set) {
-            struct bd_peer_l2_ext_key ek = { .bd_id = (__u16)bd_id, .index = (__u16)i };
-            struct bd_peer_l2_ext_val *pe = bpf_map_lookup_elem(&bd_peer_l2_ext_map, &ek);
-            if (pe && esi_equal(pe->esi, src_ext->esi)) {
-                STATS_INC(STATS_SPLIT_HORIZON_TX, pkt_len);
-                continue;
-            }
-        }
-        plan->up[u].slots |= (__u8)(1u << i);
-        plan->up[u].n++;
-        if (uplink == src_if)
-            hairpin = true;
+        bum_plan_add_slot(plan, u, bd_id, i, uplink == src_if, src_esi_set ? src_ext : NULL, pkt_len);
     }
-    plan->n_uplinks = (__u8)n_up;
 
     if (bum_xdp_native && bum_xdp_meta_write(ctx, seq, src_if) != 0)
         return BUM_BCAST_NO_META;
     STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
+    if (local)
+        return bpf_redirect_map(local, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
     __u64 flags = BPF_F_BROADCAST;
-    if (!hairpin)
+    if (!plan->hairpin)
         flags |= BPF_F_EXCLUDE_INGRESS;
     return bpf_redirect_map(flood, 0, flags);
 }

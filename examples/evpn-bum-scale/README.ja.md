@@ -2,7 +2,7 @@
 
 *(English: [README.md](./README.md))*
 
-Vinbero の PE 9 台が iBGP の full mesh で 1 つの EVPN の bridge domain（bd 100）を作ります。各 PE は自分のホストの MAC を RT2（End.DT2U の SID）で、flood の SID を RT3（End.DT2M の SID）で広告します。そのため各 PE は、リモート PE ごとに RT3 の flood peer と RT2 の unicast peer を 1 つずつ入れます。RT2 の peer は flood スロットを使いません。bridge domain の flood スロット 8 つに RT3 の peer 8 個が入り、これが 1 つの bridge domain が flood できる上限（リモート PE 8 台、計 9 node）です。peer の index の範囲は [bum_mode.md](../../docs/design/ja/bum_mode.md) を参照してください。
+Vinbero の PE 9 台が iBGP の full mesh で 1 つの EVPN の bridge domain（bd 100）を作ります。各 PE は自分のホストの MAC を RT2（End.DT2U の SID）で、flood の SID を RT3（End.DT2M の SID）で広告します。そのため各 PE は、リモート PE ごとに RT3 の flood peer と RT2 の unicast peer を 1 つずつ入れます。RT2 の peer は flood スロットを使いません。RT3 の peer 8 個が、bridge domain の flood スロット 32 個のうち 8 個を使います。1 つの bridge domain が flood できるのはリモート PE 32 台（計 33 node）までで、その大きさで同じ試験を行うのが [evpn-bum-scale-33](../evpn-bum-scale-33/) です。peer の index の範囲は [bum_mode.md](../../docs/design/ja/bum_mode.md) を参照してください。
 
 ```mermaid
 graph LR
@@ -38,4 +38,4 @@ sudo BUM_MODE=tc ./test.sh
 sudo ./teardown.sh
 ```
 
-`NUM_PES=<n>`（`setup.sh` と `test.sh` で同じ値）で PE の台数を変えられます。10 台以上では、各 PE がすべてのリモート PE の RT3 の peer を入れられず、最初の確認が失敗します。これが bridge domain あたり 8 つの flood スロットの上限です。daemon のログは `/tmp/vinbero_ebs_pe<N>.log` です。
+`NUM_PES=<n>`（`setup.sh` と `test.sh` で同じ値、33 まで）で PE の台数を変えられます。確認の内容は台数に合わせて変わります。34 台以上では、各 PE がすべてのリモート PE の RT3 の peer を入れられず、最初の確認が失敗します。これが bridge domain あたり 32 個の flood スロットの上限です。daemon のログは `/tmp/vinbero_ebs_pe<N>.log` です。

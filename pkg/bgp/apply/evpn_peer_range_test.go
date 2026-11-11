@@ -211,3 +211,39 @@ func TestSweepRemovesEarlierLayoutState(t *testing.T) {
 		}
 	}
 }
+
+// The earlier ES range [8, 40) now lies mostly in the flood slots: there the
+// sweep takes only what is an ES peer (an ECMP group) and the FDB pointers to
+// it. A flood peer in slots 8 to 31 that it does not own, and the MACs that
+// point at it, stay; the part of the earlier range inside today's ES range,
+// [32, 40), is swept as the ES range is.
+func TestSweepKeepsFloodSlotsOfEarlierESRange(t *testing.T) {
+	a, fh := evpnApplier(t)
+	fh.bdPeers[bdPeerKey{100, 8}] = &bpf.HeadendEntry{}                              // unowned flood peer
+	fh.bdPeers[bdPeerKey{100, 31}] = &bpf.HeadendEntry{}                             // unowned flood peer
+	fh.bdPeers[bdPeerKey{100, 20}] = &bpf.HeadendEntry{FloodExclude: 1, GroupId: 70} // earlier ES peer
+	fh.bdPeers[bdPeerKey{100, 35}] = &bpf.HeadendEntry{FloodExclude: 1}              // in today's ES range
+	fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}] = &bpf.FdbEntry{IsRemote: 1, PeerIndex: 8, BdId: 100, LastSeen: 1}
+	fh.fdb[fdbKey{100, "aa:bb:cc:00:00:02"}] = &bpf.FdbEntry{IsRemote: 1, IsStatic: 1, PeerIndex: 31, BdId: 100}
+	fh.fdb[fdbKey{100, "aa:bb:cc:00:00:03"}] = &bpf.FdbEntry{IsRemote: 1, IsStatic: 1, PeerIndex: 20, BdId: 100}
+	fh.fdb[fdbKey{100, "aa:bb:cc:00:00:04"}] = &bpf.FdbEntry{IsRemote: 1, IsStatic: 1, PeerIndex: 35, BdId: 100}
+
+	if _, ok := a.sweepEVPNState(); !ok {
+		t.Fatal("sweep reported a failure")
+	}
+	for idx, want := range map[uint16]bool{8: true, 31: true, 20: false, 35: false} {
+		if _, got := fh.bdPeers[bdPeerKey{100, idx}]; got != want {
+			t.Errorf("peer %d present = %v, want %v", idx, got, want)
+		}
+	}
+	for mac, want := range map[string]bool{
+		"aa:bb:cc:00:00:01": true,  // learned towards flood slot 8
+		"aa:bb:cc:00:00:02": true,  // static towards flood slot 31
+		"aa:bb:cc:00:00:03": false, // pointer to the earlier ES peer
+		"aa:bb:cc:00:00:04": false, // pointer into the ES range
+	} {
+		if got := fh.HasFdb(100, mac); got != want {
+			t.Errorf("FDB %s present = %v, want %v", mac, got, want)
+		}
+	}
+}

@@ -115,7 +115,7 @@ static __always_inline int bum_egress_frame(struct xdp_md *ctx, __u64 *seq, __u3
 }
 
 // Slot of the idx-th set bit of slots (ascending), or -1.
-static __always_inline int bum_plan_nth_slot(__u8 slots, __u32 idx)
+static __always_inline int bum_plan_nth_slot(__u32 slots, __u32 idx)
 {
     __u32 seen = 0;
     for (__u32 i = 0; i < MAX_BUM_NEXTHOPS; i++) {

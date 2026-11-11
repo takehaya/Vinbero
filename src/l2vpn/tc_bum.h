@@ -20,6 +20,20 @@
 #include "l2vpn/bum_meta.h"
 #include "l2vpn/bum_xdp.h"
 
+// bd_id -> the flood slots that hold a bd_peer entry, bit i = slot i. The
+// control plane sets a bit before it writes the slot's peer and clears it
+// after the peer is gone (MapOperations), so the bits cover every flood
+// peer; a bit whose peer is missing costs one lookup. The clone loop visits
+// only these slots, so a BD with few peers does not pay for the empty ones.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1 << 16);
+    __type(key, __u32);
+    __type(value, __u32);
+} bd_flood_slots_map SEC(".maps");
+
+_Static_assert(MAX_BUM_NEXTHOPS <= 32, "bd_flood_slots_map holds a 32-bit slot set");
+
 // Magic value in skb->cb[0] to identify clone-to-self encap requests.
 // Reuses BUM_META_MARKER so both XDP meta and TC cb[] use the same sentinel.
 #define TC_CB_ENCAP_MAGIC BUM_META_MARKER
@@ -198,6 +212,47 @@ static __noinline int tc_do_single_pe_encap_red(
     return tc_do_single_pe_encap_impl(skb, cb_bd_id, cb_pe_index, true);
 }
 
+// One flood slot of tc_dispatch_bum_clones: clone the frame to the slot's
+// peer unless it is missing, flood_exclude, or on the source AC's Ethernet
+// Segment (src_ext, NULL when the AC has none). A global function on
+// purpose: the verifier checks it once, not once per slot of the loop.
+// The caller holds no packet pointer across the clone.
+__noinline int tc_bum_clone_slot(struct __sk_buff *skb, __u32 bd_id, __u32 index, __u32 vlan_id,
+                                 const struct headend_l2_ext_val *src_ext)
+{
+    if (!skb)
+        return 0;
+    struct bd_peer_key key = { .bd_id = (__u16)bd_id, .index = (__u16)index };
+    struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &key);
+    if (!peer)
+        return 0; // Slot may be empty due to deletion
+
+    // RT2 installs the unicast End.DT2U peer with flood_exclude set: it is a
+    // known-unicast forwarding target, not a BUM flood destination. The RT3
+    // End.DT2M peer (and manually-created peers) leave it 0 and are flooded.
+    if (peer->flood_exclude)
+        return 0;
+
+    if (src_ext) {
+        struct bd_peer_l2_ext_key ext_key = { .bd_id = (__u16)bd_id, .index = (__u16)index };
+        struct bd_peer_l2_ext_val *peer_ext = bpf_map_lookup_elem(&bd_peer_l2_ext_map, &ext_key);
+        if (peer_ext && esi_equal(peer_ext->esi, src_ext->esi)) {
+            STATS_INC(STATS_SPLIT_HORIZON_TX, skb->len);
+            DEBUG_PRINT("TC dispatch: split-horizon skip peer=%d\n", index);
+            return 0;
+        }
+    }
+
+    skb->cb[0] = TC_CB_ENCAP_MAGIC;
+    skb->cb[1] = bd_id;
+    skb->cb[2] = index;
+    skb->cb[3] = vlan_id;
+    long clone_ret = bpf_clone_redirect(skb, skb->ifindex, BPF_F_INGRESS);
+    (void)clone_ret;
+    DEBUG_PRINT("TC dispatch: clone pe=%d ret=%ld\n", index, clone_ret);
+    return 0;
+}
+
 // Mode 1: clone-to-self, one clone per remote PE in the BD. RFC 9252
 // split-horizon: if the source AC's ESI matches a peer's ESI, the peer is on
 // the same Ethernet Segment and would re-flood to the shared CE — skip it.
@@ -230,36 +285,15 @@ static __noinline int tc_dispatch_bum_clones(
     struct headend_l2_ext_val *src_ext = bpf_map_lookup_elem(&headend_l2_ext_map, &l2_key);
     bool src_esi_set = src_ext && !esi_is_zero(src_ext->esi);
 
-    for (__u16 i = 0; i < MAX_BUM_NEXTHOPS; i++) {
-        struct bd_peer_key key = { .bd_id = bd_id, .index = i };
-        struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &key);
-        if (!peer)
-            continue; // Slot may be empty due to deletion; keep scanning
+    __u32 bd_key = bd_id;
+    __u32 *slotsp = bpf_map_lookup_elem(&bd_flood_slots_map, &bd_key);
+    __u32 slots = slotsp ? *slotsp : 0;
 
-        // RT2 installs the unicast End.DT2U peer with flood_exclude set: it is a
-        // known-unicast forwarding target, not a BUM flood destination. The RT3
-        // End.DT2M peer (and manually-created peers) leave it 0 and are flooded.
-        if (peer->flood_exclude)
-            continue;
-
-        if (src_esi_set) {
-            struct bd_peer_l2_ext_key ext_key = { .bd_id = bd_id, .index = i };
-            struct bd_peer_l2_ext_val *peer_ext =
-                bpf_map_lookup_elem(&bd_peer_l2_ext_map, &ext_key);
-            if (peer_ext && esi_equal(peer_ext->esi, src_ext->esi)) {
-                STATS_INC(STATS_SPLIT_HORIZON_TX, skb->len);
-                DEBUG_PRINT("TC dispatch: split-horizon skip peer=%d\n", i);
-                continue;
-            }
-        }
-
-        skb->cb[0] = TC_CB_ENCAP_MAGIC;
-        skb->cb[1] = bd_id;
-        skb->cb[2] = i;
-        skb->cb[3] = vlan_id;
-        long clone_ret = bpf_clone_redirect(skb, skb->ifindex, BPF_F_INGRESS);
-        (void)clone_ret;
-        DEBUG_PRINT("TC dispatch: clone pe=%d ret=%ld\n", i, clone_ret);
+    for (__u32 i = 0; i < MAX_BUM_NEXTHOPS; i++) {
+        if (!(slots >> i))
+            break;
+        if (slots & (1u << i))
+            tc_bum_clone_slot(skb, bd_id, i, vlan_id, src_esi_set ? src_ext : NULL);
     }
 
     // Clear cb so the original packet doesn't trigger Mode 2

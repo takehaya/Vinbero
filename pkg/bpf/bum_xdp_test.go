@@ -61,6 +61,16 @@ func installDevmap(t *testing.T, outer *ebpf.Map) {
 	}
 }
 
+// installFloodDevmaps installs the flood and the local devmap of bumTestBD,
+// both holding lo, as BumDevmapSync does for a BD without flood slots: the
+// broadcast then goes out through the local devmap (bum_slots_map lists no
+// slot).
+func installFloodDevmaps(t *testing.T, objs *BpfObjects) {
+	t.Helper()
+	installDevmap(t, objs.BumFloodMap)
+	installDevmap(t, objs.BumLocalMap)
+}
+
 func statCount(t *testing.T, m *MapOperations, name string) uint64 {
 	t.Helper()
 	stats, err := m.ReadStats()
@@ -96,7 +106,7 @@ const vnbuMarker = uint32(0x564E4255)
 func TestXDPBumTCOverrideKeepsTCPath(t *testing.T) {
 	h := newXDPBumHelper(t)
 	h.bumAC(1)
-	installDevmap(t, h.objs.BumFloodMap)
+	installFloodDevmaps(t, h.objs)
 	if err := h.mapOps.SetBdBumMode(bumTestBD, BumModeTC); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +134,7 @@ func TestXDPBumTCFallbackMode(t *testing.T) {
 		"bum_mode_default": BumModeTCFallback,
 	})
 	h.bumAC(1)
-	installDevmap(t, h.objs.BumFloodMap)
+	installFloodDevmaps(t, h.objs)
 	pkt := vlanFrame(t, bcast)
 	ret, out := h.run(pkt)
 	if ret != XDP_PASS {
@@ -182,7 +192,7 @@ func TestXDPBumFloodFromAC(t *testing.T) {
 		}
 	})
 
-	installDevmap(t, h.objs.BumFloodMap)
+	installFloodDevmaps(t, h.objs)
 	for _, tc := range []struct {
 		name string
 		dst  net.HardwareAddr
@@ -211,7 +221,7 @@ func TestXDPBumFloodFromAC(t *testing.T) {
 func TestXDPBumLocalUnicast(t *testing.T) {
 	h := newXDPBumHelper(t)
 	h.bumAC(1)
-	installDevmap(t, h.objs.BumFloodMap)
+	installFloodDevmaps(t, h.objs)
 	dst := net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}
 
 	h.createFdbEntry(bumTestBD, dst, 7)
@@ -317,7 +327,7 @@ func TestXDPBumLearningEvents(t *testing.T) {
 	t.Run("xdp mode reports adds and moves", func(t *testing.T) {
 		h := newXDPBumHelper(t)
 		h.bumAC(1)
-		installDevmap(t, h.objs.BumFloodMap)
+		installFloodDevmaps(t, h.objs)
 		rd := drainFdbEvents(t, h.objs)
 
 		h.run(vlanFrame(t, bcast))
@@ -387,8 +397,8 @@ func TestBumPlanMapsArePerCPU(t *testing.T) {
 				want.name, m.Type, m.MaxEntries, m.ValueSize, want.maxEntries, want.valueSize)
 		}
 	}
-	if unsafe.Sizeof(BpfBumPlan{}) != 96 {
-		t.Errorf("struct bum_plan is %d bytes, want 96", unsafe.Sizeof(BpfBumPlan{}))
+	if unsafe.Sizeof(BpfBumPlan{}) != 32+12*BumPlanMaxUplinks {
+		t.Errorf("struct bum_plan is %d bytes, want %d (128: the ring takes 128 KiB per CPU)", unsafe.Sizeof(BpfBumPlan{}), 32+12*BumPlanMaxUplinks)
 	}
 }
 
@@ -580,7 +590,7 @@ func TestBumPlanFromIngress(t *testing.T) {
 	}
 	type up struct {
 		ifindex uint32
-		slots   uint8
+		slots   uint32
 		n       uint8
 	}
 	var got []up
@@ -703,14 +713,14 @@ func TestBumRemoteEgressEncap(t *testing.T) {
 	nh := c.nexthop.String()
 	l2 := bumFrame(t)
 
-	// Slots 0..7, each its own peer (distinct last segment), all behind the
+	// Slots 0..31, each its own peer (distinct last segment), all behind the
 	// one uplink: one shared program, and every copy gets its own peer's
 	// headers.
 	for i := range uint16(MaxBumNexthops) {
 		c.peer(t, i, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh, lastSegment(i).String()}, [ESILen]byte{}, false)
 	}
-	if plan := c.ingress(t, l2); plan.N_uplinks != 1 || plan.Up[0].N != MaxBumNexthops || plan.Up[0].Slots != 0xff {
-		t.Fatalf("plan = %d uplinks, first %+v; want one uplink with all 8 slots", plan.N_uplinks, plan.Up[0])
+	if plan := c.ingress(t, l2); plan.N_uplinks != 1 || plan.Up[0].N != MaxBumNexthops || plan.Up[0].Slots != 0xffffffff {
+		t.Fatalf("plan = %d uplinks, first %+v; want one uplink with all %d slots", plan.N_uplinks, plan.Up[0], MaxBumNexthops)
 	}
 	for i := range uint16(MaxBumNexthops) {
 		ret, out := c.egress(t, 1, c.uplink, false, l2)
@@ -865,7 +875,7 @@ func bumFrame(t *testing.T) []byte {
 func TestListLocalDynamicFdb(t *testing.T) {
 	h := newXDPBumHelper(t)
 	h.bumAC(1)
-	installDevmap(t, h.objs.BumFloodMap)
+	installFloodDevmaps(t, h.objs)
 	h.run(vlanFrame(t, bcast)) // learns 00:..:01 on ifindex 1
 
 	static := net.HardwareAddr{0x02, 0, 0, 0, 0, 0x0a}

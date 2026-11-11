@@ -27,12 +27,52 @@ const (
 	BumModeTCFallback uint8 = 4
 )
 
-// BumSlotKeyBase marks a devmap key as remote flood slot (key = base | slot).
-// Local ACs are keyed by ifindex. Matches BUM_SLOT_KEY_BASE.
+// BumSlotKeyBase marks a devmap key as a remote flood slot's. Local ACs are
+// keyed by ifindex. Matches BUM_SLOT_KEY_BASE.
 const BumSlotKeyBase uint32 = 0x80000000
 
-// bumDevmapMaxEntries matches BUM_DEVMAP_MAX_ENTRIES (inner devmap size).
-const bumDevmapMaxEntries = 32
+// bumSlotGenMask matches BUM_SLOT_GEN_MASK: the bits of a build number a
+// slot key carries.
+const bumSlotGenMask = 0x7fffff
+
+// BumSlotKey is the devmap key of flood slot index in the devmaps of build
+// gen (BUM_SLOT_KEY). The data plane probes the slots bum_slots_map lists
+// under the gen it lists, so a devmap of another build answers with a miss.
+func BumSlotKey(gen uint32, index uint16) uint32 {
+	return BumSlotKeyBase | (gen&bumSlotGenMask)<<8 | uint32(index)
+}
+
+// BumSlotIndex is the flood slot of a devmap slot key, and false for a
+// local AC's key.
+func BumSlotIndex(key uint32) (uint16, bool) {
+	if key&BumSlotKeyBase == 0 {
+		return 0, false
+	}
+	return uint16(key & 0xff), true
+}
+
+// bumDevmapMaxEntries bounds what one BD devmap holds: local AC devices plus
+// flood slot entries. Each BD's devmaps are sized to what they hold
+// (bumDevmapSize), up to this.
+const bumDevmapMaxEntries = 256
+
+// bumDevmapMinEntries is the smallest devmap a BD gets.
+const bumDevmapMinEntries = 4
+
+// BumPlanMaxUplinks matches BUM_PLAN_MAX_UPLINKS: the distinct uplinks one
+// frame's plan holds.
+const BumPlanMaxUplinks = 8
+
+// bumDevmapSize is the size of a devmap holding n entries: n rounded up to
+// a power of two, the bucket count of a DEVMAP_HASH, which a broadcast walks
+// in full.
+func bumDevmapSize(n int) uint32 {
+	size := uint32(bumDevmapMinEntries)
+	for int(size) < n {
+		size <<= 1
+	}
+	return size
+}
 
 // BumUplink is where a remote PE's copies leave: the device, and the next
 // hop on it (the gateway, or the PE itself when it is on link).
@@ -118,6 +158,8 @@ type BumDevmapSync struct {
 	excluded map[bdSlot]string
 	// built holds what each BD's installed devmaps were built from: a
 	// rebuild that would produce the same ones leaves them alone.
+	// gen numbers the builds; each build's slot keys carry its number.
+	gen   uint32
 	built map[uint16]builtDevmaps
 	// resync and resyncPoll: see uplinkResyncRose.
 	resync     uint64
@@ -235,10 +277,10 @@ type bumAC struct {
 const splitACsReason = "its ACs resolve a peer differently (an iif ip rule, a VRF, or an AC with no usable route), " +
 	"and its devmap holds one uplink per peer"
 
-// unservable returns why xdp mode cannot serve a BD with these ACs
-// and this many flood slots, or "". Such a BD gets no devmap, so its BUM
-// takes the tc path and the bridge (BUM_XDP_FALLBACK).
-func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
+// unservable returns why xdp mode cannot serve a BD with these ACs and
+// flood slots, or "". Such a BD gets no devmap, so its BUM takes the tc
+// path and the bridge (BUM_XDP_FALLBACK).
+func unservable(acs []bumAC, ifindexes []uint32, slots []bumSlot) string {
 	// xdp mode forwards a frame with its VLAN tag unchanged, local copies
 	// and known unicast alike. That is what the bridge does too as long as
 	// every AC of the BD uses the same VLAN ID, whether its members are the
@@ -251,9 +293,17 @@ func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
 				acs[0].vlanID, ac.vlanID)
 		}
 	}
-	if n := len(ifindexes) + slots; n > bumDevmapMaxEntries {
+	if n := len(ifindexes) + len(slots); n > bumDevmapMaxEntries {
 		return fmt.Sprintf("its %d AC devices and %d flood slots exceed the %d entries of a BD devmap",
-			len(ifindexes), slots, bumDevmapMaxEntries)
+			len(ifindexes), len(slots), bumDevmapMaxEntries)
+	}
+	uplinks := map[uint32]struct{}{}
+	for _, sl := range slots {
+		uplinks[sl.uplink] = struct{}{}
+	}
+	if len(uplinks) > BumPlanMaxUplinks {
+		return fmt.Sprintf("its flood peers leave through %d uplinks, and a frame's replication plan holds %d",
+			len(uplinks), BumPlanMaxUplinks)
 	}
 	return ""
 }
@@ -300,6 +350,16 @@ type bdBuild struct {
 	state        builtDevmaps
 }
 
+// slotsVal is the BD's bum_slots_map entry for the build: its number, and
+// the slots placed in its flood devmap.
+func (st builtDevmaps) slotsVal() BpfBumSlots {
+	v := BpfBumSlots{Gen: st.gen & bumSlotGenMask}
+	for _, sl := range st.placed.slots {
+		v.Mask |= 1 << sl.index
+	}
+	return v
+}
+
 type bumSlot struct {
 	index   uint16
 	uplink  uint32
@@ -332,9 +392,11 @@ func (k devmapKey) equal(o devmapKey) bool {
 }
 
 // builtDevmaps records a BD's installed devmaps: want is what they were
-// built from, placed what could be added (a device that is gone cannot).
+// built from, placed what could be added (a device that is gone cannot),
+// gen the build number their slot keys carry.
 type builtDevmaps struct {
 	want, placed devmapKey
+	gen          uint32
 }
 
 func slotKeys(slots []bumSlot) []devmapSlotKey {
@@ -418,7 +480,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC, seen map[string]
 				zap.Uint16("bd_id", bdID), zap.Uint16("index", key.index))
 		}
 	}
-	reason := unservable(acs, ifindexes, len(slots))
+	reason := unservable(acs, ifindexes, slots)
 	if reason == "" && split {
 		reason = splitACsReason
 	}
@@ -441,16 +503,21 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC, seen map[string]
 		return nil, nil
 	}
 
-	flood, err := ebpf.NewMap(s.innerSpec)
+	floodSpec := s.innerSpec.Copy()
+	floodSpec.MaxEntries = bumDevmapSize(len(ifindexes) + len(slots))
+	flood, err := ebpf.NewMap(floodSpec)
 	if err != nil {
 		return nil, fmt.Errorf("bd %d: create flood devmap: %w", bdID, err)
 	}
-	local, err := ebpf.NewMap(s.innerSpec)
+	localSpec := s.innerSpec.Copy()
+	localSpec.MaxEntries = bumDevmapSize(len(ifindexes))
+	local, err := ebpf.NewMap(localSpec)
 	if err != nil {
 		_ = flood.Close()
 		return nil, fmt.Errorf("bd %d: create local devmap: %w", bdID, err)
 	}
-	b := &bdBuild{bd: bdID, flood: flood, local: local, slots: slots, state: builtDevmaps{want: want, placed: want}}
+	s.gen = (s.gen + 1) & bumSlotGenMask
+	b := &bdBuild{bd: bdID, flood: flood, local: local, slots: slots, state: builtDevmaps{want: want, placed: want, gen: s.gen}}
 	uplinks := make(map[uint32]struct{}, len(slots))
 	for _, sl := range slots {
 		uplinks[sl.uplink] = struct{}{}
@@ -486,7 +553,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC, seen map[string]
 		// copies, and the egress program hands each the next slot of the
 		// frame's plan for that uplink.
 		v := devmapVal{Ifindex: sl.uplink, ProgFD: uint32(s.egress.FD())}
-		err := flood.Put(BumSlotKeyBase|uint32(sl.index), v)
+		err := flood.Put(BumSlotKey(b.state.gen, sl.index), v)
 		if err == nil && !slices.Contains(b.devices, sl.uplink) {
 			b.devices = append(b.devices, sl.uplink)
 		}
@@ -529,9 +596,13 @@ func (s *BumDevmapSync) devmapsCurrentLocked(bdID uint16, want devmapKey) bool {
 		floodWant[ac], localWant[ac] = ac, ac
 	}
 	for _, sl := range cur.placed.slots {
-		floodWant[BumSlotKeyBase|uint32(sl.index)] = sl.uplink
+		floodWant[BumSlotKey(cur.gen, sl.index)] = sl.uplink
 	}
 	if !s.devmapHolds(s.objs.BumFloodMap, bdID, floodWant) || !s.devmapHolds(s.objs.BumLocalMap, bdID, localWant) {
+		return false
+	}
+	var slotsNow BpfBumSlots
+	if err := s.objs.BumSlotsMap.Lookup(uint32(bdID), &slotsNow); err != nil || slotsNow != cur.slotsVal() {
 		return false
 	}
 	if s.native {
@@ -612,6 +683,14 @@ func (s *BumDevmapSync) installLocked(builds []*bdBuild, seen map[string]struct{
 		}
 		key := uint32(b.bd)
 		delete(s.built, b.bd) // until both maps are in
+		// The slots first: a frame that finds the new flood devmap then
+		// finds its slots too, and one that still holds the old devmap
+		// misses the new slot keys and takes the tc path.
+		slots := b.state.slotsVal()
+		if err := s.objs.BumSlotsMap.Update(key, &slots, ebpf.UpdateAny); err != nil {
+			errs = append(errs, fmt.Errorf("bd %d: write the flood slots: %w", b.bd, err))
+			continue
+		}
 		if err := s.objs.BumLocalMap.Update(key, b.local, ebpf.UpdateAny); err != nil {
 			errs = append(errs, fmt.Errorf("bd %d: install local devmap: %w", b.bd, err))
 			continue
@@ -661,6 +740,9 @@ func (s *BumDevmapSync) clearBDLocked(bdID uint16, reason string) error {
 		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			errs = append(errs, err)
 		}
+	}
+	if err := s.objs.BumSlotsMap.Update(key, &BpfBumSlots{}, ebpf.UpdateAny); err != nil {
+		errs = append(errs, err)
 	}
 	s.noteServedLocked(bdID, reason)
 	delete(s.built, bdID)
