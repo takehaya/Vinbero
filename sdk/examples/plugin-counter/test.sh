@@ -153,7 +153,7 @@ fi
 # independent check against bpftool.
 print_info "plugin_counter_map (plugin-private, read via bpftool):"
 MAP_ID=$(ip netns exec "$ns_router2" "$BPFTOOL_BIN" map show 2>/dev/null \
-    | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
+    | awk '!id && /name plugin_counter/ { sub(":","",$1); id = $1 } END { print id }')
 if [ -n "$MAP_ID" ]; then
     COUNTER_TOTAL=$(ip netns exec "$ns_router2" "$BPFTOOL_BIN" map dump id "$MAP_ID" 2>/dev/null \
         | grep -Eo '"value": [0-9]+' | awk '{ s += $2 } END { print s+0 }')
