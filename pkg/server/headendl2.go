@@ -12,16 +12,26 @@ import (
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vinbero"
 )
+
+// l2CircuitBook writes the circuits to headend_l2 and the state file
+// together. *vinbero.L2Circuits satisfies it.
+type l2CircuitBook interface {
+	Create(vinbero.L2Circuit) error
+	Delete(ifindex uint32, vlan uint16) error
+	DeleteVanished(name string, vlan uint16) (bool, error)
+	Flush() (uint32, error)
+}
 
 // HeadendL2Server implements the HeadendL2ServiceHandler interface
 type HeadendL2Server struct {
 	mapOps *bpf.MapOperations
-	// createEntry, deleteEntry and linkGone default to mapOps and the
-	// kernel; tests replace them.
-	createEntry func(ifindex uint32, vlan uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte) error
-	deleteEntry func(ifindex uint32, vlan uint16) error
-	linkGone    func(ifindex uint32) bool
+	// circuits defaults to one over mapOps that saves nothing; SetCircuits
+	// installs the daemon's, which saves them in the state file.
+	circuits l2CircuitBook
+	// lookupLink resolves an interface name; tests replace it.
+	lookupLink func(name string) (vinbero.LinkID, error)
 	// closedVRF names the managed VRF whose closed table (it ends in the
 	// unreachable default) the interface is enslaved to. Nil (the default
 	// until SetClosedVRFCheck) refuses nothing.
@@ -41,37 +51,55 @@ func (s *HeadendL2Server) SetClosedVRFCheck(fn func(ifindex uint32) (string, boo
 
 // NewHeadendL2Server creates a new HeadendL2Server
 func NewHeadendL2Server(mapOps *bpf.MapOperations) *HeadendL2Server {
-	s := &HeadendL2Server{mapOps: mapOps, linkGone: ifindexGone}
+	s := &HeadendL2Server{mapOps: mapOps, lookupLink: linkByName}
 	if mapOps != nil {
-		s.createEntry = mapOps.CreateHeadendL2
-		s.deleteEntry = mapOps.DeleteHeadendL2
+		s.circuits = vinbero.NewL2Circuits(mapOps, nil, nil)
 	}
 	return s
 }
 
-// ifindexGone reports whether no interface has this index. A lookup that
-// fails for another reason is not an answer.
-func ifindexGone(ifindex uint32) bool {
-	_, err := netlink.LinkByIndex(int(ifindex))
-	return errors.As(err, &netlink.LinkNotFoundError{})
+// SetCircuits installs the circuit book the daemon shares with its link
+// watcher.
+func (s *HeadendL2Server) SetCircuits(c l2CircuitBook) {
+	s.circuits = c
 }
 
-// deleteTarget removes one entry. A name that resolves to nothing, or an
-// interface with no such entry, is reported as v1.ReasonNotFound: a typo and a
-// renamed interface are visible, and the link watcher removes the entries of
-// a deleted interface, so a caller doing teardown treats it as already gone.
+// errLinkNotFound is lookupLink's answer for a name no interface has.
+var errLinkNotFound = errors.New("no such interface")
+
+func linkByName(name string) (vinbero.LinkID, error) {
+	l, err := netlink.LinkByName(name)
+	if errors.As(err, &netlink.LinkNotFoundError{}) {
+		return vinbero.LinkID{}, fmt.Errorf("interface %q: %w", name, errLinkNotFound)
+	}
+	if err != nil {
+		return vinbero.LinkID{}, fmt.Errorf("look up interface %q: %w", name, err)
+	}
+	a := l.Attrs()
+	return vinbero.LinkID{Name: a.Name, Ifindex: uint32(a.Index), MAC: a.HardwareAddr}, nil
+}
+
+// deleteTarget removes one circuit. A name that resolves to nothing, or an
+// interface with no such circuit, is reported as v1.ReasonNotFound: a typo
+// and a renamed interface are visible, and the link watcher removes the
+// circuits of a deleted interface, so a caller doing teardown treats it as
+// already gone. A saved circuit whose interface is gone is removed.
 func (s *HeadendL2Server) deleteTarget(name string, vlan uint16) error {
 	if err := validateIfname(name); err != nil {
 		return err
 	}
-	link, err := netlink.LinkByName(name)
-	if errors.As(err, &netlink.LinkNotFoundError{}) {
+	link, err := s.lookupLink(name)
+	if errors.Is(err, errLinkNotFound) {
+		removed, derr := s.circuits.DeleteVanished(name, vlan)
+		if derr != nil || removed {
+			return derr
+		}
 		return fmt.Errorf("%s: interface %q", v1.ReasonNotFound, name)
 	}
 	if err != nil {
-		return fmt.Errorf("look up interface %q: %w", name, err)
+		return err
 	}
-	err = s.deleteEntry(uint32(link.Attrs().Index), vlan)
+	err = s.circuits.Delete(link.Ifindex, vlan)
 	if errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("%s: interface %q has no entry for VLAN %d", v1.ReasonNotFound, name, vlan)
 	}
@@ -144,7 +172,7 @@ func (s *HeadendL2Server) HeadendL2Create(
 	}
 
 	for _, headend := range req.Msg.HeadendL2S {
-		ifindex, err := resolveIfindex(headend.InterfaceName)
+		link, err := s.lookupLink(headend.InterfaceName)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
@@ -153,7 +181,7 @@ func (s *HeadendL2Server) HeadendL2Create(
 			continue
 		}
 
-		if err := s.refuseVrfPort(headend.InterfaceName, ifindex); err != nil {
+		if err := s.refuseVrfPort(headend.InterfaceName, link.Ifindex); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),
@@ -179,19 +207,13 @@ func (s *HeadendL2Server) HeadendL2Create(
 			continue
 		}
 
-		if err := s.createEntry(ifindex, uint16(headend.VlanId), entry, esi); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
-				Reason:        err.Error(),
-			})
-			continue
-		}
-		// The interface can vanish between the lookup and the write, and the
-		// link watcher would then not see the entry.
-		if s.linkGone(ifindex) {
-			reason := fmt.Sprintf("interface %q was deleted during the create", headend.InterfaceName)
-			if err := s.deleteEntry(ifindex, uint16(headend.VlanId)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-				reason = fmt.Sprintf("%s; removing the entry failed: %v", reason, err)
+		// The book reads the interface again after the write: one deleted
+		// in between would not have its entry removed by the link watcher.
+		err = s.circuits.Create(vinbero.L2Circuit{Link: link, VLAN: uint16(headend.VlanId), Entry: entry, ESI: esi})
+		if err != nil {
+			reason := err.Error()
+			if errors.Is(err, vinbero.ErrL2InterfaceGone) {
+				reason = fmt.Sprintf("interface %q: %v", headend.InterfaceName, err)
 			}
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
@@ -235,7 +257,7 @@ func (s *HeadendL2Server) HeadendL2Flush(
 	ctx context.Context,
 	req *connect.Request[v1.HeadendL2FlushRequest],
 ) (*connect.Response[v1.HeadendL2FlushResponse], error) {
-	count, err := s.mapOps.FlushHeadendL2()
+	count, err := s.circuits.Flush()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

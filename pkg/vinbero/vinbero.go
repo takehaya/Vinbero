@@ -32,6 +32,7 @@ type Vinbero struct {
 	unsaved    map[string]bool
 	fdbWatcher *netlinkwatch.FDBWatcher
 	resMgr     *netresource.ResourceManager
+	l2         *L2Circuits        // set by InitResourceManager
 	bumSync    *bpf.BumDevmapSync // nil unless a BD runs in xdp BUM mode
 	logger     *zap.Logger
 }
@@ -274,6 +275,18 @@ func (v *Vinbero) InitResourceManager() error {
 	resMgr.SetTableCloseGuard(v.tableCloseGuard)
 	resMgr.SetConfigVrfDevices(configVrfDevices(v.cfg))
 
+	// The L2 headend circuits saved from the API go back into headend_l2
+	// before the reconcile: the table-close guard reads the map, so a table
+	// with a circuit on a port of its VRF stays open whether or not the map
+	// is pinned.
+	var l2 *L2Circuits
+	if v.mapOps != nil {
+		l2 = NewL2Circuits(v.mapOps, resMgr, v.logger)
+		if err := l2.restore(); err != nil {
+			return fmt.Errorf("%w (repair the state file, settings.state_path, and restart)", err)
+		}
+	}
+
 	// Fail-closed: a state entry that cannot be materialized aborts the boot
 	// (the error carries a repair hint). Continuing with a phantom entry
 	// would hand its stale ifindex to the FDB watcher, the EVPN machinery
@@ -283,17 +296,35 @@ func (v *Vinbero) InitResourceManager() error {
 	}
 
 	v.resMgr = resMgr
+	v.l2 = l2
 	return nil
 }
 
-// StartFDBWatcher starts the FDB watcher and registers reconciled bridges.
-func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
+// L2Circuits returns the L2 headend circuit book InitResourceManager set up.
+func (v *Vinbero) L2Circuits() *L2Circuits {
+	return v.l2
+}
+
+// StartFDBWatcher starts the FDB watcher. The bridges of the state file and
+// the ones register adds are registered first, so the watcher's dump of the
+// existing FDB at its start reaches them.
+func (v *Vinbero) StartFDBWatcher(ctx context.Context, register func(*netlinkwatch.FDBWatcher) error) error {
 	v.fdbWatcher = netlinkwatch.NewFDBWatcher(v.mapOps, v.logger)
 	v.fdbWatcher.SetAgingSeconds(v.cfg.Setting.FdbAgingSeconds)
 	if l2 := &v.cfg.Setting.L2; l2.AnyXDP() {
 		v.fdbWatcher.SetXDPLearnedBDs(func(bd uint16) bool {
 			return l2.EffectiveBumMode(bd) == config.BumModeValueXDP
 		})
+	}
+	if v.resMgr != nil {
+		for _, br := range v.resMgr.ListBridges() {
+			v.fdbWatcher.RegisterBridge(int(br.Ifindex), br.BdID)
+		}
+	}
+	if register != nil {
+		if err := register(v.fdbWatcher); err != nil {
+			return err
+		}
 	}
 	if err := v.fdbWatcher.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start FDB watcher: %w", err)
@@ -304,13 +335,6 @@ func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
 			return err
 		}
 		v.fdbWatcher.StartXDPEvents(events)
-	}
-
-	// Register bridges from reconciled state so FDB sync works after restart
-	if v.resMgr != nil {
-		for _, br := range v.resMgr.ListBridges() {
-			v.fdbWatcher.RegisterBridge(int(br.Ifindex), br.BdID)
-		}
 	}
 
 	v.logger.Info("FDB watcher started")

@@ -24,6 +24,10 @@ type ManagedState struct {
 	// Absent on a file written before they were recorded, which reads as
 	// none saved.
 	RuntimeVrfBindings []ManagedVrfBinding `json:"runtime_vrf_bindings,omitempty"`
+	// RuntimeL2Circuits are the L2 headend circuits made over the API
+	// (HeadendL2Create), ordered by ifindex and VLAN. Absent on a file
+	// written before they were recorded, which reads as none saved.
+	RuntimeL2Circuits []ManagedL2Circuit `json:"runtime_l2_circuits,omitempty"`
 }
 
 // ManagedVrfBinding is one VRF's BGP binding as it was in memory. The legacy
@@ -245,10 +249,11 @@ func (m *ResourceManager) persist() error {
 	m.mu.RLock()
 	data, err := json.MarshalIndent(m.state, "", "  ")
 	m.mu.RUnlock()
-	if err != nil {
-		return err
+	if err == nil {
+		err = writeFileAtomic(m.statePath, data)
 	}
-	return writeFileAtomic(m.statePath, data)
+	m.fileBehind.Store(err != nil)
+	return err
 }
 
 // writeFileAtomic writes data to path through a same-directory temp file and

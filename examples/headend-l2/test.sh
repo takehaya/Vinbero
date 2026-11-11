@@ -9,6 +9,9 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
+# A state file left by an earlier run would bring its L2 headend circuits back.
+rm -f /tmp/vinbero_headend_l2_*_state.json
+
 VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
 VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG_RT1="${SCRIPT_DIR}/vinbero_router1.yaml"
@@ -112,6 +115,35 @@ test_ping_with_counter "$ns_host1" 172.16.100.2 "host1 -> host2 via L2VPN (Vinbe
 
 echo ""
 
+# Phase 3b: the circuits come back from each router's state file, after a
+# normal stop (router1) and after a crash (router3). The maps are not
+# pinned, and nothing is created again.
+echo "=========================================="
+echo "Phase 3b: HeadendL2 circuits across a vinberod restart"
+echo "=========================================="
+
+print_info "Stopping and starting router1's vinberod..."
+restart_vinbero "$ns_router1" "${VINBERO_CONFIG_RT1}" /tmp/vinbero_hl2_rt1_restart.log 127.0.0.1:8082 "$VINBERO_PID_RT1" TERM
+VINBERO_PID_RT1=$VINBERO_LAST_PID
+print_info "Killing and starting router3's vinberod..."
+restart_vinbero "$ns_router3" "${VINBERO_CONFIG_RT3}" /tmp/vinbero_hl2_rt3_restart.log 127.0.0.1:8083 "$VINBERO_PID_RT3" KILL
+VINBERO_PID_RT3=$VINBERO_LAST_PID
+
+for r in "$ns_router1:8082:rt1h1" "$ns_router3:8083:rt3h2"; do
+    IFS=: read -r ns port ifc <<< "$r"
+    if ip netns exec "$ns" ${VINBERO_BIN} -s "http://127.0.0.1:${port}" --json hl2 list \
+        | grep -q "\"interface_name\": \"${TOPO_NS_PREFIX}${ifc}\""; then
+        print_success "$ns restored its circuit on ${TOPO_NS_PREFIX}${ifc}: PASS"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$ns lost its circuit on ${TOPO_NS_PREFIX}${ifc} over the restart: FAIL"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+done
+test_ping_with_counter "$ns_host1" 172.16.100.2 "host1 -> host2 after both restarts" "${TOPO_NS_PREFIX}h1rt1.100"
+
+echo ""
+
 # Phase 4: HeadendL2 API Tests
 echo "=========================================="
 echo "Phase 4: HeadendL2 API Tests"
@@ -166,6 +198,17 @@ if echo "$list_after" | grep -q '"vlan_id": 100'; then
     TESTS_FAILED=$((TESTS_FAILED + 1))
 else
     print_success "Entry removed after deletion: PASS"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+
+# The delete is saved too: the circuit does not come back.
+restart_vinbero "$ns_router1" "${VINBERO_CONFIG_RT1}" /tmp/vinbero_hl2_rt1_restart2.log 127.0.0.1:8082 "$VINBERO_PID_RT1" TERM
+VINBERO_PID_RT1=$VINBERO_LAST_PID
+if ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list | grep -q '"vlan_id": 100'; then
+    print_error "The deleted entry came back after a restart: FAIL"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+    print_success "The deleted entry stays deleted after a restart: PASS"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 fi
 

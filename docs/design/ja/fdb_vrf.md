@@ -109,6 +109,8 @@ XDPがbridgeより先にフレームを処理するため、H.Encaps.L2処理時
 
 VRF device も Bridge も `VrfService` API で、一級 VRF オブジェクトの facet として管理します ([vrf.md](vrf.md) 参照)。Vinbero が netlink でリソースを作成し、JSON状態ファイルで永続化します。再起動時にはReconcileで状態を復元し、boot 時に VRF オブジェクトへ facet として seed されます。
 
-VrfBridgeAttach を呼ぶと、FDBWatcherへの登録も同時に行われます。削除・detach 時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF の削除はさらに ingress AC、vrf-bgp binding、attach 済み bridge の残存でも拒否します)。
+VrfBridgeAttach を呼ぶと、FDBWatcherへの登録も同時に行われます。登録の時点で bridge が既に持つ FDB も `fdb_map` に入ります。daemon の起動時は、state の bridge と bridge facet をすべて登録してから FDBWatcher を起動するので、再起動の前に bridge が学習していた MAC も `fdb_map` に戻ります。
+
+`HeadendL2Create` で作った回線 (`headend_l2_map` と ESI) は state ファイルにも保存し、再起動時に戻します。BGP を有効にした起動では、前回の BGP applier が書いた EVPN の FDB entry と peer を XDP attach の前に消し、経路の受信で書き直します。どちらも詳細は [persistence.md](persistence.md#l2-headend-の回線) と [vrf.md](vrf.md#永続化と-boot) を参照してください。削除・detach 時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF の削除はさらに ingress AC、vrf-bgp binding、attach 済み bridge の残存でも拒否します)。
 
 API呼び出しの依存関係と利用シーケンスは [api_sequence.md](api_sequence.md) を参照してください。

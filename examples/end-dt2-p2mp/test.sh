@@ -13,6 +13,9 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
+# A state file left by an earlier run would bring its L2 headend circuits back.
+rm -f /tmp/vinbero_end_dt2_p2mp_*_state.json
+
 VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
 VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 
@@ -36,6 +39,9 @@ VINBERO_PID_PE3=""
 cleanup() {
     rm -f /tmp/vinbero_p2mp_pe*_bum.yaml /tmp/vinbero_p2mp_bum_*.pcap* \
         /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_state.json
+    rm -rf "$PE1_PIN_DIR"
+    umount "$PE1_BPFFS" 2>/dev/null || true
+    rmdir "$PE1_BPFFS" 2>/dev/null || true
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
@@ -45,6 +51,15 @@ cleanup() {
     done
 }
 trap cleanup EXIT
+
+# PE1 pins its maps, so its peers outlive the daemon; the restart at the end
+# kills it and brings the rest back from its state file. `ip netns exec`
+# mounts a fresh /sys, so the pins go on a bpffs of their own.
+PE1_BPFFS=/run/vinbero_p2mp_bpffs
+PE1_PIN_DIR=$PE1_BPFFS/pe1
+mkdir -p "$PE1_BPFFS"
+mountpoint -q "$PE1_BPFFS" || mount -t bpf bpf "$PE1_BPFFS"
+rm -rf "$PE1_PIN_DIR" /tmp/vinbero_p2mp_pe1_state.json
 
 # CLI helpers
 vbctl_pe1() { ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 "$@"; }
@@ -64,9 +79,12 @@ bum_native_prepare "$ns_host1" "$ns_host2" "$ns_host3" "$ns_host4" \
 
 # PE1's access port is not in internal.devices: it is attached at runtime, so
 # every BUM mode also runs through a runtime-attached AC. The state file is
-# private because the attach is recorded there.
+# private because the attach is recorded there, with the L2 headend circuit.
 sed -e "/- ${TOPO_NS_PREFIX}rt1h1/d" \
     -e '/^settings:/a\  state_path: /tmp/vinbero_p2mp_pe1_state.json' \
+    -e '/^settings:/a\  pin_maps:' \
+    -e '/^settings:/a\    enabled: true' \
+    -e "/^settings:/a\\    path: ${PE1_PIN_DIR}" \
     "${SCRIPT_DIR}/vinbero_pe1.yaml" > /tmp/vinbero_p2mp_pe1_base.yaml
 
 print_info "Starting PE1 (router1)..."
@@ -346,6 +364,35 @@ if [ "$BUM_EFFECTIVE" = "xdp" ]; then
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 fi
+
+# ==========================================
+# Phase 6: PE1 crashes and comes back
+# ==========================================
+# The runtime-attached AC and the L2 headend circuit come back from the state
+# file, the BD peers from the pinned maps; nothing is configured again. The
+# pinned headend_l2_map goes while PE1 is down, so the circuit can only come
+# from the state file.
+echo ""
+echo "=========================================="
+echo "Phase 6: PE1 killed and started again"
+echo "=========================================="
+kill -KILL "$VINBERO_PID_PE1" 2>/dev/null || true
+wait "$VINBERO_PID_PE1" 2>/dev/null || true
+rm -f "$PE1_PIN_DIR/headend_l2_map"
+start_vinbero "$ns_router1" "$(bum_mode_config /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_bum.yaml)" \
+    /tmp/vinbero_p2mp_pe1_restart.log
+VINBERO_PID_PE1=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 15
+if vbctl_pe1 --json hl2 list | grep -q '"vlan_id": 100'; then
+    print_success "PE1 restored its L2 headend circuit"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "PE1 lost its L2 headend circuit over the restart"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+bum_round "vbbum-restart" 1 1
+test_ping_with_counter "$ns_host1" 172.16.100.4 \
+  "host1 -> host4 after PE1 restarted" "${TOPO_NS_PREFIX}h1rt1.100"
 
 # ==========================================
 # Summary

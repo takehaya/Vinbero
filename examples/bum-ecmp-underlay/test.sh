@@ -16,6 +16,9 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
+# A state file left by an earlier run would bring its L2 headend circuits back.
+rm -f /tmp/vinbero_bum_ecmp_underlay_*_state.json
+
 VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
 VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 

@@ -10,8 +10,9 @@
 | XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` と、`state.json` に記録された実行時 attach の device に attach し直す |
 | SID function / aux | **消える** | **残る** (bpffs pin)。SID owner も保存 | RPC / CLI で再投入。cplane plugin の SID は保存済み割り当てと再宣言で復旧 |
 | cplane plugin の SID 名と割り当て | cplane store 有効なら残る | 同左 | locator 登録より前に予約を復元。dispatch と grant は再宣言で作り直す |
-| Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin)。ただし BGP を有効にした起動では、BGP の applier が書いた L3 の entry を全 VRF から消す | default: RPC / CLI で再投入。BGP の entry は経路の受信で書き直す ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除)) |
-| BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin) | default: RPC / CLI (FDB は学習でも埋まる) |
+| Headend v4 / v6 | **消える** | **残る** (bpffs pin)。ただし BGP を有効にした起動では、BGP の applier が書いた entry を全 VRF から消す | default: RPC / CLI で再投入。BGP の entry は経路の受信で書き直す ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除)) |
+| L2 headend の回線 (`hl2 create`) | `state.json` に残る | 同左。ESI も `state.json` から戻る | 起動時に、VRF table を閉じるかの判断と XDP attach より前に復元 ([L2 headend の回線](#l2-headend-の回線)) |
+| BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin)。ただし BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消す | default: RPC / CLI (FDB は学習でも埋まる)。BGP の entry は経路の受信で書き直す |
 | Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
 | VRF の vrf_id と実行時 AC (`vrf ac-add`) | `state.json` に残る | 同左 | 起動時に XDP attach より前に復元 |
 | 実行時の vrf-bgp binding (`vrf-bgp bind` など) | `state.json` に残る | 同左 | 起動時に BGP より前に復元。同じ VRF を config が bind していれば config が優先 |
@@ -22,7 +23,7 @@
 
 ## 永続化層: `state.json`
 
-`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC、API で作った VRF の BGP binding** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC、API で作った VRF の BGP binding と L2 headend の回線** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
 
 control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
 に保存されます。store 有効時は `local-sids/state.json` に local SID の名前と address、
@@ -102,6 +103,52 @@ binding の RPC は、state.json への書き込みが成功したときだけ�
 - `runtime_vrf_bindings` が無い state.json は、保存した binding が無いものとして読みます
 - この版が知らない field を binding の record に持つ state.json は、起動を拒否します。新しい版が書いた import の制限を黙って捨てると、別の tenant の経路を取り込むおそれがあるためです。field を消すか、書いた版で起動してください
 - `runtime_vrf_bindings` を知らない版の vinberod は、この field を読まずに起動し、次に state.json を書くときに消します。その版に戻す前に state.json を控えておき、binding は config で宣言するか、起動後に bind し直してください
+
+### L2 headend の回線
+
+`vbctl hl2 create` (`HeadendL2Create`、CNI を含む) で作った回線は `runtime_l2_circuits` に保存します。`hl2 delete` と `hl2 flush`、interface の削除 (link watcher が回線ごと消します) はここからも消します。
+
+```json
+"runtime_l2_circuits": [
+  {
+    "interface": "vb1a2b3c",
+    "ifindex": 12,
+    "mac": "02:5e:10:00:00:01",
+    "vlan": 0,
+    "mode": "SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2",
+    "src_addr": "fc00:1::1",
+    "segments": ["fc00:3::3"],
+    "bd_id": 100,
+    "esi": "00:11:22:33:44:55:66:77:88:99"
+  }
+]
+```
+
+回線は `headend_l2_map` と同じく ifindex と VLAN で決まります。`interface` と `mac` は、作成した時点 (または daemon が見た rename の後) の interface の名前と hardware address です。起動時は、保存した ifindex の interface が今も同じ名前と hardware address を持つときだけ回線を戻します。推測では戻しません。
+
+- interface が消えている、同じ名前の interface が別の ifindex で作り直されている、ifindex を別の interface が使っている (名前か hardware address が違う): 回線を戻さず、記録を消し、warning を出します。pin した map にその key の entry が残っていれば、それも消します。新しい interface が古い回線を引き継がないためです。回線が要るなら、その interface で作り直します
+- 一致する: entry と ESI を書き直します。pin した map では entry が残り ESI (`headend_l2_ext_map`) は消えているので、ここで ESI が戻ります
+
+稼働中の rename と hardware address の変更は、link watcher が記録に反映します。daemon が止まっている間の rename では回線は戻りません。
+
+復元は state を読んだ直後、VRF table の reconcile と XDP attach より前に行います。table を閉じるかの判断は `headend_l2_map` を見るので、pin の有無にかかわらず保存した回線のある table は開けておきます ([vrf.md](vrf.md#encap-の外側の経路))。
+
+RPC は、`headend_l2_map` と `state.json` の両方を書けたときだけ成功を返します。
+
+- 作成: map に書いてから保存します。保存に失敗したら map を作成前の状態 (上書きした回線があればその回線) に戻し、エラーを返します
+- 削除: 回線の記録に削除中の印 (`deleting`) を付けて保存し、map から消し、記録を消して保存します。最初の保存に失敗したら何も変えずにエラーを返します。map の削除か最後の保存に失敗したら、記録は削除中のままエラーを返します。同じ削除を繰り返すか次の起動で、削除が完了します。起動時は削除中の回線を戻さず、pin した map の entry を消します
+- `hl2 flush`: 全回線に削除中の印を付けてから map を空にし、記録を消します。失敗時の扱いは削除と同じです
+- interface が消えた回線の削除: 名前がもう解決できなくても、その名前と VLAN の記録が残っていれば (link watcher が消す前など) 消して成功を返します。記録も entry も無ければ従来どおり `not_found` です
+
+binding と同じく、state.json の rename が済んだ後に directory の fsync だけが失敗した場合は、エラーを返しても file が新しい内容を持つことがあります。次に state.json を書いたときに、メモリの内容にそろいます。
+
+作成の map への書き込みと保存の間で daemon が強制終了すると、pin した map には記録の無い entry が残ります。RPC は成功を返していません。記録の無い entry (この field を知らない版が pin した map に残したもの) は取り込まず、そのまま残します。作り直すと記録されます。
+
+- `runtime_l2_circuits` が無い state.json は、保存した回線が無いものとして読みます
+- この版が知らない field を持つ記録、同じ ifindex と VLAN の記録が 2 つある state.json、mode や ESI を解釈できない記録は起動を拒否します
+- この field を知らない版の vinberod は、field を読まずに起動し、次に state.json を書くときに消します。その版に戻す前に state.json を控えておき、回線は作り直してください
+
+1 つの host で複数の vinberod を動かすときは、`settings.state_path` をそれぞれ別にします。同じ file を共有すると、ほかの daemon の回線を自分の interface と照合して消します (examples は daemon ごとに別の file を使います)。
 
 ## BPF マップ: in-memory vs pinned
 
@@ -267,10 +314,11 @@ Flush はサーバ側で `sid_function_map` を iterate → 1 件ずつ `Delete`
 1. **上流ルーティングで draining** (可能なら)。SID を減らす / BGP で切り離すなど
 2. `vinberod` 停止
 3. (必要なら) `ip link set dev <iface> xdp off` を実行
-4. `vinberod -c vinbero.yml` 再起動 → Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach、API で作った binding の復元 が自動で走る
+4. `vinberod -c vinbero.yml` 再起動 → L2 headend の回線の復元、Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach、API で作った binding の復元 が自動で走る
 5. SID / Headend を再投入:
    - `pin_maps: false`: **外部コントローラから全部再投入**
    - `pin_maps: true`: RPC で入れたエントリは bpffs から復元されるので再投入不要。BGP を有効にした起動では、BGP の applier が書いたエントリは起動時に消え、経路を受信し直すと戻ります
+   - L2 headend の回線はどちらの場合も `state.json` から戻るので、再投入は不要です
 6. **Plugin は常に再登録**が必要 (`vinbero plugin register ...`)
 7. トラフィック監視 (`vinbero stats show`, `stats slot show`) で正常性確認
 

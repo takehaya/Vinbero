@@ -90,6 +90,15 @@ sudo ip netns exec hl2-router2 tcpdump -i hl2-rt2rt1 -n -v ip6
 The capture shows the SRv6 Routing Header (RT6) and next header 143
 (Ethernet).
 
+### Restart
+
+Each router saves the HeadendL2 entries it creates in its own state file
+(`settings.state_path`, `/tmp/vinbero_headend_l2_router{1,3}_state.json`).
+Stop vinberod, or kill it, and start it again on the same config: the entries
+come back without being registered again, and the ping works. `test.sh` does
+both (router1 with SIGTERM, router3 with SIGKILL), and checks that an entry
+deleted before a restart stays deleted.
+
 ### 5. Clean up
 
 ```bash

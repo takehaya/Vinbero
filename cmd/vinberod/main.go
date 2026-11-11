@@ -29,6 +29,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/headend"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
+	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/prober"
 	"github.com/takehaya/vinbero/pkg/server"
@@ -128,7 +129,10 @@ func run(cliCtx *cli.Context) error {
 		if !cliCtx.Bool("bgp-enabled") {
 			return nil
 		}
-		return purgeBGPHeadends(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg)
+		if err := purgeBGPHeadends(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg); err != nil {
+			return err
+		}
+		return purgeBGPEVPN(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg)
 	}, func() error {
 		if err := vin.AttachConfigDevices(); err != nil {
 			return fmt.Errorf("attach devices: %w", err)
@@ -158,12 +162,12 @@ func run(cliCtx *cli.Context) error {
 		return fmt.Errorf("watch devices: %w", err)
 	}
 
-	// Start FDB watcher
-	if err := vin.StartFDBWatcher(ctx); err != nil {
+	// Every bridge facet is registered before the watcher starts, so its
+	// dump of the existing FDB reaches them.
+	if err := vin.StartFDBWatcher(ctx, func(w *netlinkwatch.FDBWatcher) error {
+		return watchBridgeFacets(vrfBgpMgr.VRF(), w)
+	}); err != nil {
 		return fmt.Errorf("start FDB watcher: %w", err)
-	}
-	if err := watchBridgeFacets(vrfBgpMgr.VRF(), vin.GetFDBWatcher()); err != nil {
-		return err
 	}
 	if err := vin.StartBumRouteWatch(ctx); err != nil {
 		return fmt.Errorf("start xdp BUM route watch: %w", err)
@@ -432,6 +436,7 @@ func run(cliCtx *cli.Context) error {
 
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, vpnReplay, lg)
 	srv.SetDeviceAttacher(vin)
+	srv.SetL2Circuits(vin.L2Circuits())
 	if liveProber != nil {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
 	}
@@ -856,6 +861,23 @@ func purgeBGPHeadends(ops apply.HeadendPurgeOps, localASN uint32, lg *zap.Logger
 	}
 	if n > 0 {
 		lg.Info("removed the headend entries an earlier run's BGP applier wrote; BGP installs them again as routes arrive",
+			zap.Int("entries", n))
+	}
+	return nil
+}
+
+// purgeBGPEVPN removes, before the data plane is attached, the EVPN state
+// the BGP applier of localASN wrote in an earlier run (apply.PurgeBuiltinEVPN):
+// with pinned maps a remote MAC or peer written for a route the peer has
+// since withdrawn, or under a binding that changed while the daemon was
+// down, would forward until the route is received again. A failure is fatal.
+func purgeBGPEVPN(ops apply.EVPNPurgeOps, localASN uint32, lg *zap.Logger) error {
+	n, err := apply.PurgeBuiltinEVPN(ops, localASN, lg)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		lg.Info("removed the EVPN entries an earlier run's BGP applier wrote; BGP installs them again as routes arrive",
 			zap.Int("entries", n))
 	}
 	return nil

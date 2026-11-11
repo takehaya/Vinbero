@@ -10,8 +10,38 @@ import (
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
-	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vinbero"
 )
+
+// fakeBook is an l2CircuitBook that records what the server asks of it.
+type fakeBook struct {
+	create   func(vinbero.L2Circuit) error
+	del      func(ifindex uint32, vlan uint16) error
+	vanished func(name string, vlan uint16) (bool, error)
+}
+
+func (f *fakeBook) Create(c vinbero.L2Circuit) error {
+	if f.create == nil {
+		return nil
+	}
+	return f.create(c)
+}
+func (f *fakeBook) Delete(ifindex uint32, vlan uint16) error { return f.del(ifindex, vlan) }
+func (f *fakeBook) DeleteVanished(name string, vlan uint16) (bool, error) {
+	if f.vanished == nil {
+		return false, nil
+	}
+	return f.vanished(name, vlan)
+}
+func (f *fakeBook) Flush() (uint32, error) { return 0, nil }
+
+// lookupLo resolves "lo" only.
+func lookupLo(name string) (vinbero.LinkID, error) {
+	if name == "lo" {
+		return vinbero.LinkID{Name: "lo", Ifindex: 1}, nil
+	}
+	return vinbero.LinkID{}, errLinkNotFound
+}
 
 func deleteTargets(t *testing.T, s *HeadendL2Server, names ...string) *v1.HeadendL2DeleteResponse {
 	t.Helper()
@@ -34,6 +64,7 @@ func isNotFound(e *v1.OperationError) bool {
 // renamed interface is visible and a teardown can treat it as already gone.
 func TestHeadendL2DeleteUnresolvableName(t *testing.T) {
 	s := NewHeadendL2Server(nil)
+	s.SetCircuits(&fakeBook{})
 	got := deleteTargets(t, s, "vbtypo0test")
 	if len(got.Deleted) != 0 || len(got.Errors) != 1 || !isNotFound(got.Errors[0]) {
 		t.Errorf("got %+v, want one not-found error", got)
@@ -49,19 +80,38 @@ func TestHeadendL2DeleteUnresolvableName(t *testing.T) {
 // stays an error.
 func TestHeadendL2DeleteOutcomes(t *testing.T) {
 	s := NewHeadendL2Server(nil)
-	s.deleteEntry = func(uint32, uint16) error { return ebpf.ErrKeyNotExist }
+	s.lookupLink = lookupLo
+	book := &fakeBook{}
+	s.SetCircuits(book)
+	book.del = func(uint32, uint16) error { return ebpf.ErrKeyNotExist }
 	if got := deleteTargets(t, s, "lo"); len(got.Errors) != 1 || !isNotFound(got.Errors[0]) {
 		t.Errorf("missing entry: %+v", got)
 	}
 
-	s.deleteEntry = func(uint32, uint16) error { return errors.New("boom") }
+	book.del = func(uint32, uint16) error { return errors.New("boom") }
 	if got := deleteTargets(t, s, "lo"); len(got.Errors) != 1 || isNotFound(got.Errors[0]) {
 		t.Errorf("a real failure must not look like not-found: %+v", got)
 	}
 
-	s.deleteEntry = func(uint32, uint16) error { return nil }
+	book.del = func(uint32, uint16) error { return nil }
 	if got := deleteTargets(t, s, "lo"); len(got.Deleted) != 1 || len(got.Errors) != 0 {
 		t.Errorf("success: %+v", got)
+	}
+}
+
+// A saved circuit whose interface is gone is deleted by its old name; a name
+// with no such circuit stays not found.
+func TestHeadendL2DeleteVanishedName(t *testing.T) {
+	s := NewHeadendL2Server(nil)
+	s.lookupLink = lookupLo
+	s.SetCircuits(&fakeBook{vanished: func(name string, vlan uint16) (bool, error) {
+		return name == "vbgone0" && vlan == 0, nil
+	}})
+	if got := deleteTargets(t, s, "vbgone0"); len(got.Deleted) != 1 || len(got.Errors) != 0 {
+		t.Errorf("saved circuit of a vanished interface: %+v", got)
+	}
+	if got := deleteTargets(t, s, "vbgone1"); len(got.Errors) != 1 || !isNotFound(got.Errors[0]) {
+		t.Errorf("no saved circuit: %+v", got)
 	}
 }
 
@@ -99,12 +149,12 @@ func TestHeadendL2CreateHoldsVRFLock(t *testing.T) {
 		return "", false, nil
 	}, vrfMu)
 	written := 0
-	s.createEntry = func(uint32, uint16, *bpf.HeadendEntry, [bpf.ESILen]byte) error {
+	s.SetCircuits(&fakeBook{create: func(vinbero.L2Circuit) error {
 		held("the map write")
 		written++
 		return nil
-	}
-	s.linkGone = func(uint32) bool { return false }
+	}})
+	s.lookupLink = lookupLo
 	resp, err := s.HeadendL2Create(context.Background(), connect.NewRequest(&v1.HeadendL2CreateRequest{
 		HeadendL2S: []*v1.HeadendL2{{InterfaceName: "lo", SrcAddr: "fc00::1", Segments: []string{"fc00::2"}, BdId: 100}},
 	}))

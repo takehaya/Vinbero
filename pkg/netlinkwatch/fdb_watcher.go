@@ -65,7 +65,12 @@ type FDBWatcher struct {
 	nextSinkID    uint64
 	// neighList lists kernel neighbor entries (defaults to netlink.NeighList);
 	// overridable in tests so DumpBridge's filter + sync path needs no live bridge.
-	neighList    func(linkIndex, family int) ([]netlink.Neigh, error)
+	neighList func(linkIndex, family int) ([]netlink.Neigh, error)
+	// subscribe opens the FDB event stream (netlink.NeighSubscribeWithOptions);
+	// tests replace it.
+	subscribe func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, options netlink.NeighSubscribeOptions) error
+	// started is set once Start subscribed. Guarded by mu.
+	started      bool
 	done         chan struct{}
 	wg           sync.WaitGroup
 	agingSeconds int // 0=disabled
@@ -90,19 +95,45 @@ func NewFDBWatcher(mapOps *bpf.MapOperations, logger *zap.Logger) *FDBWatcher {
 		logger:     logger,
 		allowed:    make(map[int]uint16),
 		neighList:  netlink.NeighList,
+		subscribe:  netlink.NeighSubscribeWithOptions,
 		deviceAddr: linkHardwareAddr,
 		done:       make(chan struct{}),
 	}
 }
 
-// RegisterBridge dynamically adds a bridge to the FDB watch list.
+// RegisterBridge adds a bridge to the FDB watch list. Register the bridges
+// that exist at boot before Start: its dump of the existing FDB is filtered
+// by the list. A bridge registered after Start has its existing FDB synced
+// to fdb_map here instead (the EVPN coordinator advertises it, DumpBridge).
 func (w *FDBWatcher) RegisterBridge(ifindex int, bdID uint16) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	prev, had := w.allowed[ifindex]
 	w.allowed[ifindex] = bdID
+	replay := w.started && (!had || prev != bdID) && !w.isXDPLearnedLocked(bdID)
+	w.mu.Unlock()
 	w.logger.Info("Registered bridge for FDB watching",
 		zap.Int("ifindex", ifindex),
 		zap.Uint16("bd_id", bdID))
+	if replay {
+		w.syncBridge(ifindex, bdID)
+	}
+}
+
+// syncBridge syncs a bridge's existing FDB to fdb_map, the way the dump at
+// Start does for the bridges registered by then.
+func (w *FDBWatcher) syncBridge(ifindex int, bdID uint16) {
+	neighs, err := w.neighList(0, unix.AF_BRIDGE)
+	if err != nil {
+		w.logger.Warn("list the FDB of a newly watched bridge; its MACs reach fdb_map as the bridge learns them again",
+			zap.Int("ifindex", ifindex), zap.Error(err))
+		return
+	}
+	for i := range neighs {
+		n := &neighs[i]
+		if n.MasterIndex == ifindex && isUnicastMAC(n.HardwareAddr) {
+			w.learnFromBridge(nil, bdID, n)
+		}
+	}
 }
 
 // UnregisterBridge removes a bridge from the FDB watch list.
@@ -117,11 +148,14 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 
 	updates := make(chan netlink.NeighUpdate, 256)
 
-	if err := netlink.NeighSubscribeWithOptions(updates, w.done, netlink.NeighSubscribeOptions{
+	if err := w.subscribe(updates, w.done, netlink.NeighSubscribeOptions{
 		ListExisting: true,
 	}); err != nil {
 		return err
 	}
+	w.mu.Lock()
+	w.started = true
+	w.mu.Unlock()
 
 	w.wg.Go(func() {
 		w.processUpdates(ctx, updates)
