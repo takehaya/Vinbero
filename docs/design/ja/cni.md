@@ -119,7 +119,7 @@ bgp:
 
 vinberod は `--bgp-enabled` を付けて起動します。付けないと `bgp` の設定があっても BGP は動きません。`listen_port` の既定値 `-1` では TCP の listen をしないので、node どうしの iBGP には例のように `179` を指定します。`router_id`、`next_hop`、locator の `prefix` は node ごとに変えます。
 
-VRF と binding も config で宣言しておくことを勧めます。RPC で作った binding は daemon の再起動で消えるためです ([persistence.md](persistence.md))。config で宣言した binding は再起動後も残り、VRF table に残っている /32 は再び広告されます。host veth の attach と、plugin が足した AC は state file から戻ります。
+network configuration から作った binding は state file に保存され、daemon の再起動後も同じ内容で戻ります ([persistence.md](persistence.md#vrf-の-bgp-binding))。config で宣言した binding も再起動後に残り、どちらでも VRF table に残っている /32 は再び広告されます。host veth の attach と、plugin が足した AC も state file から戻ります。network configuration の `locator` は config の `bgp.locators` で宣言してください。`vbctl locator create` で登録した locator は再起動で消えるので、それを使う binding は locator を登録し直して bind し直すまで広告されません。VRF と binding を config で宣言しておくと、node の設定が config だけで分かります。
 
 ```yaml
 vrfs:
@@ -232,7 +232,7 @@ VRF が違えば、NAD どうしで subnet が重なっていても、同じア�
 - IPv4 だけです。IPAM が IPv6 を返すと ADD は失敗します
 - L3 mode だけです。EVPN L2 mode は未実装です
 - 1 つの pod に、同じ subnet (または同じ `routes` の宛先) を持つ 2 つの NAD は付けられません。pod の経路表は 1 つなので、2 つ目の ADD は同じ宛先の経路を足せずに失敗します。subnet が重なるだけで同じでなければ ADD は通りますが、重なる範囲の宛先には prefix の長い方の network が使われます
-- vinberod を再起動すると、network configuration から作った binding は消えます。binding は config で宣言してください。plugin が足した AC と VRF の vrf_id は state file から戻るので、pod は再起動後も同じ VRF に分類されます
+- vinberod を再起動しても、network configuration から作った binding、plugin が足した AC、VRF の vrf_id は state file から戻るので、pod は再起動後も同じ VRF に分類され、同じ RD と RT で広告されます。config が同じ VRF を bind していれば config の binding が使われます
 - node を再起動すると、Multus が CNI の設定を書き直す前に kubelet が pod の sandbox を作り直すことがあります。その pod は primary network だけで Running になり、net1 がありません。`k8s.v1.cni.cncf.io/network-status` annotation は古い値のままなので、再起動後は pod の中で net1 を確認し、無ければ pod を作り直してください
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します
 - `deviceMode: driver` (veth の native XDP) では、host veth へ redirect した frame を pod 側 veth が受け取るために、pod 側 veth にも XDP program か GRO が要ります。plugin はそれを設定しないので、既定の `generic` を使ってください

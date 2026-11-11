@@ -14,7 +14,7 @@
 | BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin) | default: RPC / CLI (FDB は学習でも埋まる) |
 | Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
 | VRF の vrf_id と実行時 AC (`vrf ac-add`) | `state.json` に残る | 同左 | 起動時に XDP attach より前に復元 |
-| 実行時の vrf-bgp binding | **消える** | **消える** | RPC / CLI で再投入 (config の binding は残る) |
+| 実行時の vrf-bgp binding (`vrf-bgp bind` など) | `state.json` に残る | 同左 | 起動時に BGP より前に復元。同じ VRF を config が bind していれば config が優先 |
 | 登録済み plugin (`PROG_ARRAY`) | **消える** | **消える** (pin しない) | register RPC を再実行 |
 | Global stats / per-slot stats | **消える** | **消える** (pin しない) | 自然増加で埋まる |
 
@@ -22,7 +22,7 @@
 
 ## 永続化層: `state.json`
 
-`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC、API で作った VRF の BGP binding** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
 
 control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
 に保存されます。store 有効時は `local-sids/state.json` に local SID の名前と address、
@@ -44,7 +44,7 @@ entry を再作成します。aux index と VRF ifindex はその時点で求め
 堅牢性は次の 3 点で担保します。
 
 - 書き込みは atomic です。同一ディレクトリの temp file に書いて fsync してから rename するので、書き込み途中の crash や ENOSPC でも直前の state.json が無傷で残ります。
-- 保存の失敗は RPC エラーとして返ります。kernel device とメモリ上の記録は巻き戻さず、次に成功した保存が全量を書き直して収束します。
+- 保存の失敗は RPC エラーとして返ります。device、bridge、VRF の RPC は kernel device とメモリ上の記録を巻き戻さず、次に成功した保存が全量を書き直して収束します。VRF の BGP binding の RPC は何も変えずに失敗します (後述)。
 - boot の reconcile は fail-closed です。state の entry が実体化できない場合 (member NIC の消失、名前を別種の link に取られた等) は、entry 名と修復手順 (デバイスの復旧か entry の削除) を示すエラーで起動を拒否します。stale な ifindex のまま続行すると FDB watcher / EVPN / SID 参照ガードが誤った index で動くためです。parse できない state.json も同様に起動を拒否します (空 state で始めると管理下のデバイスを黙って放棄することになるため)。
 
 VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は次に割り当てる id、`entries` は VRF 名ごとの `vrf_id` と `runtime_acs` です。kernel device を持たない VRF もここに入ります。`config` は、その VRF を起動時の読み込み (config file か、device / bridge の record) が作ったことを示します。API で作った VRF には付きません。
@@ -68,6 +68,40 @@ VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は�
 pin した map に state.json が記録していない vrf_id の状態が残っている場合 (state.json を失った、保存できなかった、などで)、起動時はその id より上から割り当て、その id の headend entry を消します。起動時の順序と、interface が消えた AC の扱いは [vrf.md](vrf.md#永続化と-boot) を参照してください。
 
 state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください (例外は上記の修復手順と、bridge record の owning VRF 付け替え)。
+
+### VRF の BGP binding
+
+`vbctl vrf-bgp bind`、`vrf-bgp update`、`vrf-bgp rt add` / `rt remove`、`vrf-bgp family add` / `family remove` (CNI の ADD が作る binding を含む) で作った、または変えた binding は `runtime_vrf_bindings` に保存します。L3 (vpnv4 / vpnv6 / mup_ipv4 / mup_ipv6) と L2 (evpn) を区別せず、binding 全体を保存します。`vrf-bgp unbind` はここから消します。config の `bgp.vrf_bindings` は保存しません。
+
+```json
+"runtime_vrf_bindings": [
+  {
+    "vrf_name": "tenant-a",
+    "rd": "65100:1",
+    "import_rts": ["65000:100"],
+    "export_rts": ["65000:100"],
+    "families": {"vpnv4": {"route_targets": [{"rt": "65000:100", "direction": "both"}]}},
+    "redistribute": ["static"],
+    "default_locator": "LOC1"
+  }
+]
+```
+
+保存するのはメモリ上の binding そのものです。`families` の RT は登録した順で、方向は `import` / `export` / `both` のいずれかです。`import_rts` / `export_rts` は `families` から導かれる一覧ですが、順序も含めて同じに戻すために保存します。RT を持たない family も残します。起動時はこれを正規化し直さずに戻すので、`vbctl vrf-bgp list` の結果は再起動の前後で同じです。`max_prefixes`、`mup_gtp4_source_prefix` も、設定していれば保存します。
+
+起動時の扱いは次のとおりです。
+
+- config が同じ VRF を `bgp.vrf_bindings` で bind していれば config を使い、保存した binding は捨てて state.json から消します。warning を 1 行出します。後で config からその binding を消しても、保存していた binding は戻りません
+- config が bind している VRF に API で加えた変更 (bind し直し、RT や family の追加と削除、unbind) は、メモリと data plane には反映しますが保存しません。次の起動で config の binding に戻ります
+- 復元は BGP の有無に関係なく行い、BGP session の起動、経路の受信、auto-advertise、plugin の復元より前に終えます。最初に受信した経路から、復元した binding で import 先を決めます
+- binding が名前を挙げる VRF は、config が宣言しなくなっても、その vrf_id のまま残ります
+- 保存した binding の auto-advertise を有効にできない場合 (API で登録した locator は再起動で消えるので、その locator を使う binding がこれにあたります) は、warning を出して起動を続けます。binding は残り、auto-advertise だけが止まります。locator を登録し直してから、同じ内容で `vbctl vrf-bgp bind` を実行すると広告を始めます。config の binding では、これまでどおり起動を止めます
+
+binding の RPC は、state.json への書き込みが成功したときだけ成功を返します。書き込みに失敗した RPC は binding を変えません。メモリ、data plane、state.json は直前の状態のままで、エラーには state file を書けなかったことが出ます (`vrf-bgp bind` / `unbind` は VRF ごとの `errors`、それ以外は `internal`)。同じ RPC を繰り返せばやり直せます。bind では、state.json に書いてから経路の import と広告に使い始めます。unbind では、state.json から消してから外します。どちらも、成功を返していない変更が再起動で現れることはありません。bind が新しく作った VRF は、書き込みに失敗しても VRF として残ります。
+
+- `runtime_vrf_bindings` が無い state.json は、保存した binding が無いものとして読みます
+- この版が知らない field を binding の record に持つ state.json は、起動を拒否します。新しい版が書いた import の制限を黙って捨てると、別の tenant の経路を取り込むおそれがあるためです。field を消すか、書いた版で起動してください
+- `runtime_vrf_bindings` を知らない版の vinberod は、この field を読まずに起動し、次に state.json を書くときに消します。その版に戻す前に state.json を控えておき、binding は config で宣言するか、起動後に bind し直してください
 
 ## BPF マップ: in-memory vs pinned
 
@@ -233,7 +267,7 @@ Flush はサーバ側で `sid_function_map` を iterate → 1 件ずつ `Delete`
 1. **上流ルーティングで draining** (可能なら)。SID を減らす / BGP で切り離すなど
 2. `vinberod` 停止
 3. (必要なら) `ip link set dev <iface> xdp off` を実行
-4. `vinberod -c vinbero.yml` 再起動 → Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach が自動で走る
+4. `vinberod -c vinbero.yml` 再起動 → Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach、API で作った binding の復元 が自動で走る
 5. SID / Headend を再投入:
    - `pin_maps: false`: **外部コントローラから全部再投入**
    - `pin_maps: true`: RPC で入れたエントリは bpffs から復元されるので再投入不要。BGP を有効にした起動では、BGP の applier が書いたエントリは起動時に消え、経路を受信し直すと戻ります

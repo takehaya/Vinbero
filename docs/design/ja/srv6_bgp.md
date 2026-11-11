@@ -55,7 +55,7 @@ flowchart LR
 
 - BGP speaker: default では gobgp を in-process で動かして実現します。gobgp が peer と VPNv4/VPNv6 を交換し、受信した経路を route handler へ渡します。BGP speaker は差し替え可能な interface で、gobgp はその default 実装です。
 - route handler (applier): 受信経路ごとに RD・prefix・service SID・RT・next hop を取り出します。
-- VRF と RT の対応: VRF ごとの RT は config か RPC で事前に登録し、VRF 名を鍵にした in-memory の map で保持します。binding は family (vpnv4 / vpnv6 / evpn / mup_ipv4 / mup_ipv6) ごとに RT と import/export の方向を持てます。applier は経路の RT を該当 family の import RT と照合し、どれにも一致しない経路を落とします。
+- VRF と RT の対応: VRF ごとの RT は config か RPC で事前に登録し、VRF 名を鍵にした map で保持します。RPC で登録した binding は state file にも保存し、再起動では BGP session の起動より前に戻します ([persistence.md](persistence.md#vrf-の-bgp-binding))。binding は family (vpnv4 / vpnv6 / evpn / mup_ipv4 / mup_ipv6) ごとに RT と import/export の方向を持てます。applier は経路の RT を該当 family の import RT と照合し、どれにも一致しない経路を落とします。
 - encap entry の生成: 一致した経路を H.Encaps の headend エントリ (segments = [service SID]) に変換し、{vrf_id, prefix} を鍵にした eBPF の LPM trie (headend map) へ、import RT が一致したすべての VRF の vrf_id で書きます。1 つの経路を複数の VRF が import すれば、それぞれの VRF に入ります。宛先は {VRF, family, prefix} ごとに 1 つの ECMP group を持ち、同じ VRF に入る別の PE (RD) の path だけが同じ group にまとまります。VRF の決定は RT だけで行い、RD は path を区別するためだけに使います。その family を RT 付きで宣言する binding が無い間は default-allow で、vrf_id 0 (global VRF) に書きます。書き込みには owner tag を付け、後で同じ owner の経路だけを正確に withdraw できるようにします。withdraw は RT を運ばないので、applier は path ごとに入れた VRF を記録しておき、記録したすべての VRF から外します。data plane は入口の AC が分類した VRF の entry だけを引くので、tenant の CE の口はその VRF の access circuit にします ([vrf.md](vrf.md#access-circuit-の無い-binding))。
 - encap source: outer の送信元 IPv6 は、設定したローカル locator の prefix から取ります。
 
