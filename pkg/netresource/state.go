@@ -1,6 +1,7 @@
 package netresource
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,76 @@ type ManagedState struct {
 	// VrfObjects are the VRF objects' identities and runtime facets. Nil on
 	// a file written before they were recorded.
 	VrfObjects *ManagedVrfObjects `json:"vrf_objects,omitempty"`
+	// RuntimeVrfBindings are the VRF <-> BGP bindings made over the API,
+	// ordered by VRF name. The bindings of the config file are not here.
+	// Absent on a file written before they were recorded, which reads as
+	// none saved.
+	RuntimeVrfBindings []ManagedVrfBinding `json:"runtime_vrf_bindings,omitempty"`
+}
+
+// ManagedVrfBinding is one VRF's BGP binding as it was in memory. The legacy
+// route-target lists are kept next to the families they derive from, so a
+// restored binding lists them in the same order.
+type ManagedVrfBinding struct {
+	VRFName   string   `json:"vrf_name"`
+	RD        string   `json:"rd,omitempty"`
+	ImportRTs []string `json:"import_rts,omitempty"`
+	ExportRTs []string `json:"export_rts,omitempty"`
+	// Families is null for a binding that never had a family and {} for
+	// one whose last family was removed; both come back as they were.
+	Families            map[string]ManagedFamilyPolicy `json:"families"`
+	Redistribute        []string                       `json:"redistribute,omitempty"`
+	MaxPrefixes         uint32                         `json:"max_prefixes,omitempty"`
+	DefaultLocator      string                         `json:"default_locator,omitempty"`
+	MupGTP4SourcePrefix string                         `json:"mup_gtp4_source_prefix,omitempty"`
+}
+
+// ManagedFamilyPolicy is one family's route targets, in registration order.
+type ManagedFamilyPolicy struct {
+	RouteTargets []ManagedRouteTarget `json:"route_targets"`
+}
+
+// ManagedRouteTarget is one route target and its direction ("import",
+// "export" or "both").
+type ManagedRouteTarget struct {
+	RT        string `json:"rt"`
+	Direction string `json:"direction"`
+}
+
+// UnmarshalJSON refuses a field this version does not know. A binding record
+// written by a newer version may carry a policy this one would silently drop,
+// and the binding would then import routes it was meant to keep out.
+func (b *ManagedVrfBinding) UnmarshalJSON(data []byte) error {
+	type plain ManagedVrfBinding
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var p plain
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("runtime_vrf_bindings: %w (a newer vinberod may have written it)", err)
+	}
+	*b = ManagedVrfBinding(p)
+	return nil
+}
+
+func cloneVrfBindings(in []ManagedVrfBinding) []ManagedVrfBinding {
+	if in == nil {
+		return nil
+	}
+	out := make([]ManagedVrfBinding, len(in))
+	for i, b := range in {
+		b.ImportRTs = slices.Clone(b.ImportRTs)
+		b.ExportRTs = slices.Clone(b.ExportRTs)
+		b.Redistribute = slices.Clone(b.Redistribute)
+		if b.Families != nil {
+			fams := make(map[string]ManagedFamilyPolicy, len(b.Families))
+			for fam, fp := range b.Families {
+				fams[fam] = ManagedFamilyPolicy{RouteTargets: slices.Clone(fp.RouteTargets)}
+			}
+			b.Families = fams
+		}
+		out[i] = b
+	}
+	return out
 }
 
 // ManagedVrfObjects is the vrf_id allocator and one record per VRF object.
@@ -60,8 +131,9 @@ func (o *ManagedVrfObjects) clone() *ManagedVrfObjects {
 
 // ManagedVrfObject is what a VRF object keeps across a restart, by name. A
 // VRF without a kernel device has a record here and none in ManagedState.VRFs.
-// State declared at runtime for one VRF belongs in this record, a field per
-// facet.
+// State the VRF manager declares at runtime for one VRF belongs in this
+// record, a field per facet. The BGP binding, which another manager writes,
+// is in ManagedState.RuntimeVrfBindings.
 type ManagedVrfObject struct {
 	Name  string `json:"name"`
 	VrfID uint32 `json:"vrf_id"`

@@ -366,6 +366,17 @@ type Manager struct {
 	// onImportFilterChange, set once before use and read under mu, is told
 	// about every Bind or Unbind that changed a family's ImportFilterKey.
 	onImportFilterChange func([]ImportFilterChange)
+	// store receives the bindings made over the API (SetStore); nil saves
+	// nothing. saveMu spans a snapshot and its write, so an older snapshot
+	// cannot overwrite a newer one.
+	store  BindingStore
+	saveMu sync.Mutex
+	// configDeclared are the VRF names the config file binds
+	// (SetConfigDeclared); their bindings are never saved. restored are the
+	// bindings Restore brought back from the state file. Both are set at
+	// boot and guarded by mu.
+	configDeclared map[string]struct{}
+	restored       map[string]struct{}
 }
 
 // ImportFilterChange reports that one Bind or Unbind changed the
@@ -382,8 +393,10 @@ const ImportFilterDefaultAllow = "allow"
 // NewManager returns an empty Manager with a fresh vrf.Manager.
 func NewManager() *Manager {
 	return &Manager{
-		bindings: make(map[string]Binding),
-		vrf:      vrf.NewManager(),
+		bindings:       make(map[string]Binding),
+		vrf:            vrf.NewManager(),
+		configDeclared: make(map[string]struct{}),
+		restored:       make(map[string]struct{}),
 	}
 }
 
@@ -409,8 +422,10 @@ func (m *Manager) Bind(b Binding) error {
 	if _, err := m.vrf.Ensure(b.VRFName); err != nil {
 		return err
 	}
-	// Bindings are not saved, so the state file must not fail one. An id that
-	// could not be saved stays pending for the next successful save.
+	// A caller that saves the binding (SaveWith) saves the VRF state before
+	// Bind, so this finds nothing to write. For a binding that is not saved
+	// (one the config file declares) an id that could not be saved stays
+	// pending for the next successful save.
 	m.vrf.TrySave()
 	b = b.Normalize()
 	m.mu.Lock()

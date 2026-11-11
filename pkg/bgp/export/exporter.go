@@ -166,18 +166,9 @@ func (e *Exporter) Start(ctx context.Context) error {
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
 		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}
-	enabled := make([]string, 0)
-	for _, b := range e.vrfBindings.List() {
-		if len(b.Redistribute) == 0 {
-			continue
-		}
-		// enableAndWatch disables the VRF itself on a RegisterTable failure, so
-		// nothing for this binding leaks; unwind cleans up the earlier ones.
-		if err := e.enableAndWatch(b, false); err != nil {
-			e.unwind(enabled)
-			return fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
-		}
-		enabled = append(enabled, b.VRFName)
+	enabled, err := e.enableBindings()
+	if err != nil {
+		return err
 	}
 	if len(e.underlayCfg.Redistribute) > 0 {
 		e.mu.Lock()
@@ -193,6 +184,37 @@ func (e *Exporter) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// enableBindings enables every binding with a redistribute set, for Start.
+// On a failure it unwinds the VRFs it enabled and returns the error.
+func (e *Exporter) enableBindings() ([]string, error) {
+	enabled := make([]string, 0)
+	for _, b := range e.vrfBindings.List() {
+		if len(b.Redistribute) == 0 {
+			continue
+		}
+		// enableAndWatch disables the VRF itself on a RegisterTable failure, so
+		// nothing for this binding leaks; unwind cleans up the earlier ones.
+		if err := e.enableAndWatch(b, false); err != nil {
+			// A binding restored from the state file was accepted by an
+			// earlier run, against what it had then: typically a locator
+			// registered over the API, which a restart does not keep.
+			// Refusing to start would leave the node down until the state
+			// file is edited, so the binding stays without auto-advertise
+			// until it is bound again. A config binding still fails the
+			// start, as the operator wrote it for this boot.
+			if e.vrfBindings.Restored(b.VRFName) {
+				e.logger.Warn("auto-advertise not enabled for a VRF binding restored from the state file; bind it again once what it names is in place",
+					zap.String("vrf", b.VRFName), zap.String("default_locator", b.DefaultLocator), zap.Error(err))
+				continue
+			}
+			e.unwind(enabled)
+			return nil, fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
+		}
+		enabled = append(enabled, b.VRFName)
+	}
+	return enabled, nil
 }
 
 // unwind disables the VRFs already enabled in a Start that then failed, so a

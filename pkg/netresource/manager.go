@@ -1,7 +1,9 @@
 package netresource
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -209,6 +211,47 @@ func (m *ResourceManager) SaveVrfObjects(objs ManagedVrfObjects) error {
 	m.mu.Unlock()
 	if err := m.persist(); err != nil {
 		return fmt.Errorf("persist state after updating VRF objects: %w", err)
+	}
+	return nil
+}
+
+// RuntimeVrfBindings returns a copy of the saved VRF bindings.
+func (m *ResourceManager) RuntimeVrfBindings() []ManagedVrfBinding {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cloneVrfBindings(m.state.RuntimeVrfBindings)
+}
+
+// SaveRuntimeVrfBindings records the VRF bindings and writes the state file.
+// Unlike the other records, a failed write puts the previous record back: the
+// caller undoes its change on the error, so the bindings in memory and in the
+// file stay the same. writeMu is held from the swap to the revert, so no
+// other write can put the failed record on disk in between. A record equal
+// to the saved one is not written again.
+func (m *ResourceManager) SaveRuntimeVrfBindings(bindings []ManagedVrfBinding) error {
+	c := cloneVrfBindings(bindings)
+	if len(c) == 0 {
+		c = nil
+	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	m.mu.Lock()
+	prev := m.state.RuntimeVrfBindings
+	if (len(prev) == 0 && c == nil) || reflect.DeepEqual(prev, c) {
+		m.mu.Unlock()
+		return nil
+	}
+	m.state.RuntimeVrfBindings = c
+	data, err := json.MarshalIndent(m.state, "", "  ")
+	m.mu.Unlock()
+	if err == nil {
+		err = writeFileAtomic(m.statePath, data)
+	}
+	if err != nil {
+		m.mu.Lock()
+		m.state.RuntimeVrfBindings = prev
+		m.mu.Unlock()
+		return fmt.Errorf("persist state after updating VRF bindings: %w", err)
 	}
 	return nil
 }

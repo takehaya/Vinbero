@@ -247,7 +247,7 @@ func TestWatchBridgeFacets(t *testing.T) {
 	if err := watchBridgeFacets(mgr, registrar{}); err == nil {
 		t.Fatal("registration before the restore succeeded")
 	}
-	mgr.FinishRestore([]string{"evi"})
+	mgr.FinishRestore([]string{"evi"}, nil)
 	r := registrar{}
 	if err := watchBridgeFacets(mgr, r); err != nil {
 		t.Fatal(err)
