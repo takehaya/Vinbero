@@ -125,18 +125,7 @@ func TestE2E_EVPNRT2ToFdbAndBdPeer(t *testing.T) {
 		t.Fatalf("PE1 AddPeer: %v", err)
 	}
 
-	waitFor(t, "BGP session ESTABLISHED", 30*time.Second, func() bool {
-		peers, err := pe2.Peers(ctx)
-		if err != nil {
-			return false
-		}
-		for _, p := range peers {
-			if p.SessionState == "established" {
-				return true
-			}
-		}
-		return false
-	})
+	waitSessionEstablished(t, pe2, pe1)
 
 	// PE1 advertises an RT2 with the End.DT2U SID in the SRv6 L2 Service TLV.
 	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
@@ -287,18 +276,7 @@ func TestE2E_EVPNRT3ToBdPeer(t *testing.T) {
 		t.Fatalf("PE1 AddPeer: %v", err)
 	}
 
-	waitFor(t, "BGP session ESTABLISHED", 30*time.Second, func() bool {
-		peers, err := pe2.Peers(ctx)
-		if err != nil {
-			return false
-		}
-		for _, p := range peers {
-			if p.SessionState == "established" {
-				return true
-			}
-		}
-		return false
-	})
+	waitSessionEstablished(t, pe2, pe1)
 
 	// PE1 advertises an RT3 with the End.DT2M SID plus a PMSI Ingress
 	// Replication attribute (RFC 7432 §11.2 / RFC 9252 §6.3).
@@ -434,6 +412,7 @@ func TestE2E_EVPNReplayRescuesEarlyRoute(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("PE1 AddPeer: %v", err)
 	}
+	waitSessionEstablished(t, pe2, pe1)
 
 	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
 	hw, err := net.ParseMAC(evpnMAC)

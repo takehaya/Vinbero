@@ -84,6 +84,7 @@ func TestListRoutes_PeerLearnedOnlyAndLocalOriginSkipped(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("PE1 AddPeer: %v", err)
 	}
+	waitSessionEstablished(t, pe2, pe1)
 
 	const mac = "aa:bb:cc:00:00:42"
 	hw, err := net.ParseMAC(mac)
