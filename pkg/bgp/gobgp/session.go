@@ -220,10 +220,11 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 		},
 		// Transport carries only PassiveMode. In an iBGP full mesh both ends of
 		// a pair would otherwise dial at once and the connection collision
-		// flaps the session, so one end is marked passive (accept-only). gobgp
-		// fills the rest of Transport -- local address from the neighbor family
-		// and remote port 179 -- in SetDefaultNeighborConfigValues on the
-		// AddPeer path, so nothing else is set here.
+		// can flap or stall the session, so one end is marked passive
+		// (accept-only). gobgp fills the rest of Transport -- local address
+		// from the neighbor family and remote port 179 -- in
+		// SetDefaultNeighborConfigValues on the AddPeer path, so nothing else
+		// is set here.
 		Transport: &gobgpapi.Transport{
 			PassiveMode: p.Passive,
 		},

@@ -291,8 +291,9 @@ type BGPPeerConfig struct {
 	KeepaliveSec uint32   `yaml:"keepalive_sec,omitempty" default:"30"`
 	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6 / evpn / mup_ipv4
 	// Passive stops this peer from dialing out; it only accepts the
-	// neighbor's inbound connection. Set it on one end of each iBGP
-	// full-mesh pair to avoid connection-collision flap.
+	// neighbor's inbound connection. Set it on exactly one end of each
+	// iBGP full-mesh pair: when both ends dial, a connection collision can
+	// flap the session or keep the first one from ever coming up.
 	Passive bool `yaml:"passive,omitempty"`
 	// ConnectRetrySec is the BGP ConnectRetry timer in seconds. Defaults to
 	// 5 (gobgp's own default is 120) so a peer unreachable at startup

@@ -55,9 +55,12 @@ bgp:
     # registered.
     source_locator: "LOC2"
   peers:
-    # pe-osaka's loopback. Multihop iBGP session via the IPv6 core.
+    # pe-tokyo's loopback. Multihop iBGP session via the IPv6 core. Only
+    # pe-tokyo dials: with both ends dialing, the two connections can cross
+    # and the first session stay in OpenConfirm.
     - neighbor: "2001:db8:ff::1"
       peer_asn: 65100
+      passive: true
       hold_time_sec: 30
       keepalive_sec: 10
       families:

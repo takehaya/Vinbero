@@ -57,6 +57,10 @@ settings:
 #       peer_asn: 65000
 #       hold_time_sec: 90
 #       keepalive_sec: 30
+#       # Only accept the neighbor's connection instead of dialing it. When
+#       # two vinberod peer, set it on exactly one end: if both dial, the two
+#       # connections can cross and keep the first session from coming up.
+#       passive: false
 #       families:
 #         - vpnv4
 #         - vpnv6
