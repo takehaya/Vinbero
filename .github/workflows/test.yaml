@@ -93,10 +93,10 @@ jobs:
             sudo modprobe vrf
           fi
 
-      - name: Build and test shared control-plane controllers
-        run: |
-          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet cplane-custom-cdplane-behavior
-          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/cdplanecontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./sdk/go/cplane/evpncontroller ./pkg/cplane/native
+      # The wasm artifacts the controller and parity tests load. Those
+      # packages are tested once, with -race, in "Run unit tests" below.
+      - name: Build shared control-plane controllers
+        run: make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet cplane-custom-cdplane-behavior
 
       - name: Build the dedicated Cplane/Dplane packet fixture
         run: |
@@ -119,7 +119,9 @@ jobs:
         # go test's per-package timeout under -race (the run takes ~15m on a
         # fast local machine and crossed 20m on the runner once the EVPN
         # aliasing tests landed); give it real headroom.
-        run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m ./...
+        # VINBERO_CPLANE_PARITY=1 makes a missing wasm artifact fail the
+        # controller and parity tests instead of skipping them.
+        run: VINBERO_CPLANE_PARITY=1 go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m ./...
 
   sdk-archive-verify:
     name: SDK Archive Verify
