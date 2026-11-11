@@ -379,8 +379,14 @@ func (a *Applier) removeVPNPath(dk vpnDestKey, pk vpnPathKey) bool {
 func (a *Applier) removeVPNRoute(rk vpnRouteKey, keep []uint32) []uint32 {
 	var left []uint32
 	for _, v := range a.vpnGroups.placed[rk] {
-		if slices.Contains(keep, v) || !a.removeVPNPath(rk.dest(v), rk.path) {
+		switch {
+		case slices.Contains(keep, v):
 			left = append(left, v)
+		case a.removeVPNPath(rk.dest(v), rk.path):
+			a.vpnGroups.unstick(rk.dest(v), rk)
+		default:
+			left = append(left, v)
+			a.vpnGroups.stick(rk.dest(v), rk)
 		}
 	}
 	a.vpnGroups.setPlaced(rk, left)
@@ -490,6 +496,7 @@ func (a *Applier) placeVPNRoute(rk vpnRouteKey, path *vpnPath, vrfs []uint32) {
 		if a.upsertVPNPath(rk.dest(v), rk.path, &p) {
 			placed = append(placed, v)
 		}
+		a.vpnGroups.unstick(rk.dest(v), rk)
 	}
 	a.vpnGroups.setPlaced(rk, placed)
 }

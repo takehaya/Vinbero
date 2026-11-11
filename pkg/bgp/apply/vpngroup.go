@@ -126,8 +126,11 @@ type ecmpOps interface {
 type vpnGroupTable struct {
 	dests map[vpnDestKey]*vpnDest
 	// placed is, for each received path, the VRFs whose destination holds
-	// it, in ascending order.
+	// it, in ascending order. stuck indexes the records kept only because
+	// the path's removal from that destination failed: when the tracked
+	// pass retires the destination, they are dropped with it.
 	placed map[vpnRouteKey][]uint32
+	stuck  map[vpnDestKey]map[vpnRouteKey]struct{}
 	ecmp   ecmpOps
 	logger *zap.Logger
 
@@ -140,6 +143,7 @@ func newVPNGroupTable(ecmp ecmpOps, localASN uint32, logger *zap.Logger) *vpnGro
 	return &vpnGroupTable{
 		dests:    make(map[vpnDestKey]*vpnDest),
 		placed:   make(map[vpnRouteKey][]uint32),
+		stuck:    make(map[vpnDestKey]map[vpnRouteKey]struct{}),
 		ecmp:     ecmp,
 		logger:   logger.Named("vpngroup"),
 		localASN: localASN,
@@ -153,6 +157,32 @@ func (t *vpnGroupTable) setPlaced(rk vpnRouteKey, vrfs []uint32) {
 		return
 	}
 	t.placed[rk] = slices.Sorted(slices.Values(vrfs))
+}
+
+// stick records that rk stays placed in dk only to retry its removal.
+func (t *vpnGroupTable) stick(dk vpnDestKey, rk vpnRouteKey) {
+	if t.stuck[dk] == nil {
+		t.stuck[dk] = map[vpnRouteKey]struct{}{}
+	}
+	t.stuck[dk][rk] = struct{}{}
+}
+
+// unstick forgets that: rk's removal from dk succeeded, or rk was placed
+// in dk again.
+func (t *vpnGroupTable) unstick(dk vpnDestKey, rk vpnRouteKey) {
+	delete(t.stuck[dk], rk)
+	if len(t.stuck[dk]) == 0 {
+		delete(t.stuck, dk)
+	}
+}
+
+// retired drops the records kept to retry a removal from dk, now that dk is
+// gone.
+func (t *vpnGroupTable) retired(dk vpnDestKey) {
+	for rk := range t.stuck[dk] {
+		t.setPlaced(rk, slices.DeleteFunc(slices.Clone(t.placed[rk]), func(v uint32) bool { return v == dk.vrf }))
+	}
+	delete(t.stuck, dk)
 }
 
 // groupOwner is the owner every group this table writes carries. It is
@@ -490,6 +520,7 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	}
 	a.prober.Unregister(d.groupID)
 	delete(a.vpnGroups.dests, dk)
+	a.vpnGroups.retired(dk)
 	a.vpnGroups.freeIDs = append(a.vpnGroups.freeIDs, d.groupID)
 	a.logger.Info("VPN prefix withdrawn",
 		zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID))

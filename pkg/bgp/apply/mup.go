@@ -488,14 +488,14 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) bool {
 
 	createHeadend, _ := a.mupT1STHeadendFns(uePrefix)
 	owner := bpf.OwnerBGPMUP(a.localASN, r.RD)
-	// The entry is about to be this session's again: an earlier failed
-	// removal of the same key must not delete it later.
-	delete(a.mupT1STStale, mupT1STEntry{vrf: vrfID, prefix: r.Prefix, owner: owner})
 	if err := createHeadend(vrfID, r.Prefix, entry, owner); err != nil {
 		a.logger.Error("install MUP T1ST headend",
 			zap.Uint32("vrf_id", vrfID), zap.String("ue_prefix", r.Prefix), zap.Error(err))
 		return a.mupFailed()
 	}
+	// The entry is this session's again: an earlier failed removal of the
+	// same key must not delete it later.
+	delete(a.mupT1STStale, mupT1STEntry{vrf: vrfID, prefix: r.Prefix, owner: owner})
 	if st.installedSID != "" && st.headendVRF != vrfID {
 		// The session moved to another VRF: the new entry is in place, so
 		// the old one goes. A failed removal is retried by the tracked pass.
