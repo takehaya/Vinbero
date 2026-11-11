@@ -3516,8 +3516,15 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		if err != nil {
 			t.Fatalf("build return packet: %v", err)
 		}
-		if ret, _ := h.runOnIfindex(back, 1); ret != XDP_DROP {
+		ret, out := h.runOnIfindex(back, 1)
+		if ret != XDP_DROP {
 			t.Fatalf("odd seq: expected XDP_DROP, got %d", ret)
+		}
+		// A replay would also end in XDP_DROP on a host with no route to
+		// the cached DA, so check that the frame was left as it came: the
+		// seqlock check drops before any header is prepended.
+		if !bytes.Equal(out, back) {
+			t.Fatalf("odd seq: the frame was rewritten before the drop: % x", out)
 		}
 	})
 
