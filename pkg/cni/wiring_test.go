@@ -39,11 +39,8 @@ var (
 )
 
 type fakeNet struct {
-	r    *recorder
-	gone map[string]bool // host veths that no longer exist
+	r *recorder
 }
-
-func (f fakeNet) HostVethExists(hostIf string) (bool, error) { return !f.gone[hostIf], nil }
 
 func (f fakeNet) CreateVeth(ns, podIf, hostIf, tmpIf string, mtu int) (Veth, error) {
 	return Veth{HostMAC: hostMAC, PodMAC: podMAC}, f.r.do("veth %s %s %s mtu=%d", ns, podIf, hostIf, mtu)
@@ -136,7 +133,7 @@ func newTestPlugin(t *testing.T, ip string) (*Plugin, *recorder, string) {
 	dir := t.TempDir()
 	d := &fakeDaemon{r: r, attached: map[string]bool{}}
 	p := &Plugin{
-		Net:    fakeNet{r: r, gone: map[string]bool{}},
+		Net:    fakeNet{r: r},
 		IPAM:   fakeIPAM{r: r, ip: ip},
 		Daemon: func(string) Daemon { return d },
 		Store:  func(string) *Store { return &Store{Dir: dir} },
@@ -354,45 +351,99 @@ func TestDelKeepsRecordOnError(t *testing.T) {
 	}
 }
 
-func TestAddRefusesOverlapAcrossVRFs(t *testing.T) {
-	p, r, _ := newTestPlugin(t, "10.100.1.5/16")
-	if _, err := p.Add(testArgs("c1", "tenant-a", 100, "")); err != nil {
+// Two VRFs may use the same subnet, and even the same address, on one node:
+// each attachment keeps its own record, VRF table and host veth, and DEL of
+// one leaves the other alone. Within one VRF the plugin leaves addresses to
+// IPAM.
+func TestOverlappingSubnetsAcrossVRFs(t *testing.T) {
+	p, r, dir := newTestPlugin(t, "10.100.1.5/16")
+	argsA := testArgs("ca", "tenant-a", 100, "")
+	argsB := testArgs("cb", "tenant-b", 200, "")
+	hostA, _ := vethNames("ca", "net1")
+	hostB, _ := vethNames("cb", "net1")
+	if _, err := p.Add(argsA); err != nil {
 		t.Fatal(err)
 	}
-	// Same VRF: fine.
-	p.IPAM = fakeIPAM{r: r, ip: "10.100.1.6/16"}
-	if _, err := p.Add(testArgs("c2", "tenant-a", 100, "")); err != nil {
-		t.Fatal(err)
-	}
-	// Another VRF with an overlapping subnet: refused, lease released.
-	p.IPAM = fakeIPAM{r: r, ip: "10.100.200.1/24"}
 	r.calls = nil
-	_, err := p.Add(testArgs("c3", "tenant-b", 200, ""))
-	if err == nil || !strings.Contains(err.Error(), "overlaps") {
-		t.Fatalf("Add = %v, want overlap error", err)
+	res, err := p.Add(argsB)
+	if err != nil {
+		t.Fatalf("ADD of the same address in another VRF: %v", err)
 	}
-	if !slices.Equal(r.calls, []string{"ipam-add host-local", "ipam-del host-local"}) {
-		t.Errorf("calls = %v", r.calls)
+	if res.IPs[0].Address.String() != "10.100.1.5/32" {
+		t.Errorf("tenant-b address = %v", res.IPs[0].Address)
 	}
-	// A disjoint subnet in another VRF is fine.
-	p.IPAM = fakeIPAM{r: r, ip: "10.200.0.1/24"}
-	if _, err := p.Add(testArgs("c4", "tenant-b", 200, "")); err != nil {
-		t.Fatal(err)
+	for _, want := range []string{
+		"rpc vrf-create tenant-b 200",
+		"enslave " + hostB + " tenant-b",
+		"rpc ac-add tenant-b " + hostB,
+		"route-add " + hostB + " table=200 10.100.1.5 lladdr=02:00:00:00:00:02",
+	} {
+		if !slices.Contains(r.calls, want) {
+			t.Errorf("tenant-b ADD lacks %q: %v", want, r.calls)
+		}
 	}
-}
+	store := &Store{Dir: dir}
+	for _, c := range []struct {
+		id, vrf string
+		table   uint32
+		host    string
+	}{{"ca", "tenant-a", 100, hostA}, {"cb", "tenant-b", 200, hostB}} {
+		a, ok, err := store.Get(c.id, "net1")
+		if err != nil || !ok {
+			t.Fatalf("record %s: %v %v", c.id, ok, err)
+		}
+		if a.VRF != c.vrf || a.TableID != c.table || a.HostVeth != c.host || a.Address != netip.MustParsePrefix("10.100.1.5/16") {
+			t.Errorf("record %s = %+v", c.id, a)
+		}
+	}
 
-// A record whose veth is gone (a reboot, a DEL that never came) no longer
-// occupies its subnet.
-func TestOverlapIgnoresRecordsWithoutAVeth(t *testing.T) {
-	p, r, _ := newTestPlugin(t, "10.100.1.5/16")
-	if _, err := p.Add(testArgs("c1", "tenant-a", 100, "")); err != nil {
+	// Within one VRF the plugin has no check of its own either: a second
+	// pod of tenant-a in the same subnet is IPAM's business.
+	p.IPAM = fakeIPAM{r: r, ip: "10.100.1.6/16"}
+	if _, err := p.Add(testArgs("ca2", "tenant-a", 100, "")); err != nil {
+		t.Fatalf("second pod in the same VRF: %v", err)
+	}
+
+	for _, args := range []*skel.CmdArgs{argsA, argsB} {
+		if err := p.Check(args); err != nil {
+			t.Errorf("CHECK %s: %v", args.ContainerID, err)
+		}
+	}
+
+	// DEL of tenant-a's pod touches only its own table, veth and AC.
+	r.calls = nil
+	if err := p.Del(argsA); err != nil {
 		t.Fatal(err)
 	}
-	host, _ := vethNames("c1", "net1")
-	p.Net.(fakeNet).gone[host] = true
-	p.IPAM = fakeIPAM{r: r, ip: "10.100.200.1/24"}
-	if _, err := p.Add(testArgs("c2", "tenant-b", 200, "")); err != nil {
-		t.Errorf("Add over a stale record: %v", err)
+	want := []string{
+		"route-del " + hostA + " table=100 10.100.1.5",
+		"rpc device-detach " + hostA,
+		"rpc ac-remove tenant-a " + hostA,
+		"veth-del " + hostA,
+		"ipam-del host-local",
+	}
+	if !slices.Equal(r.calls, want) {
+		t.Errorf("DEL tenant-a calls = %v, want %v", r.calls, want)
+	}
+	if _, ok, _ := store.Get("cb", "net1"); !ok {
+		t.Fatal("DEL of tenant-a's pod dropped tenant-b's record")
+	}
+	if err := p.Check(argsB); err != nil {
+		t.Errorf("CHECK tenant-b after tenant-a's DEL: %v", err)
+	}
+	r.calls = nil
+	if err := p.Del(argsB); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{
+		"route-del " + hostB + " table=200 10.100.1.5",
+		"rpc device-detach " + hostB,
+		"rpc ac-remove tenant-b " + hostB,
+		"veth-del " + hostB,
+		"ipam-del host-local",
+	}
+	if !slices.Equal(r.calls, want) {
+		t.Errorf("DEL tenant-b calls = %v, want %v", r.calls, want)
 	}
 }
 

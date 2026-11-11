@@ -48,7 +48,7 @@ func checkKey(containerID, ifName string) error {
 }
 
 // Lock takes an exclusive lock on the directory for one ADD, DEL or CHECK,
-// so the overlap check and the records see a consistent view.
+// so two commands for the same attachment never interleave their steps.
 func (s *Store) Lock() (unlock func(), err error) {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", s.Dir, err)
@@ -113,28 +113,4 @@ func (s *Store) Delete(containerID, ifName string) error {
 		return nil
 	}
 	return err
-}
-
-// List returns every record in the directory.
-func (s *Store) List() ([]Attachment, error) {
-	paths, err := filepath.Glob(filepath.Join(s.Dir, "*.json"))
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Attachment, 0, len(paths))
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		var a Attachment
-		if err := json.Unmarshal(data, &a); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", p, err)
-		}
-		out = append(out, a)
-	}
-	return out, nil
 }
