@@ -44,7 +44,7 @@ entry を再作成します。aux index と VRF ifindex はその時点で求め
 堅牢性は次の 3 点で担保します。
 
 - 書き込みは atomic です。同一ディレクトリの temp file に書いて fsync してから rename するので、書き込み途中の crash や ENOSPC でも直前の state.json が無傷で残ります。
-- 保存の失敗は RPC エラーとして返ります (旧実装は warn に落として成功を返していた)。kernel device とメモリ上の記録は巻き戻さず、次に成功した保存が全量を書き直して収束します。
+- 保存の失敗は RPC エラーとして返ります。kernel device とメモリ上の記録は巻き戻さず、次に成功した保存が全量を書き直して収束します。
 - boot の reconcile は fail-closed です。state の entry が実体化できない場合 (member NIC の消失、名前を別種の link に取られた等) は、entry 名と修復手順 (デバイスの復旧か entry の削除) を示すエラーで起動を拒否します。stale な ifindex のまま続行すると FDB watcher / EVPN / SID 参照ガードが誤った index で動くためです。parse できない state.json も同様に起動を拒否します (空 state で始めると管理下のデバイスを黙って放棄することになるため)。
 
 VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は次に割り当てる id、`entries` は VRF 名ごとの `vrf_id` と `runtime_acs` です。kernel device を持たない VRF もここに入ります。`config` は、その VRF を起動時の読み込み (config file か、device / bridge の record) が作ったことを示します。API で作った VRF には付きません。
@@ -161,7 +161,7 @@ Phase 2 で `aux_owner_map` (BPF ARRAY map) を `sid_aux_map` と同じ keyspace
 1. `aux_owner_map` が空でなければそれを iterate して owner を再構築 (Phase 2 path)。**独立 PluginAux も復元される**ため、SID に bind されていない索引も daemon 再起動を跨いで生存します。
 2. 空のときは fallback として `sid_function_map` を iterate して owner を再構築 (Phase 1d 互換)。再構築後 `aux_owner_map` に書き戻し、次回起動以降は Phase 2 path を取ります (legacy → v1 forward migration)。
 
-pin 無効時は `aux_owner_map` も in-memory なので、allocator は fresh start します (= 従来挙動)。
+pin 無効時は `aux_owner_map` も in-memory なので、allocator は fresh start します。
 
 owner タグ format は `pkg/bpf/maps.go::AuxOwnerVersion` で版数管理しており、`ParseAuxOwnerTag` は legacy の unversioned format (`plugin:endpoint:32` / `builtin`) と v1 の versioned format (`plugin:v1:endpoint:32` / `builtin:v1`) の両方を受理します。
 
@@ -236,7 +236,7 @@ Flush はサーバ側で `sid_function_map` を iterate → 1 件ずつ `Delete`
 4. `vinberod -c vinbero.yml` 再起動 → Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach が自動で走る
 5. SID / Headend を再投入:
    - `pin_maps: false`: **外部コントローラから全部再投入**
-   - `pin_maps: true`: 前回のエントリが bpffs から復元されるので再投入不要
+   - `pin_maps: true`: RPC で入れたエントリは bpffs から復元されるので再投入不要。BGP を有効にした起動では、BGP の applier が書いたエントリは起動時に消え、経路を受信し直すと戻ります
 6. **Plugin は常に再登録**が必要 (`vinbero plugin register ...`)
 7. トラフィック監視 (`vinbero stats show`, `stats slot show`) で正常性確認
 

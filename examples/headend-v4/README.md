@@ -74,8 +74,9 @@ The SRv6 Routing Header (RT6) carries the segment list
 A headend entry belongs to a VRF: without `--vrf` every `hv4` command acts on
 the global VRF, and `list` / `flush` take `--all-vrfs` for every VRF. The
 same prefix can also be installed in a named VRF that already exists
-(`--vrf` with an unknown name is refused). The data plane looks every
-packet up in the global VRF, so the ping above keeps using the global entry.
+(`--vrf` with an unknown name is refused). The data plane looks a packet up
+in the VRF of the access circuit it arrived on; the ping above enters on a
+port with no access circuit, so it keeps using the global entry.
 
 ```bash
 VB="sudo ip netns exec hv4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082"

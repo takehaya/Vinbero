@@ -43,7 +43,7 @@ vrf_id は単調増加で、削除された VRF の id も別の VRF には使�
 
 ## ingress facet
 
-data plane は XDP 入口で ingress front door を 1 回だけ通します。`ingress_vrf_map` ({ifindex, vlan} → vrf_id) を引き、結果を `tailcall_ctx.vrf_id` に載せて下流のハンドラへ運びます。front door は AC が 1 つでも存在するか default-deny が有効なときだけ enable され、無効なら全パケットが vrf 0 になります (後方互換)。
+data plane は XDP 入口で ingress front door を 1 回だけ通します。`ingress_vrf_map` ({ifindex, vlan} → vrf_id) を引き、結果を `tailcall_ctx.vrf_id` に載せて下流のハンドラへ運びます。front door は AC が 1 つでも存在するか default-deny が有効なときだけ enable され、無効なら全パケットが vrf 0 になります。VRF を使わない構成は、すべて global VRF の表で転送されます。
 
 - `VrfAcAdd` で足した AC の interface が後から消えた場合、reconcile はその AC を飛ばします (pod の veth が AC の削除より先に消えても、他の AC の操作を止めないためです)。warning は消えた AC ごとに 1 度だけ出します。AC は `VrfAcRemove` (`vbctl vrf ac-remove`) まで残り、同じ名前の interface が戻れば再び効きます。記録を自動では消さないのは、消すとその interface 名が vrf 0 に分類されるようになるためです。config の `vrfs.entries[].acs` の AC は、interface が解決できなければ reconcile を失敗させます。
 - `VrfAcAdd` で足した AC は `state.json` に記録し、再起動後に元の VRF へ戻します。interface が消えていれば上と同じく warning を出して飛ばし、記録は残します。不要になった記録は `vbctl vrf ac-remove --vrf <name> --interface <ifname>` で消します。config が同じ AC を宣言すると config の AC として扱い、別の VRF に宣言されていれば config の VRF に移します。
@@ -128,6 +128,17 @@ Flush は、その VRF (または全 VRF) にある RPC の entry と owner の�
 control plane plugin が存在しない VRF を宣言すると、その集合は拒否されます。host が受け取った入力を渡す plugin (input policy を持つもの。composition はこれです) と、公開前に宣言した集合は、host が保持して次の event で再試行します。それ以外の plugin の集合は保持しないので、plugin は VRF ができてから宣言し直します。
 
 data plane は、front door が入口の AC から決めた vrf_id で headend の表を引きます。tenant VRF のパケットはその VRF の entry だけに一致し、一致しなければ global VRF を引き直さずに kernel へ渡します (XDP_PASS)。AC の無い入口のパケットは global VRF の entry を引きます。
+
+### tenant が届く範囲
+
+tenant VRF の AC から入ったパケットが届くのは、次の 2 つだけです。
+
+- その VRF の headend entry が指す SID。entry は operator と plugin がその VRF に書いたものと、その VRF が import RT で取り込んだ BGP の経路です
+- headend に一致しなければ、kernel のその VRF の table にある宛先 (同じノードの、その VRF の port の先)
+
+global VRF と別の VRF の headend entry、このノードの local SID ([local SID と AC](#local-sid-と-ac))、main table の経路には届きません。main table に進まないのは、Vinbero が管理する VRF の table が unreachable default で終わり、入口が VRF device に enslave されている場合です。そうでない構成は [local SID と AC](#local-sid-と-ac) の一覧にあります。
+
+表は VRF ごとに分かれるので、tenant どうしで同じ prefix や同じアドレスを使えます。BGP で受けた経路をどの VRF に入れるかは RT だけで決まり、RD は経路を区別するためだけに使います。このノードが広告する経路は VRF ごとに、その VRF の RD で出るので、同じ prefix を広告する VRF には別の RD を付けます。
 
 ### access circuit の無い binding
 
@@ -222,7 +233,7 @@ config は加算的です。`vrfs.entries[]` から entry を消しても device
 
 ## 操作サーフェス
 
-RPC は `VrfService` に集約されています (旧 `NetworkResourceService` は廃止済みです)。
+RPC は `VrfService` に集約されています。
 
 | 操作 | RPC | CLI |
 |------|-----|-----|

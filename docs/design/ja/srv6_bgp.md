@@ -59,7 +59,7 @@ flowchart LR
 - encap entry の生成: 一致した経路を H.Encaps の headend エントリ (segments = [service SID]) に変換し、{vrf_id, prefix} を鍵にした eBPF の LPM trie (headend map) へ、import RT が一致したすべての VRF の vrf_id で書きます。1 つの経路を複数の VRF が import すれば、それぞれの VRF に入ります。宛先は {VRF, family, prefix} ごとに 1 つの ECMP group を持ち、同じ VRF に入る別の PE (RD) の path だけが同じ group にまとまります。VRF の決定は RT だけで行い、RD は path を区別するためだけに使います。その family を RT 付きで宣言する binding が無い間は default-allow で、vrf_id 0 (global VRF) に書きます。書き込みには owner tag を付け、後で同じ owner の経路だけを正確に withdraw できるようにします。withdraw は RT を運ばないので、applier は path ごとに入れた VRF を記録しておき、記録したすべての VRF から外します。data plane は入口の AC が分類した VRF の entry だけを引くので、tenant の CE の口はその VRF の access circuit にします ([vrf.md](vrf.md#access-circuit-の無い-binding))。
 - encap source: outer の送信元 IPv6 は、設定したローカル locator の prefix から取ります。
 
-BGP の UPDATE は属性全体の暗黙の置換なので、applier は追跡済み NLRI の再広告が使えない内容になったときも withdraw と同じ撤去を行います。service SID が使えなくなった再広告 (空のほか、全ゼロの `::` のような routable でない値。decode 時の検証で不正と判定された場合を含む) は、L3VPN の headend エントリ、EVPN RT2 の FDB / bd_peer、RT3 の flood bd_peer、per-EVI A-D の aliasing 寄与、MUP ISD/DSD の discovery とその解決先のセッションを撤去してから読み飛ばします。EVPN RT2/RT3 の撤去は、その状態を教えた PE (next hop) からの再広告に限定します (per-EVI A-D は従来どおり NLRI 単位で撤去します)。RT がどの import filter にも一致しなくなった再広告の撤去は、filter を持つ経路種別、つまり L3VPN、EVPN RT2/RT3 と per-EVI A-D (bridge-domain binding 不一致)、MUP の session route (T1ST/T2ST) に適用します。MUP の discovery route (ISD/DSD) は cross-VRF 解決のため import-RT filter を意図的に迂回するので、RT 不一致による撤去はありません。
+BGP の UPDATE は属性全体の暗黙の置換なので、applier は追跡済み NLRI の再広告が使えない内容になったときも withdraw と同じ撤去を行います。service SID が使えなくなった再広告 (空のほか、全ゼロの `::` のような routable でない値。decode 時の検証で不正と判定された場合を含む) は、L3VPN の headend エントリ、EVPN RT2 の FDB / bd_peer、RT3 の flood bd_peer、per-EVI A-D の aliasing 寄与、MUP ISD/DSD の discovery とその解決先のセッションを撤去してから読み飛ばします。EVPN RT2/RT3 の撤去は、その状態を教えた PE (next hop) からの再広告に限定します (per-EVI A-D は NLRI 単位で撤去します)。RT がどの import filter にも一致しなくなった再広告の撤去は、filter を持つ経路種別、つまり L3VPN、EVPN RT2/RT3 と per-EVI A-D (bridge-domain binding 不一致)、MUP の session route (T1ST/T2ST) に適用します。MUP の discovery route (ISD/DSD) は cross-VRF 解決のため import-RT filter を意図的に迂回するので、RT 不一致による撤去はありません。
 
 ```mermaid
 flowchart LR
@@ -115,6 +115,8 @@ service SID は RFC 9252 §4 の transposition で運ばれ、SID の一部が M
 ### 広報と取り消し
 
 逆方向に、Vinbero はローカルの顧客 prefix を service SID 付きの VPN 経路として広報できます。広報した経路は family・prefix・RD の組で識別し、取り消し (withdraw) もこの識別で行います。VPNv4 と VPNv6 は family が違うだけで、同じ仕組みです。
+
+広報は VRF ごとに行います。auto-advertise は binding の VRF の kernel table を見て、その VRF の RD、export RT、その VRF の End.DT4/DT6 の SID で経路を出します。2 つの VRF が同じ prefix を持っていても、RD が違えば別の経路として広報され、受信側では RT で別々の VRF に入ります。同じ RD を 2 つの VRF に付けると、同じ prefix の経路は BGP で 1 つになるので、VRF ごとに別の RD を使います。
 
 ## color: 通す経路の意図を付ける
 
@@ -335,7 +337,7 @@ flowchart LR
 
 T1ST/T2ST のセッション経路は、L3VPN と同じく RT で取り込み可否を決められます。どれかの VRF binding が MUP family (mup_ipv4 / mup_ipv6) を宣言すると、その family のセッション経路は、どれかの binding の import RT に一致するときだけ取り込み、一致しなければ落とします。ISD/DSD の discovery 経路はこのフィルタを通しません。gateway や PE 自身の RT で届き、VRF をまたいだ解決の材料になるためです。withdraw もフィルタを通さず、先に受理した経路を必ず撤去できるようにします。
 
-その family を宣言した binding が 1 つもなければ、従来どおりすべてのセッション経路を受け入れます。bgp.global.mup_default_allow を立てると、宣言があってもこの default-allow を維持できます。
+その family を宣言した binding が 1 つもなければ、すべてのセッション経路を受け入れます。bgp.global.mup_default_allow を立てると、宣言があってもこの default-allow を維持できます。
 
 ### SID 解決 (segment discovery)
 
@@ -351,7 +353,7 @@ BGP は到着順を保証しないので、discovery 経路が後から届いた
 
 ### 広報の wire format
 
-ISD/DSD を広報するとき、Prefix-SID には SID とともに endpoint behavior を載せます。ISD なら End.M.GTP4.E / End.M.GTP6.E、DSD なら End.DT4 / End.DT6 です。behavior を見て downlink の合成可否を決める受信実装があるためです。SID が登録済みの locator に属するときは、その locator の構成から SID Structure sub-sub-TLV (RFC 9252) を導いて合わせて載せます。SID の locator block で next hop tracking する受信実装が、構造の分からない SID を unreachable と扱うためです。複数の locator prefix が同じ SID を含むときは longest-match の locator から導き、locator に属さない SID では従来どおり省略します。
+ISD/DSD を広報するとき、Prefix-SID には SID とともに endpoint behavior を載せます。ISD なら End.M.GTP4.E / End.M.GTP6.E、DSD なら End.DT4 / End.DT6 です。behavior を見て downlink の合成可否を決める受信実装があるためです。SID が登録済みの locator に属するときは、その locator の構成から SID Structure sub-sub-TLV (RFC 9252) を導いて合わせて載せます。SID の locator block で next hop tracking する受信実装が、構造の分からない SID を unreachable と扱うためです。複数の locator prefix が同じ SID を含むときは longest-match の locator から導き、locator に属さない SID では省略します。
 
 T1ST の NLRI framing は draft-mpmz-bess-mup-safi の版で異なります。Vinbero は source 付きの -03 形式と source なしの -01 形式の両方を decode し、source なしの広報は -01 の形式 (末尾の SourceAddressLength を省略した 23 byte) で出します。-01 だけを話す peer との interop のためです。
 

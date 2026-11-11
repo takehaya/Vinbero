@@ -190,9 +190,10 @@ the global VRF and needs no grant. Any other VRF must be in the registration's
 scope VRF list and must exist when the set is applied; otherwise the whole set
 is refused. The host keeps and retries it on the next event only for a plugin
 with an input policy (compositions) or a declaration staged before
-publication; otherwise declare it again once the VRF exists. The same prefix in two VRFs is two entries. The data plane looks every
-packet up in the global VRF, so an entry of another VRF is installed and listed
-but not used for forwarding.
+publication; otherwise declare it again once the VRF exists. The same prefix in two VRFs is two entries. The data plane looks a packet up
+in the VRF of the access circuit it arrived on (the global VRF for a port with
+none), so an entry that encapsulates a tenant's traffic goes in that tenant's
+VRF.
 
 Naming a VRF needs a host that reports `FeatureHeadendVRF` (the
 `input_features` bitmap). A host without it would ignore the field and write

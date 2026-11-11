@@ -2,7 +2,7 @@
 
 ## 概要
 
-このドキュメントは、headend の転送先を複数 path に分散する ECMP path group のデータプレーン設計を説明します。同一 VPN prefix を複数の PE が広告したとき、従来の headend map は 1 prefix に 1 つの segment list しか持てず、後から適用された経路が前の経路を上書きしていました。ECMP path group はこれを最大 8 path の weighted な集合に拡張し、あわせて userspace の prober が path 単位の生死を 1 word の書き込みで反映できる仕組みを用意します。
+このドキュメントは、headend の転送先を複数 path に分散する ECMP path group のデータプレーン設計を説明します。headend map の entry は 1 つの segment list しか持てません。同一 VPN prefix を複数の PE が広告したとき、entry が ECMP path group を指すことで、最大 8 path の weighted な集合に分散します。あわせて userspace の prober が path 単位の生死を 1 word の書き込みで反映できる仕組みを用意します。
 
 この文書が対象にするのはデータプレーン (eBPF マップと XDP の選択ロジック、`pkg/bpf` の API) と、その上に載る BGP からの path 集約、EVPN aliasing、そして path 単位の生死を検知する prober です。
 
@@ -87,9 +87,9 @@ peer 設定の `add_paths_receive` で ADD-PATH の receive を negotiate しま
 
 ## L3VPN の path 集約
 
-受信した VPN 経路は `{family, prefix}` 単位で 1 つの ECMP group に集約します。RD は key に含めません。同じ prefix を広告する PE はそれぞれ自分の RD を使うので、RD を key に入れると 2 台目の PE の経路が別エントリになり、1 台目を上書きしてしまうためです。
+受信した VPN 経路は `{VRF, family, prefix}` 単位で 1 つの ECMP group に集約します。RD は key に含めません。同じ prefix を広告する PE はそれぞれ自分の RD を使うので、RD を key に入れると 2 台目の PE の経路が別エントリになり、1 台目を上書きしてしまうためです。
 
-集約前は prefix をそのまま headend map に書き、owner を RD 込みにしていました。このため 2 台目の PE の書き込みは cross-owner チェックに掛かって失敗し、経路は単に捨てられていました。さらに 1 台目が withdraw すると、生き残っている PE の経路は再広告されるまで復活せず、その prefix は blackhole していました。集約と RD 非依存の owner でこの両方が解消します。
+trigger の owner も RD に依存しません (`OwnerBGPVPN` に空の RD)。どの PE の path も同じ trigger を更新でき、1 台の PE が withdraw しても、残る PE の path で group が転送を続けます。
 
 group は {VRF, family, prefix} ごとに 1 つです。受信経路を import する VRF が複数あれば、VRF ごとに別の group と trigger を持ち、同じ path 集合でも共有しません。別の VRF に入る PE の path が 1 つの group に混ざることはありません。group id はノード全体で一意で、VRF ごとに採番し直しません。追跡する宛先の上限 (4096) も、すべての VRF の合計です。
 
