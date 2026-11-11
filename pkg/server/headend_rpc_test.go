@@ -161,11 +161,19 @@ func TestHeadendv6RPCRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = m.ForceFlushHeadendV4() })
-	prefixes, err := NewHeadendGroupServer(m).groupPrefixes()
+	if err := m.CreateHeadendV4In(7, "10.9.0.0/16", trigger, bpf.OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CreateHeadendV4In(8, "10.9.0.0/16", trigger, bpf.OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = m.FlushHeadendV4AllVRFs(bpf.OwnerRPC) })
+	names := func(id uint32) (string, bool) { return "tenant-a", id == 7 }
+	prefixes, err := NewHeadendGroupServer(m, names).groupPrefixes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"10.9.0.0/16", "2001:db8:2::/48"}; !slices.Equal(prefixes[groupID], want) {
+	if want := []string{"10.9.0.0/16", "10.9.0.0/16 vrf tenant-a", "10.9.0.0/16 vrf_id=8", "2001:db8:2::/48"}; !slices.Equal(prefixes[groupID], want) {
 		t.Errorf("group prefixes = %v, want %v", prefixes[groupID], want)
 	}
 }

@@ -16,10 +16,14 @@ import (
 // so there is nothing here to create.
 type HeadendGroupServer struct {
 	mapOps *bpf.MapOperations
+	// vrfName names a vrf_id for display; nil, or false, shows the id.
+	vrfName func(uint32) (string, bool)
 }
 
-func NewHeadendGroupServer(mapOps *bpf.MapOperations) *HeadendGroupServer {
-	return &HeadendGroupServer{mapOps: mapOps}
+// NewHeadendGroupServer serves the groups of mapOps. vrfName names the VRF
+// of a trigger outside the global VRF and may be nil.
+func NewHeadendGroupServer(mapOps *bpf.MapOperations, vrfName func(uint32) (string, bool)) *HeadendGroupServer {
+	return &HeadendGroupServer{mapOps: mapOps, vrfName: vrfName}
 }
 
 // groupPrefixes builds group id -> trigger prefixes by scanning the headend
@@ -31,31 +35,45 @@ func NewHeadendGroupServer(mapOps *bpf.MapOperations) *HeadendGroupServer {
 // means the answer is the same whoever installed the group, and survives a
 // restart that cleared the applier's own state.
 //
-// It reads the global VRF. Only the BGP applier points an entry at a
-// group, and it writes the global VRF; an entry the RPC or a plugin writes
-// in another VRF carries no group id (neither API can set one).
+// Every VRF is read: the BGP applier writes one group per VRF that imports
+// a prefix. A trigger of the global VRF is shown as its prefix, one of
+// another VRF as "<prefix> vrf <name>" (the id when no VRF holds it), so
+// the same prefix in two VRFs shows as two triggers.
 func (s *HeadendGroupServer) groupPrefixes() (map[uint32][]string, error) {
 	out := make(map[uint32][]string)
-	v4, err := s.mapOps.ListHeadendV4()
+	v4, err := s.mapOps.ListHeadendV4IDs()
 	if err != nil {
 		return nil, err
 	}
-	v6, err := s.mapOps.ListHeadendV6()
+	v6, err := s.mapOps.ListHeadendV6IDs()
 	if err != nil {
 		return nil, err
 	}
-	for _, entries := range []map[string]*bpf.HeadendEntry{v4, v6} {
-		for prefix, e := range entries {
+	for _, entries := range []map[bpf.HeadendID]*bpf.HeadendEntry{v4, v6} {
+		for id, e := range entries {
 			if e.GroupId == bpf.EcmpGroupNone {
 				continue
 			}
-			out[e.GroupId] = append(out[e.GroupId], prefix)
+			out[e.GroupId] = append(out[e.GroupId], s.triggerName(id))
 		}
 	}
 	for id := range out {
 		sort.Strings(out[id])
 	}
 	return out, nil
+}
+
+// triggerName renders one trigger for groupPrefixes.
+func (s *HeadendGroupServer) triggerName(id bpf.HeadendID) string {
+	if id.VRF == 0 {
+		return id.Prefix
+	}
+	if s.vrfName != nil {
+		if name, ok := s.vrfName(id.VRF); ok {
+			return fmt.Sprintf("%s vrf %s", id.Prefix, name)
+		}
+	}
+	return fmt.Sprintf("%s vrf_id=%d", id.Prefix, id.VRF)
 }
 
 // buildGroup renders one group. paths comes from GetEcmpGroup and may hold

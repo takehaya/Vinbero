@@ -63,7 +63,7 @@ type mupRecoveryKey struct {
 }
 type mupStartupRecovery struct {
 	pending map[mupRecoveryKey]bool
-	gates   map[netip.Addr]bool
+	gates   map[mupGateKey]bool
 	rescan  bool
 }
 type mupOwnerInventory interface {
@@ -75,7 +75,7 @@ type mupOwnerInventory interface {
 // Protect it independently of the current session's gate reference.
 func (a *Applier) rememberMUPOwnedCleanup(key mupRecoveryKey) {
 	if a.mupRecovery == nil {
-		a.mupRecovery = &mupStartupRecovery{pending: map[mupRecoveryKey]bool{}, gates: map[netip.Addr]bool{}}
+		a.mupRecovery = &mupStartupRecovery{pending: map[mupRecoveryKey]bool{}, gates: map[mupGateKey]bool{}}
 	}
 	a.mupRecovery.pending[key] = true
 	a.retryMUPOwnedCleanup()
@@ -86,7 +86,7 @@ func (a *Applier) resetMUPOwned() {
 	if _, ok := a.mupUplink.(mupOwnerInventory); !ok {
 		return
 	}
-	a.mupRecovery = &mupStartupRecovery{pending: map[mupRecoveryKey]bool{}, gates: map[netip.Addr]bool{}, rescan: true}
+	a.mupRecovery = &mupStartupRecovery{pending: map[mupRecoveryKey]bool{}, gates: map[mupGateKey]bool{}, rescan: true}
 	a.retryMUPOwnedCleanup()
 }
 
@@ -137,7 +137,7 @@ func (a *Applier) retryMUPOwnedCleanup() {
 	if recovery.rescan && !a.scanMUPOwned() {
 		return
 	}
-	keep := map[netip.Addr]bool{}
+	keep := map[mupGateKey]netip.Addr{}
 	for k := range recovery.pending {
 		var err error
 		if k.endpoint.Is4() {
@@ -147,53 +147,57 @@ func (a *Applier) retryMUPOwnedCleanup() {
 		}
 		if err != nil {
 			a.logger.Error("MUP startup cleanup; retaining gate", zap.Error(err))
-			keep[k.endpoint] = true
+			// The remnant forwards through the gate of its own instance's VRF.
+			dp := a.mupT2STDataPlane(k.endpoint, k.endpoint.String())
+			keep[mupGateKey{vrf: a.mupHeadendVRF(k.instance), prefix: dp.gatePrefix}] = k.endpoint
 		} else {
 			delete(recovery.pending, k)
 		}
 	}
 	owner := bpf.OwnerTag(string(bpf.OwnerBGPMUPGate(a.localASN)) + ":recovery")
-	for ep := range keep {
+	for gk, ep := range keep {
 		dp := a.mupT2STDataPlane(ep, ep.String())
-		af := headend.AFv4
-		if ep.Is6() {
-			af = headend.AFv6
-		}
+		af, _ := gateFamily(gk.prefix)
 		var err error
 		if shared, ok := a.headend.(interface {
-			KeepGateReferences(headend.Family, string, uint8, bpf.OwnerTag, int) error
+			KeepGateReferences(headend.Family, uint32, string, uint8, bpf.OwnerTag, int) error
 		}); ok {
 			// Record the dependency even if restoring the physical map entry fails.
-			recovery.gates[ep] = true
-			err = shared.KeepGateReferences(af, dp.gatePrefix, dp.gateMode, owner, 1)
-		} else if !recovery.gates[ep] {
-			err = a.acquireMUPGate(dp.gatePrefix, dp.gateMode, bpf.OwnerBGPMUPGate(a.localASN), dp.createGate)
+			recovery.gates[gk] = true
+			err = shared.KeepGateReferences(af, gk.vrf, gk.prefix, dp.gateMode, owner, 1)
+		} else if !recovery.gates[gk] {
+			err = a.acquireMUPGate(gk.vrf, gk.prefix, dp.gateMode, bpf.OwnerBGPMUPGate(a.localASN), dp.createGate)
 			if err == nil {
-				recovery.gates[ep] = true
+				recovery.gates[gk] = true
 			}
 		}
 		if err != nil {
 			a.logger.Error("restore MUP recovery gate", zap.Error(err))
 		}
 	}
-	for ep := range recovery.gates {
-		if keep[ep] {
+	for gk := range recovery.gates {
+		if _, held := keep[gk]; held {
 			continue
 		}
-		dp := a.mupT2STDataPlane(ep, ep.String())
+		af, mode := gateFamily(gk.prefix)
 		if shared, ok := a.headend.(sharedMUPGate); ok {
-			af := headend.AFv4
-			if ep.Is6() {
-				af = headend.AFv6
-			}
-			if err := shared.SetGateReferences(af, dp.gatePrefix, dp.gateMode, owner, 0); err != nil {
+			if err := shared.SetGateReferences(af, gk.vrf, gk.prefix, mode, owner, 0); err != nil {
 				a.logger.Error("release MUP recovery gate", zap.Error(err))
 				continue
 			}
-		} else if !a.releaseMUPGate(dp.gatePrefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate) {
-			continue
+		} else {
+			ep := strings.SplitN(gk.prefix, "/", 2)[0]
+			addr, err := netip.ParseAddr(ep)
+			if err != nil {
+				delete(recovery.gates, gk)
+				continue
+			}
+			dp := a.mupT2STDataPlane(addr, ep)
+			if !a.releaseMUPGate(gk.vrf, gk.prefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate) {
+				continue
+			}
 		}
-		delete(recovery.gates, ep)
+		delete(recovery.gates, gk)
 	}
 }
 

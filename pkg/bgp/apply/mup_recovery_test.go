@@ -77,6 +77,12 @@ func (m *recoveryMaps) DeleteHeadendV6(prefix string, owner bpf.OwnerTag) error 
 	}
 	return m.fakeHeadend.DeleteHeadendV6(prefix, owner)
 }
+func (m *recoveryMaps) DeleteHeadendV4In(v uint32, prefix string, owner bpf.OwnerTag) error {
+	return m.DeleteHeadendV4(fakeHeadendKey(v, prefix), owner)
+}
+func (m *recoveryMaps) DeleteHeadendV6In(v uint32, prefix string, owner bpf.OwnerTag) error {
+	return m.DeleteHeadendV6(fakeHeadendKey(v, prefix), owner)
+}
 
 func TestMUPStartupDeleteFailurePreservesGateAndRetries(t *testing.T) {
 	owner := bpf.OwnerBGPMUP(65000, "65000:7")
@@ -167,7 +173,7 @@ func TestMUPRekeyDeleteFailureRetainsRecoveryDependency(t *testing.T) {
 	st := &mupSessionState{route: bgp.MUPRoute{RD: "65000:7", Endpoint: "192.0.2.1", TEID: 1, TEIDLen: 32}, installedSID: "fd00:2::1", instance: 0}
 	m.owners4[recoveryKey4(0, "192.0.2.1", 1, 32)] = owner
 	dp := a.mupT2STDataPlane(netip.MustParseAddr(st.route.Endpoint), st.route.Endpoint)
-	if err := a.acquireMUPGate(dp.gatePrefix, dp.gateMode, bpf.OwnerBGPMUPGate(65000), dp.createGate); err != nil {
+	if err := a.acquireMUPGate(0, dp.gatePrefix, dp.gateMode, bpf.OwnerBGPMUPGate(65000), dp.createGate); err != nil {
 		t.Fatal(err)
 	}
 	m.failDelete = true
@@ -175,7 +181,7 @@ func TestMUPRekeyDeleteFailureRetainsRecoveryDependency(t *testing.T) {
 	if st.instance != 9 || len(a.mupRecovery.pending) != 1 {
 		t.Fatal("rekey lost old instance cleanup")
 	}
-	if !a.releaseMUPGate(dp.gatePrefix, bpf.OwnerBGPMUPGate(65000), dp.deleteGate) {
+	if !a.releaseMUPGate(0, dp.gatePrefix, bpf.OwnerBGPMUPGate(65000), dp.deleteGate) {
 		t.Fatal("current session release failed")
 	}
 	if err := r.PruneUnreferencedMUPGates(); err != nil {

@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"strings"
@@ -86,14 +87,20 @@ type mupSessionState struct {
 	installedSrc [16]byte
 	// fam is the route's MUP family (mup_ipv4 / mup_ipv6), kept so the
 	// binding-mutation reconcile can re-resolve the VRF without the original
-	// apply context. T2ST only.
+	// apply context.
 	fam bgp.Family
 	// instance is the vrf_id the session's F-TEID entry is keyed under
 	// (0 = the global VRF): the id of the VRF named by the binding whose
 	// import RTs matched the route at apply time. Uninstall must use the same
 	// value the install used, so it lives on the session, not recomputed ad
 	// hoc. T2ST only.
-	instance    uint32
+	instance uint32
+	// gateVRF is the VRF of the gate the session holds a reference to while
+	// gateHeld. T2ST only.
+	gateVRF uint32
+	// headendVRF is the VRF the installed downlink entry is keyed under while
+	// installedSID is set. T1ST only.
+	headendVRF  uint32
 	deferLogged bool
 	// locatorSrc is the source-locator address the session was last written
 	// with (zero if never). While the locator is missing a changed SID is
@@ -199,7 +206,7 @@ func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	case bgp.MUPRouteTypeDSD:
 		a.applyMUPDSD(r, withdraw)
 	case bgp.MUPRouteTypeT1ST:
-		a.applyMUPT1ST(r, withdraw)
+		a.applyMUPT1ST(fam, r, withdraw)
 	case bgp.MUPRouteTypeT2ST:
 		a.applyMUPT2ST(fam, r, withdraw)
 	default:
@@ -356,7 +363,7 @@ func (a *Applier) resolveDirectSID(r *bgp.MUPRoute) string {
 // downlink transform per UE prefix (last advertise wins). The route's TEID
 // rides in the composed SID, so a re-advertise with a different TEID
 // replaces the install.
-func (a *Applier) applyMUPT1ST(r *bgp.MUPRoute, withdraw bool) {
+func (a *Applier) applyMUPT1ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	key := mupT1STKey{rd: r.RD, prefix: r.Prefix}
 	if withdraw {
 		st, ok := a.mupT1ST[key]
@@ -407,6 +414,7 @@ func (a *Applier) applyMUPT1ST(r *bgp.MUPRoute, withdraw bool) {
 		r = &rr
 	}
 	st.route = *r
+	st.fam = fam
 	a.reconcileMUPT1ST(key)
 }
 
@@ -466,8 +474,10 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) bool {
 			return true
 		}
 	}
-	if st.installedSID == composed && st.installedSrc == src {
-		return true // already programmed with this SID and source
+	instance, _ := a.mupVRFForRoute(st.fam, r)
+	vrfID := a.mupHeadendVRF(instance)
+	if st.installedSID == composed && st.installedSrc == src && st.headendVRF == vrfID {
+		return true // already programmed with this SID and source, in this VRF
 	}
 	entry, err := buildHeadendEntryFrom(src, composed, false)
 	if err != nil {
@@ -478,18 +488,27 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) bool {
 
 	createHeadend, _ := a.mupT1STHeadendFns(uePrefix)
 	owner := bpf.OwnerBGPMUP(a.localASN, r.RD)
-	if err := createHeadend(r.Prefix, entry, owner); err != nil {
+	if err := createHeadend(vrfID, r.Prefix, entry, owner); err != nil {
 		a.logger.Error("install MUP T1ST headend",
-			zap.String("ue_prefix", r.Prefix), zap.Error(err))
+			zap.Uint32("vrf_id", vrfID), zap.String("ue_prefix", r.Prefix), zap.Error(err))
 		return a.mupFailed()
+	}
+	// The entry is this session's again: an earlier failed removal of the
+	// same key must not delete it later.
+	delete(a.mupT1STStale, mupT1STEntry{vrf: vrfID, prefix: r.Prefix, owner: owner})
+	if st.installedSID != "" && st.headendVRF != vrfID {
+		// The session moved to another VRF: the new entry is in place, so
+		// the old one goes. A failed removal is retried by the tracked pass.
+		a.removeMUPT1STEntry(mupT1STEntry{vrf: st.headendVRF, prefix: r.Prefix, owner: owner})
 	}
 	st.installedSID = composed
 	st.installedSrc = entry.SrcAddr
+	st.headendVRF = vrfID
 	if !embedded {
 		st.locatorSrc = src
 	}
 	a.logger.Info("MUP T1ST downlink installed",
-		zap.String("ue_prefix", r.Prefix), zap.String("endpoint", r.Endpoint),
+		zap.Uint32("vrf_id", vrfID), zap.String("ue_prefix", r.Prefix), zap.String("endpoint", r.Endpoint),
 		zap.Uint32("teid", r.TEID), zap.Uint8("qfi", r.QFI), zap.String("sid", composed),
 		zap.String("src", netip.AddrFrom16(entry.SrcAddr).String()))
 	return true
@@ -584,19 +603,54 @@ func embedV4AfterPrefix(p netip.Prefix, v4 netip.Addr) [16]byte {
 }
 
 // uninstallMUPT1ST removes a downlink session's headend entry and marks it
-// uninstalled. Clears installedSID (and the source that rode with it) even
-// when the BPF delete errors so the index cannot diverge from the
-// (idempotent) map.
+// uninstalled. A failed removal is kept apart from the session
+// (mupT1STStale) and retried by the tracked pass, so the session can be
+// forgotten on a withdraw while its entry is still being removed.
 func (a *Applier) uninstallMUPT1ST(st *mupSessionState) {
 	r := &st.route
-	uePrefix, _ := netip.ParsePrefix(r.Prefix)
-	_, deleteHeadend := a.mupT1STHeadendFns(uePrefix)
-	if err := deleteHeadend(r.Prefix, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
-		a.logger.Error("withdraw MUP T1ST headend (clearing index anyway)",
-			zap.String("ue_prefix", r.Prefix), zap.Error(err))
-	}
+	a.removeMUPT1STEntry(mupT1STEntry{vrf: st.headendVRF, prefix: r.Prefix, owner: bpf.OwnerBGPMUP(a.localASN, r.RD)})
 	st.installedSID = ""
 	st.installedSrc = [16]byte{}
+}
+
+// mupT1STEntry is one downlink headend entry the applier wrote.
+type mupT1STEntry struct {
+	vrf    uint32
+	prefix string
+	owner  bpf.OwnerTag
+}
+
+// removeMUPT1STEntry deletes one downlink entry, and records it for the
+// tracked pass when the delete fails. It reports whether it is gone.
+func (a *Applier) removeMUPT1STEntry(e mupT1STEntry) bool {
+	uePrefix, err := netip.ParsePrefix(e.prefix)
+	if err != nil {
+		delete(a.mupT1STStale, e)
+		return true
+	}
+	_, deleteHeadend := a.mupT1STHeadendFns(uePrefix)
+	// An entry another owner holds now is not this session's to remove.
+	if err := deleteHeadend(e.vrf, e.prefix, e.owner); err != nil && !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
+		a.logger.Error("withdraw MUP T1ST headend; retrying",
+			zap.Uint32("vrf_id", e.vrf), zap.String("ue_prefix", e.prefix), zap.Error(err))
+		a.mupT1STStale[e] = struct{}{}
+		a.mupFailed()
+		return false
+	}
+	delete(a.mupT1STStale, e)
+	return true
+}
+
+// retryMUPT1STStale removes again the downlink entries whose removal failed.
+// It returns how many are still left. Callers hold mupMu.
+func (a *Applier) retryMUPT1STStale() int {
+	left := 0
+	for e := range a.mupT1STStale {
+		if !a.removeMUPT1STEntry(e) {
+			left++
+		}
+	}
+	return left
 }
 
 // mupEncapSource resolves the encapsulation source for one session
@@ -624,18 +678,24 @@ func (a *Applier) mupEncapSource(st *mupSessionState, key, value string) ([16]by
 // mupT1STHeadendFns selects the headend map writers for the UE prefix's family.
 func (a *Applier) mupT1STHeadendFns(uePrefix netip.Prefix) (headendCreateFn, headendDeleteFn) {
 	if uePrefix.Addr().Is6() {
-		return a.headend.CreateHeadendV6, a.headend.DeleteHeadendV6
+		return a.headend.CreateHeadendV6In, a.headend.DeleteHeadendV6In
 	}
-	return a.headend.CreateHeadendV4, a.headend.DeleteHeadendV4
+	return a.headend.CreateHeadendV4In, a.headend.DeleteHeadendV4In
 }
 
 // headendCreateFn / headendDeleteFn are the headend map writers (v4 or v6) the
 // downlink headend and the uplink gate are installed through, selected by the
-// relevant address family.
+// relevant address family. The first argument is the VRF.
 type (
-	headendCreateFn func(string, *bpf.HeadendEntry, bpf.OwnerTag) error
-	headendDeleteFn func(string, bpf.OwnerTag) error
+	headendCreateFn func(uint32, string, *bpf.HeadendEntry, bpf.OwnerTag) error
+	headendDeleteFn func(uint32, string, bpf.OwnerTag) error
 )
+
+// mupHeadendVRF is the VRF of the headend map a MUP session whose route
+// resolved to instance writes: the downlink entry of a T1ST and the gate of
+// a T2ST. Every one is a global VRF entry, because the headend lookup
+// matches every packet in the global VRF whatever its ingress VRF.
+func (a *Applier) mupHeadendVRF(instance uint32) uint32 { return vrf.GlobalVRFID }
 
 // mupT2STDataPlane bundles the family-specific data-plane selectors for an
 // uplink session: the F-TEID map writers, the gate behavior/prefix, and the gate
@@ -655,8 +715,8 @@ func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT
 			uplinkCreate: a.createMUPUplinkOwned,
 			uplinkDelete: a.mupUplink.DeleteMupUplinkV6Owned,
 			gateMode:     uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID),
-			createGate:   a.headend.CreateHeadendV6,
-			deleteGate:   a.headend.DeleteHeadendV6,
+			createGate:   a.headend.CreateHeadendV6In,
+			deleteGate:   a.headend.DeleteHeadendV6In,
 			gatePrefix:   endpointStr + "/128",
 		}
 	}
@@ -664,8 +724,8 @@ func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT
 		uplinkCreate: a.createMUPUplinkOwned,
 		uplinkDelete: a.mupUplink.DeleteMupUplinkV4Owned,
 		gateMode:     uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID),
-		createGate:   a.headend.CreateHeadendV4,
-		deleteGate:   a.headend.DeleteHeadendV4,
+		createGate:   a.headend.CreateHeadendV4In,
+		deleteGate:   a.headend.DeleteHeadendV4In,
 		gatePrefix:   endpointStr + "/32",
 	}
 }
@@ -707,7 +767,7 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	// F-TEID key minus the vrf_id, so an installed entry can move without
 	// touching the shared gate; a failed move keeps the session on its old
 	// vrf_id until the next reconcile.
-	vrfID := a.mupVRFForRoute(fam, r)
+	vrfID, _ := a.mupVRFForRoute(fam, r)
 	if st.installedSID != "" && st.instance != vrfID {
 		a.rekeyMUPT2ST(st, vrfID)
 	} else if st.installedSID == "" {
@@ -732,13 +792,16 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 }
 
 // rekeyMUPT2ST moves an installed uplink session's F-TEID entry to a new
-// instance without touching the endpoint gate. The gate is instance-agnostic
-// (one per endpoint, shared by every instance), so going through
-// uninstall/reconcile here would delete and recreate it whenever the session
-// is the endpoint's last — a window where GTP-U passes unprocessed, plus
-// avoidable headend map churn. Put-new-then-delete-old, so the F-TEID entry
-// never disappears for the instance it lives in; a failed Put keeps the
-// session fully on its old instance (retried by the next reconcile).
+// instance. Put-new-then-delete-old, so the F-TEID entry never disappears
+// for the instance it lives in; a failed Put keeps the session fully on its
+// old instance (retried by the next reconcile).
+//
+// The gate follows the session when the new instance's gate is in another
+// VRF (mupHeadendVRF): the new gate is taken before the new F-TEID entry is
+// written, and the old one released after the old entry is gone. When both
+// instances share the gate's VRF it is left alone, so the endpoint's last
+// session moving does not delete and recreate it -- a window where GTP-U
+// passes unprocessed.
 func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
@@ -751,17 +814,40 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		return
 	}
 	entry.ArgsOffset = bpf.MupArgsOffsetNone
+	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
+	newGate := a.mupHeadendVRF(inst)
+	moveGate := st.gateHeld && newGate != st.gateVRF
+	if moveGate {
+		if err := a.acquireMUPGate(newGate, dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
+			a.logger.Error("re-key MUP T2ST gate (keeping old instance)",
+				zap.String("endpoint", r.Endpoint), zap.Uint32("vrf_id", newGate), zap.Error(err))
+			a.mupFailed()
+			return
+		}
+	}
 	if err := dp.uplinkCreate(inst, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 			zap.Uint32("instance", inst), zap.Error(err))
+		if moveGate && !a.releaseMUPGate(newGate, dp.gatePrefix, gateOwner, dp.deleteGate) {
+			a.oweMUPGateRelease(mupGateKey{vrf: newGate, prefix: dp.gatePrefix})
+		}
+		a.mupFailed()
 		return
 	}
 	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		a.logger.Error("remove old-instance MUP T2ST uplink entry (retaining for retry)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 			zap.Uint32("instance", st.instance), zap.Error(err))
+		// The startup-style cleanup keeps the old instance's gate while the
+		// old entry is still there.
 		a.rememberMUPOwnedCleanup(mupRecoveryKey{st.instance, endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)})
+	}
+	if moveGate {
+		if !a.releaseMUPGate(st.gateVRF, dp.gatePrefix, gateOwner, dp.deleteGate) {
+			a.oweMUPGateRelease(mupGateKey{vrf: st.gateVRF, prefix: dp.gatePrefix})
+		}
+		st.gateVRF = newGate
 	}
 	old := st.instance
 	st.instance = inst
@@ -770,19 +856,23 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		zap.Uint32("from_vrf_id", old), zap.Uint32("vrf_id", inst))
 }
 
-// mupVRFForRoute resolves the vrf_id a T2ST installs its F-TEID entry under:
-// the id of the VRF named by the binding whose import RTs match the route for
-// fam. Routes matching no binding — including the default-allow path — fall to
-// the global VRF (id 0). The {ifindex,vlan} -> vrf_id ingress side is owned by
-// vrf.Manager (programmed from the VRF's ACs), so this only resolves the
-// install-side id; the two agree because they reference the same VRF.
-func (a *Applier) mupVRFForRoute(fam bgp.Family, r *bgp.MUPRoute) uint32 {
+// mupVRFForRoute resolves the VRF a MUP session belongs to: the id of the
+// VRF named by the binding whose import RTs match the route for fam, the
+// lowest VRF name when several do (a session is placed in one VRF only).
+// accepted reports whether the session may be installed at all: it may when
+// a binding matches, when no binding declares fam (default-allow) or when
+// bgp.global.mup_default_allow is set; the last two place a session no
+// binding matches in the global VRF (id 0). The {ifindex,vlan} -> vrf_id
+// ingress side is owned by vrf.Manager (programmed from the VRF's ACs), so
+// this only resolves the install-side id; the two agree because they
+// reference the same VRF.
+func (a *Applier) mupVRFForRoute(fam bgp.Family, r *bgp.MUPRoute) (id uint32, accepted bool) {
 	vrfName, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam)
 	if !ok {
-		return vrf.GlobalVRFID
+		return vrf.GlobalVRFID, a.mupDefaultAllow || a.vrfBindings.EmptyForFamily(fam)
 	}
-	id, _ := a.vrfBindings.VRF().IDForName(vrfName)
-	return id
+	id, _ = a.vrfBindings.VRF().IDForName(vrfName)
+	return id, true
 }
 
 // ReconcileMUPUplinkInstances re-keys every installed T2ST whose resolved
@@ -796,7 +886,7 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 	defer a.mupMu.Unlock()
 	a.retryMUPOwnedCleanup()
 	for _, st := range a.mupT2ST {
-		id := a.mupVRFForRoute(st.fam, &st.route)
+		id, _ := a.mupVRFForRoute(st.fam, &st.route)
 		if id == st.instance {
 			continue
 		}
@@ -915,17 +1005,18 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 		// parses GTP-U for this endpoint, so the F-TEID entry would be dead. Roll
 		// the gate back if the F-TEID write fails so a failed install leaks no gate.
 		if !st.gateHeld {
-			if err := a.acquireMUPGate(dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
+			gateVRF := a.mupHeadendVRF(st.instance)
+			if err := a.acquireMUPGate(gateVRF, dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
 				a.logger.Error("install MUP T2ST gate",
-					zap.String("endpoint", r.Endpoint), zap.Error(err))
+					zap.Uint32("vrf_id", gateVRF), zap.String("endpoint", r.Endpoint), zap.Error(err))
 				return a.mupFailed()
 			}
-			st.gateHeld = true
+			st.gateHeld, st.gateVRF = true, gateVRF
 		}
 		if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 			a.logger.Error("install MUP T2ST uplink entry",
 				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-			if a.releaseMUPGate(dp.gatePrefix, gateOwner, dp.deleteGate) {
+			if a.releaseMUPGate(st.gateVRF, dp.gatePrefix, gateOwner, dp.deleteGate) {
 				st.gateHeld = false
 			}
 			return a.mupFailed()
@@ -966,7 +1057,7 @@ func (a *Applier) uninstallMUPT2ST(st *mupSessionState) bool {
 		st.installedSrc = [16]byte{}
 	}
 	if st.gateHeld {
-		if !a.releaseMUPGate(dp.gatePrefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate) {
+		if !a.releaseMUPGate(st.gateVRF, dp.gatePrefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate) {
 			return a.mupFailed()
 		}
 		st.gateHeld = false
@@ -974,71 +1065,113 @@ func (a *Applier) uninstallMUPT2ST(st *mupSessionState) bool {
 	return true
 }
 
-// acquireMUPGate ensures the H.M.GTP{4,6}.D_TEID gate for endpoint exists and
-// bumps its reference count. The gate's segment list is unused (the behavior
-// resolves the real SID from mup_uplink_v{4,6}_map), so a bare mode-only headend
-// entry suffices.
-type sharedMUPGate interface {
-	SetGateReferences(headend.Family, string, uint8, bpf.OwnerTag, int) error
+// mupGateKey names one endpoint gate: the gate prefix in one VRF.
+type mupGateKey struct {
+	vrf    uint32
+	prefix string
 }
 
-func (a *Applier) acquireMUPGate(gatePrefix string, mode uint8, owner bpf.OwnerTag, create headendCreateFn) error {
+// sharedMUPGate is the gate reference count the built-in applier shares with
+// control-plane plugins (headend.Reconciler).
+type sharedMUPGate interface {
+	SetGateReferences(headend.Family, uint32, string, uint8, bpf.OwnerTag, int) error
+}
+
+func gateFamily(gatePrefix string) (headend.Family, uint8) {
+	if strings.Contains(gatePrefix, ":") {
+		return headend.AFv6, uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
+	}
+	return headend.AFv4, uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
+}
+
+// acquireMUPGate ensures the H.M.GTP{4,6}.D_TEID gate for endpoint exists in
+// vrfID and bumps its reference count. The gate's segment list is unused (the
+// behavior resolves the real SID from mup_uplink_v{4,6}_map), so a bare
+// mode-only headend entry suffices.
+func (a *Applier) acquireMUPGate(vrfID uint32, gatePrefix string, mode uint8, owner bpf.OwnerTag, create headendCreateFn) error {
+	key := mupGateKey{vrf: vrfID, prefix: gatePrefix}
 	if shared, ok := a.headend.(sharedMUPGate); ok {
-		af := headend.AFv4
-		if strings.Contains(gatePrefix, ":") {
-			af = headend.AFv6
-		}
-		n := a.mupGateRefs[gatePrefix] + 1
-		if err := shared.SetGateReferences(af, gatePrefix, mode, owner, n); err != nil {
+		af, _ := gateFamily(gatePrefix)
+		n := a.mupGateRefs[key] + 1
+		if err := shared.SetGateReferences(af, vrfID, gatePrefix, mode, owner, n); err != nil {
 			return err
 		}
-		a.mupGateRefs[gatePrefix] = n
+		a.mupGateRefs[key] = n
 		return nil
 	}
-	if a.mupGateRefs[gatePrefix] > 0 {
-		a.mupGateRefs[gatePrefix]++
+	if a.mupGateRefs[key] > 0 {
+		a.mupGateRefs[key]++
 		return nil
 	}
 	gate := &bpf.HeadendEntry{Mode: mode}
-	if err := create(gatePrefix, gate, owner); err != nil {
+	if err := create(vrfID, gatePrefix, gate, owner); err != nil {
 		return err
 	}
-	a.mupGateRefs[gatePrefix] = 1
+	a.mupGateRefs[key] = 1
 	return nil
 }
 
-// releaseMUPGate drops one reference to endpoint's gate and removes it when the
-// last uplink session on that endpoint is gone.
-func (a *Applier) releaseMUPGate(gatePrefix string, owner bpf.OwnerTag, del headendDeleteFn) bool {
+// releaseMUPGate drops one reference to endpoint's gate in vrfID and removes
+// it when the last uplink session on that endpoint is gone.
+func (a *Applier) releaseMUPGate(vrfID uint32, gatePrefix string, owner bpf.OwnerTag, del headendDeleteFn) bool {
+	key := mupGateKey{vrf: vrfID, prefix: gatePrefix}
 	if shared, ok := a.headend.(sharedMUPGate); ok {
-		af := headend.AFv4
-		mode := uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
-		if strings.Contains(gatePrefix, ":") {
-			af = headend.AFv6
-			mode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
-		}
-		n := max(a.mupGateRefs[gatePrefix]-1, 0)
-		if err := shared.SetGateReferences(af, gatePrefix, mode, owner, n); err != nil {
-			a.logger.Error("remove MUP gate", zap.Error(err))
+		af, mode := gateFamily(gatePrefix)
+		n := max(a.mupGateRefs[key]-1, 0)
+		if err := shared.SetGateReferences(af, vrfID, gatePrefix, mode, owner, n); err != nil {
+			a.logger.Error("remove MUP gate", zap.Uint32("vrf_id", vrfID), zap.Error(err))
 			return false
 		}
 		if n == 0 {
-			delete(a.mupGateRefs, gatePrefix)
+			delete(a.mupGateRefs, key)
 		} else {
-			a.mupGateRefs[gatePrefix] = n
+			a.mupGateRefs[key] = n
 		}
 		return true
 	}
-	n := a.mupGateRefs[gatePrefix]
+	n := a.mupGateRefs[key]
 	if n <= 1 {
-		if err := del(gatePrefix, owner); err != nil {
+		if err := del(vrfID, gatePrefix, owner); err != nil {
 			a.logger.Error("remove MUP T2ST gate",
-				zap.String("gate", gatePrefix), zap.Error(err))
+				zap.Uint32("vrf_id", vrfID), zap.String("gate", gatePrefix), zap.Error(err))
 			return false
 		}
-		delete(a.mupGateRefs, gatePrefix)
+		delete(a.mupGateRefs, key)
 		return true
 	}
-	a.mupGateRefs[gatePrefix] = n - 1
+	a.mupGateRefs[key] = n - 1
 	return true
+}
+
+// oweMUPGateRelease records a gate reference a moved session no longer
+// holds but could not release; the tracked pass releases it.
+func (a *Applier) oweMUPGateRelease(key mupGateKey) {
+	a.mupGateDebt[key]++
+	a.mupFailed()
+}
+
+// payMUPGateDebt releases the gate references oweMUPGateRelease recorded.
+// It returns how many are still owed. Callers hold mupMu.
+func (a *Applier) payMUPGateDebt() int {
+	left := 0
+	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
+	for key, n := range a.mupGateDebt {
+		ep := strings.SplitN(key.prefix, "/", 2)[0]
+		addr, err := netip.ParseAddr(ep)
+		if err != nil {
+			delete(a.mupGateDebt, key)
+			continue
+		}
+		dp := a.mupT2STDataPlane(addr, ep)
+		for n > 0 && a.releaseMUPGate(key.vrf, key.prefix, gateOwner, dp.deleteGate) {
+			n--
+		}
+		if n == 0 {
+			delete(a.mupGateDebt, key)
+		} else {
+			a.mupGateDebt[key] = n
+			left += n
+		}
+	}
+	return left
 }

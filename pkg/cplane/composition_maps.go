@@ -60,13 +60,14 @@ type compositionMaps struct {
 	mu      sync.Mutex
 	maps    ForwardingMapOps
 	headend *headend.Reconciler
-	// Only gate dependencies need host memory; owned map inventory survives restart.
-	gates map[bpf.OwnerTag]map[string]bool
+	// Only gate dependencies need host memory; owned map inventory survives
+	// restart. Keyed by owner, then gateKey.
+	gates map[bpf.OwnerTag]map[gateKey]bool
 	peers map[bpf.OwnerTag]map[string]bpf.BdPeerKey
 }
 
 func newCompositionMaps(maps ForwardingMapOps, h *headend.Reconciler) (*compositionMaps, error) {
-	s := &compositionMaps{maps: maps, headend: h, gates: map[bpf.OwnerTag]map[string]bool{}, peers: map[bpf.OwnerTag]map[string]bpf.BdPeerKey{}}
+	s := &compositionMaps{maps: maps, headend: h, gates: map[bpf.OwnerTag]map[gateKey]bool{}, peers: map[bpf.OwnerTag]map[string]bpf.BdPeerKey{}}
 	if maps == nil {
 		return s, nil
 	}
@@ -76,7 +77,7 @@ func newCompositionMaps(maps ForwardingMapOps, h *headend.Reconciler) (*composit
 	}
 	for k, o := range v4 {
 		if strings.HasPrefix(string(o), "plugin:") {
-			if err := s.holdGate(o, netip.AddrFrom4(k.Endpoint).String()); err != nil {
+			if err := s.holdGate(o, ownedUplink(k).gate()); err != nil {
 				return nil, err
 			}
 		}
@@ -87,7 +88,7 @@ func newCompositionMaps(maps ForwardingMapOps, h *headend.Reconciler) (*composit
 	}
 	for k, o := range v6 {
 		if strings.HasPrefix(string(o), "plugin:") {
-			if err := s.holdGate(o, netip.AddrFrom16(k.Endpoint).String()); err != nil {
+			if err := s.holdGate(o, gateKey{vrf: mupGateVRF(binary.BigEndian.Uint32(k.Instance[:])), endpoint: netip.AddrFrom16(k.Endpoint).String()}); err != nil {
 				return nil, err
 			}
 		}
@@ -97,41 +98,66 @@ func newCompositionMaps(maps ForwardingMapOps, h *headend.Reconciler) (*composit
 	}
 	return s, nil
 }
-func (s *compositionMaps) holdGate(owner bpf.OwnerTag, endpoint string) error {
+
+// gateKey is one endpoint gate an owner depends on: the endpoint in the VRF
+// of the uplinks it fronts.
+type gateKey struct {
+	vrf      uint32
+	endpoint string
+}
+
+// mupGateVRF is the VRF of the gate in front of uplinks of instance. Gates
+// are global VRF entries, because the headend lookup matches every packet in
+// the global VRF whatever its ingress VRF.
+func mupGateVRF(instance uint32) uint32 { return 0 }
+
+// gate is the gate in front of the uplink.
+func (u uplinkDesired) gate() gateKey {
+	return gateKey{vrf: mupGateVRF(u.instance), endpoint: u.endpoint}
+}
+
+func gateEntry(endpoint string) (headend.Family, string, uint8, error) {
 	addr, err := netip.ParseAddr(endpoint)
 	if err != nil {
-		return err
+		return 0, "", 0, err
 	}
 	af, mode := headend.AFv4, uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
 	if addr.Is6() {
 		af = headend.AFv6
 		mode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
 	}
-	if err := s.headend.SetGateReferences(af, netip.PrefixFrom(addr, addr.BitLen()).String(), mode, owner, 1); err != nil {
+	return af, netip.PrefixFrom(addr, addr.BitLen()).String(), mode, nil
+}
+
+func (s *compositionMaps) holdGate(owner bpf.OwnerTag, g gateKey) error {
+	af, prefix, mode, err := gateEntry(g.endpoint)
+	if err != nil {
+		return err
+	}
+	if err := s.headend.SetGateReferences(af, g.vrf, prefix, mode, owner, 1); err != nil {
 		return err
 	}
 	if s.gates[owner] == nil {
-		s.gates[owner] = map[string]bool{}
+		s.gates[owner] = map[gateKey]bool{}
 	}
-	s.gates[owner][endpoint] = true
+	s.gates[owner][g] = true
 	return nil
 }
-func (s *compositionMaps) releaseGates(owner bpf.OwnerTag, keep map[string]bool) error {
+func (s *compositionMaps) releaseGates(owner bpf.OwnerTag, keep map[gateKey]bool) error {
 	var errs []error
-	for ep := range s.gates[owner] {
-		if keep[ep] {
+	for g := range s.gates[owner] {
+		if keep[g] {
 			continue
 		}
-		a, _ := netip.ParseAddr(ep)
-		af, mode := headend.AFv4, uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
-		if a.Is6() {
-			af = headend.AFv6
-			mode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
+		af, prefix, mode, err := gateEntry(g.endpoint)
+		if err != nil {
+			delete(s.gates[owner], g)
+			continue
 		}
-		if err := s.headend.SetGateReferences(af, netip.PrefixFrom(a, a.BitLen()).String(), mode, owner, 0); err != nil {
+		if err := s.headend.SetGateReferences(af, g.vrf, prefix, mode, owner, 0); err != nil {
 			errs = append(errs, err)
 		} else {
-			delete(s.gates[owner], ep)
+			delete(s.gates[owner], g)
 		}
 	}
 	return errors.Join(errs...)
@@ -157,7 +183,7 @@ func (s *compositionMaps) applyUplinks(owner bpf.OwnerTag, desired []uplinkDesir
 	if err != nil {
 		return err
 	}
-	keepGates := map[string]bool{}
+	keepGates := map[gateKey]bool{}
 	var errs []error
 	for k, o := range existing {
 		if o != owner {
@@ -165,12 +191,12 @@ func (s *compositionMaps) applyUplinks(owner bpf.OwnerTag, desired []uplinkDesir
 		}
 		u := ownedUplink(k)
 		if _, keep := want[u.key()]; keep {
-			keepGates[u.endpoint] = true
+			keepGates[u.gate()] = true
 			continue
 		}
 		if err := s.maps.DeleteMupUplinkV4Owned(u.instance, u.endpoint, u.teid, u.bits, owner); err != nil {
 			errs = append(errs, err)
-			keepGates[u.endpoint] = true
+			keepGates[u.gate()] = true
 		}
 	}
 	// The initial output profile is GTP4. Old GTP6 ownership is still cleaned.
@@ -181,9 +207,10 @@ func (s *compositionMaps) applyUplinks(owner bpf.OwnerTag, desired []uplinkDesir
 		for k, o := range v6 {
 			if o == owner {
 				ep := netip.AddrFrom16(k.Endpoint).String()
-				if err := s.maps.DeleteMupUplinkV6Owned(binary.BigEndian.Uint32(k.Instance[:]), ep, binary.BigEndian.Uint32(k.Teid[:]), uint8(k.Prefixlen-160), owner); err != nil {
+				instance := binary.BigEndian.Uint32(k.Instance[:])
+				if err := s.maps.DeleteMupUplinkV6Owned(instance, ep, binary.BigEndian.Uint32(k.Teid[:]), uint8(k.Prefixlen-160), owner); err != nil {
 					errs = append(errs, err)
-					keepGates[ep] = true
+					keepGates[gateKey{vrf: mupGateVRF(instance), endpoint: ep}] = true
 				}
 			}
 		}
@@ -205,7 +232,7 @@ func (s *compositionMaps) applyUplinks(owner bpf.OwnerTag, desired []uplinkDesir
 	sort.Strings(keys)
 	for _, key := range keys {
 		u := want[key]
-		if err := s.holdGate(owner, u.endpoint); err != nil {
+		if err := s.holdGate(owner, u.gate()); err != nil {
 			return err
 		}
 		if err := s.maps.CreateMupUplinkV4Owned(u.instance, u.endpoint, u.teid, u.bits, &u.entry, owner); err != nil {

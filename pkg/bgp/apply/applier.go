@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/headend"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/prober"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -87,12 +89,12 @@ type Applier struct {
 	// SRPolicyService CRUD handlers can trigger from an RPC goroutine. Same
 	// pattern as mupMu / evpnMu. NewApplier's startup reset runs before any
 	// of that and needs no lock.
-	vpnMu     sync.Mutex
+	vpnMu sync.Mutex
 	// vpnQuiet and vpnQuietDenied, guarded by vpnMu, count import-RT denials
 	// instead of logging each one while QuietVPNDenials runs.
 	vpnQuiet       bool
 	vpnQuietDenied int
-	vpnGroups *vpnGroupTable
+	vpnGroups      *vpnGroupTable
 	// mupDefaultAllow forces every MUP session route through the historical
 	// default-allow path even when some VRF binding has declared a mup_ipv*
 	// family. It is the escape hatch for the asymmetric-expansion case where
@@ -110,14 +112,18 @@ type Applier struct {
 	// are the segment-discovery tables a session resolves against (T1ST
 	// against an ISD by endpoint, T2ST against a DSD by MUP segment id).
 	// mupGateRefs counts how many uplink sessions share each endpoint's
-	// H.M.GTP4.D_TEID gate.
-	mupMu       sync.Mutex
-	mupT1ST     map[mupT1STKey]*mupSessionState
-	mupT2ST     map[mupT2STKey]*mupSessionState
-	mupISD      map[mupISDKey]mupISDEntry
-	mupDSD      map[mupDSDKey]mupDSDEntry
-	mupGateRefs map[string]int
-	mupRecovery *mupStartupRecovery
+	// H.M.GTP4.D_TEID gate in each VRF. mupGateDebt counts the references a
+	// moved session could not release, and mupT1STStale the downlink
+	// entries whose removal failed; the tracked pass retries both.
+	mupMu        sync.Mutex
+	mupT1ST      map[mupT1STKey]*mupSessionState
+	mupT2ST      map[mupT2STKey]*mupSessionState
+	mupISD       map[mupISDKey]mupISDEntry
+	mupDSD       map[mupDSDKey]mupDSDEntry
+	mupGateRefs  map[mupGateKey]int
+	mupGateDebt  map[mupGateKey]int
+	mupT1STStale map[mupT1STEntry]struct{}
+	mupRecovery  *mupStartupRecovery
 	// evpnMu serializes the EVPN receive state (evpnTable.peers/fdb/mcast)
 	// between the GoBGP RouteHandler goroutine (applyEVPN) and the RPC-driven
 	// ReplayEVPN (VrfBridgeAttach / commitBinding re-pull the loc-rib after
@@ -138,7 +144,7 @@ type Applier struct {
 	// before it unlocks.
 	vpnWriteFailed bool
 	mupWriteFailed bool
-	logger *zap.Logger
+	logger         *zap.Logger
 }
 
 // NewApplier wires an Applier. srcLocator names the locator whose prefix
@@ -147,25 +153,27 @@ type Applier struct {
 // accepts every received route.
 func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger, options ...Option) *Applier {
 	a := &Applier{
-		headend:     dp,
-		fdbBd:       dp,
-		mupUplink:   dp,
-		ecmp:        dp,
-		locators:    locators,
-		vrfBindings: vrfBindings,
-		fib:         fibInjector,
-		srcLocator:  srcLocator,
-		localASN:    localASN,
-		srPolicy:    newSRPolicyTable(dp, logger),
-		prober:      prober.Noop{},
-		vpnGroups:   newVPNGroupTable(dp, localASN, logger),
-		evpn:        newEVPNTable(),
-		mupT1ST:     make(map[mupT1STKey]*mupSessionState),
-		mupT2ST:     make(map[mupT2STKey]*mupSessionState),
-		mupISD:      make(map[mupISDKey]mupISDEntry),
-		mupDSD:      make(map[mupDSDKey]mupDSDEntry),
-		mupGateRefs: make(map[string]int),
-		logger:      logger.Named("bgp.apply"),
+		headend:      dp,
+		fdbBd:        dp,
+		mupUplink:    dp,
+		ecmp:         dp,
+		locators:     locators,
+		vrfBindings:  vrfBindings,
+		fib:          fibInjector,
+		srcLocator:   srcLocator,
+		localASN:     localASN,
+		srPolicy:     newSRPolicyTable(dp, logger),
+		prober:       prober.Noop{},
+		vpnGroups:    newVPNGroupTable(dp, localASN, logger),
+		evpn:         newEVPNTable(),
+		mupT1ST:      make(map[mupT1STKey]*mupSessionState),
+		mupT2ST:      make(map[mupT2STKey]*mupSessionState),
+		mupISD:       make(map[mupISDKey]mupISDEntry),
+		mupDSD:       make(map[mupDSDKey]mupDSDEntry),
+		mupGateRefs:  make(map[mupGateKey]int),
+		mupGateDebt:  make(map[mupGateKey]int),
+		mupT1STStale: make(map[mupT1STEntry]struct{}),
+		logger:       logger.Named("bgp.apply"),
 	}
 	for _, option := range options {
 		option(a)
@@ -345,10 +353,10 @@ func (a *Applier) mupFailed() bool {
 	return false
 }
 
-// removeVPNPath drops one tracked path and reconciles what remains. Shared
-// by withdraw and by a replacement UPDATE whose SID became unusable. Callers
-// hold vpnMu.
-func (a *Applier) removeVPNPath(dk vpnDestKey, pk vpnPathKey, vr *bgp.VPNRoute) {
+// removeVPNPath drops one tracked path from one VRF's destination and
+// reconciles what remains. It reports false when that reconcile failed and
+// the destination is still tracked. Callers hold vpnMu.
+func (a *Applier) removeVPNPath(dk vpnDestKey, pk vpnPathKey) bool {
 	d, released := a.vpnGroups.remove(dk, pk)
 	if released != nil {
 		// The removal event carries no color or next hop, so the reference
@@ -357,42 +365,91 @@ func (a *Applier) removeVPNPath(dk vpnDestKey, pk vpnPathKey, vr *bgp.VPNRoute) 
 		a.srPolicy.unref(released.color, released.endpoint)
 	}
 	if d == nil {
-		// Nothing tracked for this prefix, but the data plane may still
-		// hold an entry this process never saw: with pinned maps an entry
-		// installed before a restart outlives the accumulator, and this
-		// event arriving before the route is re-advertised is the only
-		// chance to remove it. Delete unconditionally; it is a no-op when
-		// the entry is already absent.
-		if err := a.deleteTrigger(vr.Family, vr.Prefix); err != nil {
-			a.logger.Error("remove untracked VPN prefix",
-				zap.String("prefix", vr.Prefix), zap.Error(err))
+		return true
+	}
+	return a.reconcileVPNGroup(dk, d) || a.vpnGroups.dests[dk] == nil
+}
+
+// removeVPNRoute takes one received path out of every VRF it is placed in
+// except those in keep, and returns the VRFs it is still recorded in: those
+// of keep, and those whose removal failed to reach the data plane. A VRF
+// stays recorded until its removal succeeds, so another withdraw or UPDATE
+// of the route retries it, as the tracked pass does. A withdraw passes no
+// keep. Callers hold vpnMu.
+func (a *Applier) removeVPNRoute(rk vpnRouteKey, keep []uint32) []uint32 {
+	var left []uint32
+	for _, v := range a.vpnGroups.placed[rk] {
+		switch {
+		case slices.Contains(keep, v):
+			left = append(left, v)
+		case a.removeVPNPath(rk.dest(v), rk.path):
+			a.vpnGroups.unstick(rk.dest(v), rk)
+		default:
+			left = append(left, v)
+			a.vpnGroups.stick(rk.dest(v), rk)
 		}
+	}
+	a.vpnGroups.setPlaced(rk, left)
+	return left
+}
+
+// dropUntrackedVPN removes the global trigger of a prefix this process
+// never tracked. With pinned maps an entry installed before a restart
+// outlives the accumulator, and a withdraw (or an UPDATE that no longer
+// installs) arriving before the route is re-advertised is the only chance to
+// remove it. It is a no-op when the entry is already absent, and does
+// nothing while a global destination for the prefix exists: that trigger
+// belongs to the paths still tracked there.
+func (a *Applier) dropUntrackedVPN(rk vpnRouteKey) {
+	if len(a.vpnGroups.placed[rk]) > 0 {
 		return
 	}
-	a.reconcileVPNGroup(dk, d)
+	if _, tracked := a.vpnGroups.dests[rk.dest(vrf.GlobalVRFID)]; tracked {
+		return
+	}
+	if err := a.deleteTrigger(vrf.GlobalVRFID, rk.family, rk.prefix); err != nil {
+		a.logger.Error("remove untracked VPN prefix",
+			zap.String("prefix", rk.prefix), zap.Error(err))
+	}
+}
+
+// vpnImportVRFs returns the VRFs a received VPN route is placed in, and
+// whether any VRF accepts it. A family no binding declares is default-allow
+// and places every route in the global VRF.
+//
+// Every accepted route is placed in the global VRF alone: the headend
+// lookup matches every packet there, whatever its ingress VRF.
+func (a *Applier) vpnImportVRFs(vr *bgp.VPNRoute) ([]uint32, bool) {
+	targets, defaultAllow := a.vrfBindings.ImportTargetsForFamily(vr.RTs, vr.Family)
+	if !defaultAllow && len(targets) == 0 {
+		return nil, false
+	}
+	return []uint32{vrf.GlobalVRFID}, true
 }
 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
 	a.vpnMu.Lock()
 	defer a.vpnMu.Unlock()
 	defer a.flushTrackedFailure(&a.vpnWriteFailed)
-	dk := vpnDestKey{family: vr.Family, prefix: vr.Prefix}
-	pk := vpnPathKey{rd: vr.RD, source: src}
+	// The VRF ids resolved below stay valid until the writes are done: a VRF
+	// cannot start its deletion meanwhile (vrf.Manager.HoldIDs).
+	release := a.vrfBindings.VRF().HoldIDs()
+	defer release()
+	rk := vpnRouteKey{family: vr.Family, prefix: vr.Prefix, path: vpnPathKey{rd: vr.RD, source: src}}
 	if withdraw {
 		// Withdraw bypasses the import-RT filter so a route accepted
-		// earlier is always torn down, and drops only this path: the prefix
-		// survives on whatever other PEs still advertise it.
-		a.removeVPNPath(dk, pk, vr)
+		// earlier is always torn down, from every VRF it was placed in, and
+		// drops only this path: the prefix survives on whatever other PEs
+		// still advertise it.
+		a.dropUntrackedVPN(rk)
+		a.removeVPNRoute(rk, nil)
 		return
 	}
 	// Import-RT filter: once any VRF binding declares this family, a
 	// received route must carry an RT some VRF imports. A Manager with no
 	// binding under fam keeps the historical default-allow, so vpnv4 /
 	// vpnv6 gate independently as bindings arrive per family.
-	importAllowed := true
-	if !a.vrfBindings.EmptyForFamily(vr.Family) {
-		_, _, importAllowed = a.vrfBindings.MatchImportForFamily(vr.RTs, vr.Family)
-	}
+	vrfs, importAllowed := a.vpnImportVRFs(vr)
 	path, diagnostic := selectVPNPath(vr, importAllowed)
 	switch diagnostic {
 	case vpnImportDenied:
@@ -415,11 +472,40 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 			zap.String("nexthop", vr.NextHop))
 	}
 	if path == nil {
-		a.removeVPNPath(dk, pk, vr)
+		a.dropUntrackedVPN(rk)
+		a.removeVPNRoute(rk, nil)
 		return
 	}
-	want := path.steer
+	a.placeVPNRoute(rk, path, vrfs)
+}
 
+// placeVPNRoute makes vrfs the VRFs that hold rk's path. A BGP UPDATE is an
+// implicit replace: the VRFs that no longer import the route lose its path
+// first, then every VRF that does takes the new one. Callers hold vpnMu.
+func (a *Applier) placeVPNRoute(rk vpnRouteKey, path *vpnPath, vrfs []uint32) {
+	var placed []uint32
+	for _, v := range a.removeVPNRoute(rk, vrfs) {
+		if !slices.Contains(vrfs, v) {
+			placed = append(placed, v) // its removal is still to be retried
+		}
+	}
+	for _, v := range vrfs {
+		// Each VRF's destination holds a path of its own: the policy
+		// reference is taken and released per VRF.
+		p := *path
+		if a.upsertVPNPath(rk.dest(v), rk.path, &p) {
+			placed = append(placed, v)
+		}
+		a.vpnGroups.unstick(rk.dest(v), rk)
+	}
+	a.vpnGroups.setPlaced(rk, placed)
+}
+
+// upsertVPNPath records one path in one VRF's destination and reconciles it.
+// It reports false when a bound refused the path, which leaves the path out
+// of that VRF. Callers hold vpnMu.
+func (a *Applier) upsertVPNPath(dk vpnDestKey, pk vpnPathKey, path *vpnPath) bool {
+	want := path.steer
 	// Take the new reference before releasing the old one so a re-advertise
 	// that keeps the same target never drops the refcount to zero and lets
 	// the policy be garbage-collected between the two calls.
@@ -443,9 +529,10 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 		if d != nil {
 			a.reconcileVPNGroup(dk, d)
 		}
-		return
+		return false
 	}
 	a.reconcileVPNGroup(dk, d)
+	return true
 }
 
 func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {
@@ -521,23 +608,23 @@ func (a *Applier) encapSource() ([16]byte, error) {
 	return loc.Prefix.Masked().Addr().As16(), nil
 }
 
-func (a *Applier) createHeadend(fam bgp.Family, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+func (a *Applier) createHeadend(vrfID uint32, fam bgp.Family, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
 	switch fam {
 	case bgp.FamilyVPNv4:
-		return a.headend.CreateHeadendV4(prefix, entry, owner)
+		return a.headend.CreateHeadendV4In(vrfID, prefix, entry, owner)
 	case bgp.FamilyVPNv6:
-		return a.headend.CreateHeadendV6(prefix, entry, owner)
+		return a.headend.CreateHeadendV6In(vrfID, prefix, entry, owner)
 	default:
 		return fmt.Errorf("unexpected VPN family %q", fam)
 	}
 }
 
-func (a *Applier) deleteHeadend(fam bgp.Family, prefix string, owner bpf.OwnerTag) error {
+func (a *Applier) deleteHeadend(vrfID uint32, fam bgp.Family, prefix string, owner bpf.OwnerTag) error {
 	switch fam {
 	case bgp.FamilyVPNv4:
-		return a.headend.DeleteHeadendV4(prefix, owner)
+		return a.headend.DeleteHeadendV4In(vrfID, prefix, owner)
 	case bgp.FamilyVPNv6:
-		return a.headend.DeleteHeadendV6(prefix, owner)
+		return a.headend.DeleteHeadendV6In(vrfID, prefix, owner)
 	default:
 		return fmt.Errorf("unexpected VPN family %q", fam)
 	}

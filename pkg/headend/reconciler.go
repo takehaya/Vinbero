@@ -9,10 +9,11 @@ import (
 	"github.com/takehaya/vinbero/pkg/ownership"
 )
 
-// Writer is the incremental headend surface used by built-in appliers. It
-// writes the global VRF. Owner reads support migration from a previous owner
-// format; removal still checks the observed owner, so migration cannot delete
-// a concurrent replacement.
+// Writer is the incremental headend surface used by built-in appliers. The
+// methods without a VRF write the global VRF; the ...In methods name one.
+// Owner reads support migration from a previous owner format; removal still
+// checks the observed owner, so migration cannot delete a concurrent
+// replacement. *bpf.MapOperations and *Reconciler satisfy it.
 type Writer interface {
 	CreateHeadendV4(string, *bpf.HeadendEntry, bpf.OwnerTag) error
 	CreateHeadendV6(string, *bpf.HeadendEntry, bpf.OwnerTag) error
@@ -20,6 +21,12 @@ type Writer interface {
 	DeleteHeadendV6(string, bpf.OwnerTag) error
 	GetHeadendV4Owner(string) (bpf.OwnerTag, bool, error)
 	GetHeadendV6Owner(string) (bpf.OwnerTag, bool, error)
+	CreateHeadendV4In(uint32, string, *bpf.HeadendEntry, bpf.OwnerTag) error
+	CreateHeadendV6In(uint32, string, *bpf.HeadendEntry, bpf.OwnerTag) error
+	DeleteHeadendV4In(uint32, string, bpf.OwnerTag) error
+	DeleteHeadendV6In(uint32, string, bpf.OwnerTag) error
+	GetHeadendV4OwnerIn(uint32, string) (bpf.OwnerTag, bool, error)
+	GetHeadendV6OwnerIn(uint32, string) (bpf.OwnerTag, bool, error)
 }
 
 // Reconciler serializes each owner's declarations and incremental writes against
@@ -129,6 +136,16 @@ func (r *Reconciler) CreateHeadendV6(prefix string, entry *bpf.HeadendEntry, own
 	return r.put(AFv6, ID{Prefix: prefix}, entry, owner)
 }
 
+// CreateHeadendV4In writes one entry of vrfID. A backend without VRFMapOps
+// refuses a VRF other than the global one.
+func (r *Reconciler) CreateHeadendV4In(vrfID uint32, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	return r.put(AFv4, ID{VRF: vrfID, Prefix: prefix}, entry, owner)
+}
+
+func (r *Reconciler) CreateHeadendV6In(vrfID uint32, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	return r.put(AFv6, ID{VRF: vrfID, Prefix: prefix}, entry, owner)
+}
+
 // put touches only the named key. A built-in route update must not scan the
 // whole map or replace the other prefixes held by that built-in's owner.
 func (r *Reconciler) put(af Family, id ID, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
@@ -175,6 +192,14 @@ func (r *Reconciler) DeleteHeadendV6(prefix string, owner bpf.OwnerTag) error {
 	return r.remove(AFv6, ID{Prefix: prefix}, owner)
 }
 
+func (r *Reconciler) DeleteHeadendV4In(vrfID uint32, prefix string, owner bpf.OwnerTag) error {
+	return r.remove(AFv4, ID{VRF: vrfID, Prefix: prefix}, owner)
+}
+
+func (r *Reconciler) DeleteHeadendV6In(vrfID uint32, prefix string, owner bpf.OwnerTag) error {
+	return r.remove(AFv6, ID{VRF: vrfID, Prefix: prefix}, owner)
+}
+
 func (r *Reconciler) remove(af Family, id ID, owner bpf.OwnerTag) error {
 	if owner == "" {
 		return bpf.ErrEmptyOwner
@@ -215,6 +240,14 @@ func (r *Reconciler) GetHeadendV4Owner(prefix string) (bpf.OwnerTag, bool, error
 
 func (r *Reconciler) GetHeadendV6Owner(prefix string) (bpf.OwnerTag, bool, error) {
 	return getOwner(r.maps, AFv6, ID{Prefix: prefix})
+}
+
+func (r *Reconciler) GetHeadendV4OwnerIn(vrfID uint32, prefix string) (bpf.OwnerTag, bool, error) {
+	return getOwner(r.maps, AFv4, ID{VRF: vrfID, Prefix: prefix})
+}
+
+func (r *Reconciler) GetHeadendV6OwnerIn(vrfID uint32, prefix string) (bpf.OwnerTag, bool, error) {
+	return getOwner(r.maps, AFv6, ID{VRF: vrfID, Prefix: prefix})
 }
 
 func ownerConflict(af Family, key ID, holder, caller bpf.OwnerTag) error {

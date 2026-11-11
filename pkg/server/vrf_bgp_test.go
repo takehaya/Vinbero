@@ -1536,10 +1536,10 @@ func TestVrfBgpBind_RequestsVpnReplayForWidenedFamilies(t *testing.T) {
 	}
 	wantReplays(t, "import RT add", *got, v4, v4)
 
-	// An RT another VRF already imports does not change what the filter
-	// accepts.
+	// An RT another VRF already imports places the routes carrying it in one
+	// more VRF.
 	vpnTestBind(t, s, vpnTestBinding("other", map[string]*v1.VrfBgpFamily{"vpnv4": vpnTestRT("65000:100", "import")}))
-	wantReplays(t, "RT already imported elsewhere", *got, v4, v4)
+	wantReplays(t, "RT already imported elsewhere", *got, v4, v4, v4)
 
 	// Export-only still ends the family's default-allow (any RT under the
 	// family does), so routes installed under it have to be re-evaluated.
