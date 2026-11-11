@@ -150,7 +150,8 @@ func TestBdPeerFreedHook(t *testing.T) {
 func TestBdPeerConcurrentAllocation(t *testing.T) {
 	m := newXDPTestHelper(t).mapOps
 	var noESI [ESILen]byte
-	const tries = 24
+	// More flood peers than slots, fewer unicast peers than indices.
+	const tries = MaxBumNexthops + 8
 	type result struct {
 		index uint16
 		err   error
