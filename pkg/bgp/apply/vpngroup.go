@@ -22,13 +22,29 @@ const (
 	maxPathsPerDest    = 32
 )
 
-// vpnDestKey is what paths aggregate onto: one ECMP group per {family,
-// prefix}. RD is NOT part of it. Each PE advertising a prefix uses its own
-// RD, so keying by RD is what makes the second PE's path a separate entry
-// that overwrites the first instead of joining it.
+// vpnDestKey is what paths aggregate onto: one ECMP group per {VRF, family,
+// prefix}. The same prefix in two VRFs is two groups, so paths that two
+// tenants import never mix. RD is NOT part of it. Each PE advertising a
+// prefix uses its own RD, so keying by RD is what makes the second PE's path
+// a separate entry that overwrites the first instead of joining it.
 type vpnDestKey struct {
+	vrf    uint32
 	family bgp.Family
 	prefix string
+}
+
+// vpnRouteKey identifies one received path whatever VRFs it is placed in.
+// A withdraw carries no route targets, so the VRFs it has to leave are
+// recorded against this key (vpnGroupTable.placed) when the path is placed.
+type vpnRouteKey struct {
+	family bgp.Family
+	prefix string
+	path   vpnPathKey
+}
+
+// dest is the destination the route has in vrfID.
+func (rk vpnRouteKey) dest(vrfID uint32) vpnDestKey {
+	return vpnDestKey{vrf: vrfID, family: rk.family, prefix: rk.prefix}
 }
 
 // vpnPathKey identifies one contributing path. RD distinguishes the PEs and
@@ -108,7 +124,10 @@ type ecmpOps interface {
 // srPolicyTable it references is separately mutex-guarded for the
 // concurrent RPC path.
 type vpnGroupTable struct {
-	dests  map[vpnDestKey]*vpnDest
+	dests map[vpnDestKey]*vpnDest
+	// placed is, for each received path, the VRFs whose destination holds
+	// it, in ascending order.
+	placed map[vpnRouteKey][]uint32
 	ecmp   ecmpOps
 	logger *zap.Logger
 
@@ -120,10 +139,20 @@ type vpnGroupTable struct {
 func newVPNGroupTable(ecmp ecmpOps, localASN uint32, logger *zap.Logger) *vpnGroupTable {
 	return &vpnGroupTable{
 		dests:    make(map[vpnDestKey]*vpnDest),
+		placed:   make(map[vpnRouteKey][]uint32),
 		ecmp:     ecmp,
 		logger:   logger.Named("vpngroup"),
 		localASN: localASN,
 	}
+}
+
+// setPlaced records the VRFs that hold rk's path.
+func (t *vpnGroupTable) setPlaced(rk vpnRouteKey, vrfs []uint32) {
+	if len(vrfs) == 0 {
+		delete(t.placed, rk)
+		return
+	}
+	t.placed[rk] = slices.Sorted(slices.Values(vrfs))
 }
 
 // groupOwner is the owner every group this table writes carries. It is
@@ -209,13 +238,14 @@ func (t *vpnGroupTable) upsert(dk vpnDestKey, pk vpnPathKey, p *vpnPath) (*vpnDe
 	if !ok {
 		if len(t.dests) >= maxTrackedVPNDests {
 			t.logger.Warn("VPN destination table full; dropping prefix",
-				zap.String("prefix", dk.prefix), zap.Int("limit", maxTrackedVPNDests))
+				zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix),
+				zap.Int("limit", maxTrackedVPNDests))
 			return nil, false
 		}
 		id, err := t.allocID()
 		if err != nil {
 			t.logger.Error("allocate ecmp group id",
-				zap.String("prefix", dk.prefix), zap.Error(err))
+				zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Error(err))
 			return nil, false
 		}
 		d = &vpnDest{groupID: id, paths: make(map[vpnPathKey]*vpnPath)}
@@ -223,7 +253,7 @@ func (t *vpnGroupTable) upsert(dk vpnDestKey, pk vpnPathKey, p *vpnPath) (*vpnDe
 	}
 	if _, exists := d.paths[pk]; !exists && len(d.paths) >= maxPathsPerDest {
 		t.logger.Warn("path table full for prefix; dropping path",
-			zap.String("prefix", dk.prefix), zap.String("source", pk.source.String()),
+			zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.String("source", pk.source.String()),
 			zap.Int("limit", maxPathsPerDest))
 		return nil, false
 	}
@@ -288,7 +318,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 		if !d.awaitingSource {
 			d.awaitingSource = true
 			a.logger.Warn("VPN prefix not installed until the source locator is registered",
-				zap.String("prefix", dk.prefix), zap.Error(err))
+				zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Error(err))
 		}
 		return true
 	}
@@ -309,7 +339,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 		entry, err := buildHeadendEntryFrom(src, m.sid, m.reduced)
 		if err != nil {
 			a.logger.Error("build ECMP member",
-				zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))
+				zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))
 			return true
 		}
 		if m.steer != nil {
@@ -323,7 +353,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	owner := a.vpnGroups.groupOwner()
 	if err := a.vpnGroups.ecmp.PutEcmpGroup(d.groupID, paths, owner); err != nil {
 		a.logger.Error("install ECMP group",
-			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
+			zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
 		// A failed replace can leave mixed-generation path slots behind (the
 		// bpf layer does not roll back). The prober's registration -- and any
 		// bitmap it wrote -- describes the OLD layout; over mixed slots its
@@ -351,21 +381,21 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	trigger, err := buildHeadendEntryFrom(src, ms[0].sid, ms[0].reduced)
 	if err != nil {
 		a.logger.Error("build ECMP trigger",
-			zap.String("prefix", dk.prefix), zap.Error(err))
+			zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Error(err))
 		return true
 	}
 	if ms[0].steer != nil {
 		trigger.PolicyId = a.srPolicy.idOf(ms[0].steer.color, ms[0].steer.endpoint)
 	}
 	trigger.GroupId = d.groupID
-	if err := a.createTrigger(dk.family, dk.prefix, trigger); err != nil {
+	if err := a.createTrigger(dk.vrf, dk.family, dk.prefix, trigger); err != nil {
 		a.logger.Error("install ECMP trigger",
-			zap.String("prefix", dk.prefix), zap.Error(err))
+			zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Error(err))
 		return a.vpnFailed()
 	}
 	d.installed = fingerprint
 	a.logger.Info("VPN prefix programmed",
-		zap.String("prefix", dk.prefix), zap.Int("paths", len(ms)),
+		zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Int("paths", len(ms)),
 		zap.Uint32("group_id", d.groupID))
 	return true
 }
@@ -394,6 +424,7 @@ func groupFingerprint(ms []*vpnPath, src [16]byte) []string {
 func (a *Applier) ReconcileTracked() error {
 	var vpnFailed, mupFailed, evpnFailed int
 	a.vpnMu.Lock()
+	release := a.vrfBindings.VRF().HoldIDs()
 	for dk, d := range a.vpnGroups.dests {
 		if !a.reconcileVPNGroup(dk, d) {
 			vpnFailed++
@@ -401,9 +432,12 @@ func (a *Applier) ReconcileTracked() error {
 	}
 	// Reported by the return value; nothing for flushTrackedFailure.
 	a.vpnWriteFailed = false
+	release()
 	a.vpnMu.Unlock()
 
 	a.mupMu.Lock()
+	release = a.vrfBindings.VRF().HoldIDs()
+	mupFailed += a.retryMUPT1STStale() + a.payMUPGateDebt()
 	for k := range a.mupT1ST {
 		if !a.reconcileMUPT1ST(k) {
 			mupFailed++
@@ -415,6 +449,7 @@ func (a *Applier) ReconcileTracked() error {
 		}
 	}
 	a.mupWriteFailed = false
+	release()
 	a.mupMu.Unlock()
 
 	a.evpnMu.Lock()
@@ -435,9 +470,9 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	// unchanged re-advertisement must rebuild both instead of taking the
 	// installed-fingerprint shortcut over that partially removed state.
 	d.installed = nil
-	if err := a.deleteTrigger(dk.family, dk.prefix); err != nil {
+	if err := a.deleteTrigger(dk.vrf, dk.family, dk.prefix); err != nil {
 		a.logger.Error("withdraw VPN trigger",
-			zap.String("prefix", dk.prefix), zap.Error(err))
+			zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Error(err))
 		// The old trigger still may reference this ID. Keep the group and
 		// its tracking until a later withdrawal or replacement can retry;
 		// reusing its ID for another prefix would redirect the old traffic.
@@ -450,14 +485,14 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	// the group keeps forwarding, and it should keep its liveness guard.
 	if err := a.vpnGroups.ecmp.DeleteEcmpGroup(d.groupID, owner); err != nil {
 		a.logger.Error("delete ECMP group",
-			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
+			zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
 		return a.vpnFailed()
 	}
 	a.prober.Unregister(d.groupID)
 	delete(a.vpnGroups.dests, dk)
 	a.vpnGroups.freeIDs = append(a.vpnGroups.freeIDs, d.groupID)
 	a.logger.Info("VPN prefix withdrawn",
-		zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID))
+		zap.Uint32("vrf_id", dk.vrf), zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID))
 	return true
 }
 
@@ -474,7 +509,7 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 //
 // Reports whether anything was cleared, so the caller knows a retry is
 // worth attempting.
-func (a *Applier) clearLegacyVPNHeadend(fam bgp.Family, prefix string) bool {
+func (a *Applier) clearLegacyVPNHeadend(vrfID uint32, fam bgp.Family, prefix string) bool {
 	var (
 		owner bpf.OwnerTag
 		found bool
@@ -482,53 +517,48 @@ func (a *Applier) clearLegacyVPNHeadend(fam bgp.Family, prefix string) bool {
 	)
 	switch fam {
 	case bgp.FamilyVPNv4:
-		owner, found, err = a.headend.GetHeadendV4Owner(prefix)
+		owner, found, err = a.headend.GetHeadendV4OwnerIn(vrfID, prefix)
 	case bgp.FamilyVPNv6:
-		owner, found, err = a.headend.GetHeadendV6Owner(prefix)
+		owner, found, err = a.headend.GetHeadendV6OwnerIn(vrfID, prefix)
 	default:
 		return false
 	}
 	if err != nil || !found || !bpf.IsLegacyBGPVPNOwner(a.localASN, owner) {
 		return false
 	}
-	switch fam {
-	case bgp.FamilyVPNv4:
-		err = a.headend.DeleteHeadendV4(prefix, owner)
-	case bgp.FamilyVPNv6:
-		err = a.headend.DeleteHeadendV6(prefix, owner)
-	}
-	if err != nil {
+	if err := a.deleteHeadend(vrfID, fam, prefix, owner); err != nil {
 		a.logger.Error("clear pre-aggregation VPN trigger",
-			zap.String("prefix", prefix), zap.String("owner", string(owner)), zap.Error(err))
+			zap.Uint32("vrf_id", vrfID), zap.String("prefix", prefix),
+			zap.String("owner", string(owner)), zap.Error(err))
 		return false
 	}
 	a.logger.Info("cleared pre-aggregation VPN trigger",
-		zap.String("prefix", prefix), zap.String("owner", string(owner)))
+		zap.Uint32("vrf_id", vrfID), zap.String("prefix", prefix), zap.String("owner", string(owner)))
 	return true
 }
 
-// createTrigger writes the trigger entry, migrating off a pre-aggregation
-// owner if one is in the way.
-func (a *Applier) createTrigger(fam bgp.Family, prefix string, entry *bpf.HeadendEntry) error {
+// createTrigger writes the trigger entry of vrfID, migrating off a
+// pre-aggregation owner if one is in the way.
+func (a *Applier) createTrigger(vrfID uint32, fam bgp.Family, prefix string, entry *bpf.HeadendEntry) error {
 	owner := bpf.OwnerBGPVPN(a.localASN, "")
-	err := a.createHeadend(fam, prefix, entry, owner)
+	err := a.createHeadend(vrfID, fam, prefix, entry, owner)
 	if !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
 		return err
 	}
-	if !a.clearLegacyVPNHeadend(fam, prefix) {
+	if !a.clearLegacyVPNHeadend(vrfID, fam, prefix) {
 		return err
 	}
-	return a.createHeadend(fam, prefix, entry, owner)
+	return a.createHeadend(vrfID, fam, prefix, entry, owner)
 }
 
-// deleteTrigger removes the trigger entry, including one left by the
-// pre-aggregation writer.
-func (a *Applier) deleteTrigger(fam bgp.Family, prefix string) error {
-	err := a.deleteHeadend(fam, prefix, bpf.OwnerBGPVPN(a.localASN, ""))
+// deleteTrigger removes the trigger entry of vrfID, including one left by
+// the pre-aggregation writer.
+func (a *Applier) deleteTrigger(vrfID uint32, fam bgp.Family, prefix string) error {
+	err := a.deleteHeadend(vrfID, fam, prefix, bpf.OwnerBGPVPN(a.localASN, ""))
 	if !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
 		return err
 	}
-	if a.clearLegacyVPNHeadend(fam, prefix) {
+	if a.clearLegacyVPNHeadend(vrfID, fam, prefix) {
 		return nil
 	}
 	return err

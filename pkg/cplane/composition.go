@@ -234,8 +234,8 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 	}
 	us := map[string]bpf.HeadendEntry{}
 	for _, u := range out.uplinks {
-		// The uplink's gate is a global VRF entry.
-		if _, ok := keys[bpf.HeadendID{Prefix: u.endpoint + "/32"}]; ok {
+		// The uplink's gate is an entry of the VRF mupGateVRF names.
+		if _, ok := keys[bpf.HeadendID{VRF: u.gate().vrf, Prefix: u.endpoint + "/32"}]; ok {
 			return out, fmt.Errorf("headend trigger conflicts with MUP gate")
 		}
 		if old, ok := us[u.key()]; ok && old != u.entry {

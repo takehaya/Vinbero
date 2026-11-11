@@ -56,17 +56,17 @@ func TestMUPFailedUplinkAndGateRollbackRetainsOneReference(t *testing.T) {
 				ev := bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &r}
 				a.Apply(ev)
 				st := a.mupT2ST[key]
-				if st == nil || !st.gateHeld || st.installedSID != "" || a.mupGateRefs["192.0.2.1/32"] != 1 {
+				if st == nil || !st.gateHeld || st.installedSID != "" || a.mupGateRefs[mupGateKey{prefix: "192.0.2.1/32"}] != 1 {
 					t.Fatalf("rollback state lost: %+v refs=%v", st, a.mupGateRefs)
 				}
 				a.Apply(ev)
-				if a.mupGateRefs["192.0.2.1/32"] != 1 {
+				if a.mupGateRefs[mupGateKey{prefix: "192.0.2.1/32"}] != 1 {
 					t.Fatal("retry acquired another gate reference")
 				}
 				if recoverByWrite {
 					m.failCreate = false
 					a.RetryMUPOwnedCleanup()
-					if st.installedSID != r.SRv6SID || len(m.mupUplink) != 1 || a.mupGateRefs["192.0.2.1/32"] != 1 {
+					if st.installedSID != r.SRv6SID || len(m.mupUplink) != 1 || a.mupGateRefs[mupGateKey{prefix: "192.0.2.1/32"}] != 1 {
 						t.Fatal("retry did not reuse held gate")
 					}
 				}
@@ -99,7 +99,7 @@ func TestMUPReannounceAfterGateOnlyDeleteFailureReinstallsUplink(t *testing.T) {
 	}
 	ev.IsWithdraw = false
 	a.Apply(ev)
-	if len(m.mupUplink) != 1 || a.mupGateRefs["192.0.2.1/32"] != 1 {
+	if len(m.mupUplink) != 1 || a.mupGateRefs[mupGateKey{prefix: "192.0.2.1/32"}] != 1 {
 		t.Fatal("same-SID reannounce skipped missing uplink or doubled reference")
 	}
 	m.failGateDelete = false

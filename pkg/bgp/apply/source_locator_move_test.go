@@ -350,7 +350,7 @@ func TestReconcileTrackedMUPT2STMoved(t *testing.T) {
 	if fh.v4created[labGatePrefix] != gate {
 		t.Error("T2ST gate was written again")
 	}
-	if n := a.mupGateRefs[labGatePrefix]; n != 1 {
+	if n := a.mupGateRefs[mupGateKey{prefix: labGatePrefix}]; n != 1 {
 		t.Errorf("gate references = %d, want 1", n)
 	}
 }

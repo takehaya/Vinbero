@@ -34,6 +34,14 @@ func (f *failingVPNRetirement) DeleteHeadendV6(prefix string, owner bpf.OwnerTag
 	return f.fakeHeadend.DeleteHeadendV6(prefix, owner)
 }
 
+func (f *failingVPNRetirement) DeleteHeadendV4In(v uint32, prefix string, owner bpf.OwnerTag) error {
+	return f.DeleteHeadendV4(fakeHeadendKey(v, prefix), owner)
+}
+
+func (f *failingVPNRetirement) DeleteHeadendV6In(v uint32, prefix string, owner bpf.OwnerTag) error {
+	return f.DeleteHeadendV6(fakeHeadendKey(v, prefix), owner)
+}
+
 func (f *failingVPNRetirement) DeleteEcmpGroup(id uint32, owner bpf.OwnerTag) error {
 	if f.groupErr != nil {
 		if f.dropGroup {
@@ -85,7 +93,7 @@ func TestVPNRetirementFailureReservesGroupUntilCleanup(t *testing.T) {
 					if (len(fh.ecmpGroups[id]) == 0 && !fh.dropGroup) || slices.Contains(a.vpnGroups.freeIDs, id) {
 						t.Fatal("failed retirement released the original group")
 					}
-					if a.vpnGroups.dests[vpnDestKey{family, prefixes[0]}] == nil {
+					if a.vpnGroups.dests[vpnDestKey{family: family, prefix: prefixes[0]}] == nil {
 						t.Fatal("failed retirement lost retry state")
 					}
 					if len(fp.registered[id]) == 0 {
@@ -112,7 +120,7 @@ func TestVPNRetirementFailureReservesGroupUntilCleanup(t *testing.T) {
 					if triggers[prefixes[0]] != nil || len(fh.ecmpGroups[id]) != 0 || len(fp.registered[id]) != 0 {
 						t.Fatal("successful retry left forwarding or probe state")
 					}
-					if a.vpnGroups.dests[vpnDestKey{family, prefixes[0]}] != nil || !slices.Contains(a.vpnGroups.freeIDs, id) {
+					if a.vpnGroups.dests[vpnDestKey{family: family, prefix: prefixes[0]}] != nil || !slices.Contains(a.vpnGroups.freeIDs, id) {
 						t.Fatal("successful cleanup did not release tracking and group ID")
 					}
 					a.Apply(event(2, false))

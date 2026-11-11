@@ -388,6 +388,36 @@ func (f *fakeHeadend) DeleteHeadendV6(p string, requester bpf.OwnerTag) error {
 	return nil
 }
 
+// fakeHeadendKey is the key an entry has in the fake's maps: the bare
+// prefix in the global VRF, "vrf <id> <prefix>" in another.
+func fakeHeadendKey(vrfID uint32, p string) string {
+	return bpf.HeadendID{VRF: vrfID, Prefix: p}.String()
+}
+
+func (f *fakeHeadend) CreateHeadendV4In(v uint32, p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	return f.CreateHeadendV4(fakeHeadendKey(v, p), e, owner)
+}
+
+func (f *fakeHeadend) CreateHeadendV6In(v uint32, p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	return f.CreateHeadendV6(fakeHeadendKey(v, p), e, owner)
+}
+
+func (f *fakeHeadend) DeleteHeadendV4In(v uint32, p string, requester bpf.OwnerTag) error {
+	return f.DeleteHeadendV4(fakeHeadendKey(v, p), requester)
+}
+
+func (f *fakeHeadend) DeleteHeadendV6In(v uint32, p string, requester bpf.OwnerTag) error {
+	return f.DeleteHeadendV6(fakeHeadendKey(v, p), requester)
+}
+
+func (f *fakeHeadend) GetHeadendV4OwnerIn(v uint32, p string) (bpf.OwnerTag, bool, error) {
+	return f.GetHeadendV4Owner(fakeHeadendKey(v, p))
+}
+
+func (f *fakeHeadend) GetHeadendV6OwnerIn(v uint32, p string) (bpf.OwnerTag, bool, error) {
+	return f.GetHeadendV6Owner(fakeHeadendKey(v, p))
+}
+
 // fakeFib records FIB injector calls.
 type fakeFib struct {
 	added   []fib.Route

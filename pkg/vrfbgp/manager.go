@@ -643,13 +643,14 @@ func (m *Manager) emptyForFamilyLocked(fam bgp.Family) bool {
 	return true
 }
 
-// ImportFilterKey summarizes everything the L3VPN import filter decides
-// from for fam: whether EmptyForFamily still default-allows, and the set of
-// import RTs across all bindings. Two calls that return the same key accept
-// and drop exactly the same routes, which is all an L3VPN receive path needs
-// to know, since the VRF a route matches does not change what it installs.
-// A caller compares keys taken before and after a binding change to decide
-// whether routes already received have to be evaluated again.
+// ImportFilterKey summarizes everything the import filter decides from for
+// fam: whether EmptyForFamily still default-allows, and which VRF imports
+// which RT. Two calls that return the same key place every received route
+// in the same VRFs. A caller compares keys taken before and after a binding
+// change to decide whether routes already received have to be evaluated
+// again: an RT moving from one VRF to another, or a second VRF importing an
+// RT another one already imports, changes where routes go even when the
+// union of import RTs stays the same.
 func (m *Manager) ImportFilterKey(fam bgp.Family) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -658,21 +659,60 @@ func (m *Manager) ImportFilterKey(fam bgp.Family) string {
 
 // importFilterKeyLocked is ImportFilterKey under a held m.mu. It decides
 // default-allow with emptyForFamilyLocked and collects RTs with imports, the
-// same predicates EmptyForFamily and MatchImportForFamily apply.
+// same predicates EmptyForFamily and ImportTargetsForFamily apply.
 func (m *Manager) importFilterKeyLocked(fam bgp.Family) string {
 	if m.emptyForFamilyLocked(fam) {
 		return ImportFilterDefaultAllow
 	}
-	var rts []string
+	var pairs []string
 	for _, b := range m.bindings {
 		for _, rt := range b.Families[fam].RouteTargets {
 			if rt.imports() {
-				rts = append(rts, rt.RT)
+				pairs = append(pairs, b.VRFName+"="+rt.RT)
 			}
 		}
 	}
-	slices.Sort(rts)
-	return "import:" + strings.Join(slices.Compact(rts), ",")
+	slices.Sort(pairs)
+	return "import:" + strings.Join(slices.Compact(pairs), ",")
+}
+
+// ImportTarget is one VRF a received route is placed in.
+type ImportTarget struct {
+	Name string
+	ID   uint32
+}
+
+// ImportTargetsForFamily returns every VRF whose binding imports one of rts
+// under fam, by VRF name, and whether fam is still default-allow (no binding
+// declares it with an RT, see EmptyForFamily). Both come from one snapshot
+// of the bindings, so a concurrent Bind cannot make them disagree. A VRF
+// appears once however many of its RTs match. Under default-allow targets is
+// nil: the caller places the route in the global VRF.
+//
+// A binding's VRF always exists (Bind ensures it, and a VRF with a binding
+// cannot be deleted), so a binding whose VRF has no id is skipped rather than
+// placed in the global VRF.
+func (m *Manager) ImportTargetsForFamily(rts []string, fam bgp.Family) (targets []ImportTarget, defaultAllow bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.emptyForFamilyLocked(fam) {
+		return nil, true
+	}
+	for _, b := range m.bindings {
+		for _, rt := range b.Families[fam].RouteTargets {
+			if !rt.imports() || !slices.Contains(rts, rt.RT) {
+				continue
+			}
+			// The id lookup takes vrf.Manager's read lock nested inside
+			// m.mu, as MatchImportForFamily does.
+			if id, ok := m.vrf.IDForName(b.VRFName); ok {
+				targets = append(targets, ImportTarget{Name: b.VRFName, ID: id})
+			}
+			break
+		}
+	}
+	slices.SortFunc(targets, func(a, b ImportTarget) int { return strings.Compare(a.Name, b.Name) })
+	return targets, false
 }
 
 // imports reports whether rt applies in the import direction.

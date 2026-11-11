@@ -426,9 +426,9 @@ func TestBind_EnsuresVRF(t *testing.T) {
 	}
 }
 
-// ImportFilterKey changes exactly when the L3VPN import filter would decide
-// some route differently: default-allow ending or returning, or the union of
-// import RTs growing or shrinking. Which VRF imports an RT does not matter.
+// ImportFilterKey changes exactly when the import filter would place some
+// route differently: default-allow ending or returning, or a VRF starting or
+// stopping to import an RT, even one another VRF imports too.
 func TestImportFilterKey(t *testing.T) {
 	m := NewManager()
 	fam := bgp.FamilyVPNv4
@@ -458,11 +458,11 @@ func TestImportFilterKey(t *testing.T) {
 	bind("vrf-a", exp("65000:1"), imp("65000:2"))
 	step("import RT added", true)
 	bind("vrf-b", imp("65000:2"))
-	step("RT another VRF already imports", false)
+	step("RT another VRF already imports", true)
 	if err := m.Unbind("vrf-a"); err != nil {
 		t.Fatal(err)
 	}
-	step("binding removed, its RT still imported elsewhere", false)
+	step("binding removed, its RT still imported elsewhere", true)
 	bind("vrf-b", exp("65000:2"))
 	step("import RT removed", true)
 	if err := m.Unbind("vrf-b"); err != nil {
@@ -504,19 +504,21 @@ func TestImportFilterHook(t *testing.T) {
 	bind("vrf-a", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1")})
 	bind("vrf-a", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1")}) // unchanged
 	bind("vrf-b", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv4: imp("65000:1"), bgp.FamilyVPNv6: imp("65000:9")})
-	if err := m.Unbind("vrf-a"); err != nil { // vrf-b still imports 65000:1
+	if err := m.Unbind("vrf-a"); err != nil { // vrf-b still imports 65000:1, vrf-a no longer does
 		t.Fatal(err)
 	}
 	if err := m.Unbind("vrf-b"); err != nil {
 		t.Fatal(err)
 	}
 	want := []ImportFilterChange{
-		{bgp.FamilyVPNv4, ImportFilterDefaultAllow, "import:65000:1"},
-		{bgp.FamilyVPNv4, "import:65000:1", "import:65000:1,65000:2"},
-		{bgp.FamilyVPNv4, "import:65000:1,65000:2", "import:65000:1"},
-		{bgp.FamilyVPNv6, ImportFilterDefaultAllow, "import:65000:9"},
-		{bgp.FamilyVPNv4, "import:65000:1", ImportFilterDefaultAllow},
-		{bgp.FamilyVPNv6, "import:65000:9", ImportFilterDefaultAllow},
+		{bgp.FamilyVPNv4, ImportFilterDefaultAllow, "import:vrf-a=65000:1"},
+		{bgp.FamilyVPNv4, "import:vrf-a=65000:1", "import:vrf-a=65000:1,vrf-a=65000:2"},
+		{bgp.FamilyVPNv4, "import:vrf-a=65000:1,vrf-a=65000:2", "import:vrf-a=65000:1"},
+		{bgp.FamilyVPNv4, "import:vrf-a=65000:1", "import:vrf-a=65000:1,vrf-b=65000:1"},
+		{bgp.FamilyVPNv6, ImportFilterDefaultAllow, "import:vrf-b=65000:9"},
+		{bgp.FamilyVPNv4, "import:vrf-a=65000:1,vrf-b=65000:1", "import:vrf-b=65000:1"},
+		{bgp.FamilyVPNv4, "import:vrf-b=65000:1", ImportFilterDefaultAllow},
+		{bgp.FamilyVPNv6, "import:vrf-b=65000:9", ImportFilterDefaultAllow},
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("changes =\n%v\nwant\n%v", got, want)
@@ -558,5 +560,64 @@ func TestManager_BindDoesNotDependOnTheStateFile(t *testing.T) {
 	}
 	if len(store.saved) != 1 || len(store.saved[0].VRFs) != 1 || store.saved[0].VRFs[0].ID != id {
 		t.Errorf("saved %+v, want vrf-a with id %d", store.saved, id)
+	}
+}
+
+// ImportTargetsForFamily returns every VRF that imports one of the route's
+// RTs, once each and in name order, and reports default-allow only while no
+// binding declares the family with an RT.
+func TestImportTargetsForFamily(t *testing.T) {
+	m := NewManager()
+	fam := bgp.FamilyVPNv4
+	bind := func(vrf string, fams map[bgp.Family]FamilyPolicy) {
+		t.Helper()
+		if err := m.Bind(Binding{VRFName: vrf, Families: fams}); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+	}
+	rts := func(dir Direction, rts ...string) FamilyPolicy {
+		var fp FamilyPolicy
+		for _, rt := range rts {
+			fp.RouteTargets = append(fp.RouteTargets, RouteTarget{RT: rt, Direction: dir})
+		}
+		return fp
+	}
+	names := func(ts []ImportTarget) []string {
+		var out []string
+		for _, t := range ts {
+			out = append(out, t.Name)
+		}
+		return out
+	}
+
+	if ts, allow := m.ImportTargetsForFamily([]string{"65000:1"}, fam); !allow || ts != nil {
+		t.Fatalf("fresh manager: targets %v allow %v, want default-allow", ts, allow)
+	}
+	bind("empty", map[bgp.Family]FamilyPolicy{fam: {}})
+	if _, allow := m.ImportTargetsForFamily(nil, fam); !allow {
+		t.Fatal("a family entry with no RT must keep default-allow")
+	}
+	bind("vrf-b", map[bgp.Family]FamilyPolicy{fam: rts(DirectionImport, "65000:1", "65000:2")})
+	bind("vrf-a", map[bgp.Family]FamilyPolicy{fam: rts(DirectionBoth, "65000:1")})
+	bind("export-only", map[bgp.Family]FamilyPolicy{fam: rts(DirectionExport, "65000:1")})
+	bind("other-family", map[bgp.Family]FamilyPolicy{bgp.FamilyVPNv6: rts(DirectionImport, "65000:1")})
+
+	ts, allow := m.ImportTargetsForFamily([]string{"65000:2", "65000:1"}, fam)
+	if allow || !slices.Equal(names(ts), []string{"vrf-a", "vrf-b"}) {
+		t.Fatalf("targets %v allow %v, want [vrf-a vrf-b] once each", names(ts), allow)
+	}
+	for _, target := range ts {
+		if id, _ := m.VRF().IDForName(target.Name); id != target.ID || id == 0 {
+			t.Errorf("%s: id %d, want the VRF's id %d", target.Name, target.ID, id)
+		}
+	}
+	if ts, allow := m.ImportTargetsForFamily([]string{"65000:9"}, fam); allow || len(ts) != 0 {
+		t.Errorf("unmatched route: targets %v allow %v, want none and not default-allow", names(ts), allow)
+	}
+	if ts, _ := m.ImportTargetsForFamily([]string{"65000:2"}, fam); !slices.Equal(names(ts), []string{"vrf-b"}) {
+		t.Errorf("65000:2: targets %v, want [vrf-b]", names(ts))
+	}
+	if ts, allow := m.ImportTargetsForFamily([]string{"65000:1"}, bgp.FamilyVPNv6); allow || !slices.Equal(names(ts), []string{"other-family"}) {
+		t.Errorf("vpnv6: targets %v allow %v, want [other-family]", names(ts), allow)
 	}
 }

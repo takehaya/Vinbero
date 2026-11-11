@@ -68,6 +68,13 @@ func (w replacedLegacyOwner) GetHeadendV4Owner(prefix string) (bpf.OwnerTag, boo
 	return owner, found, err
 }
 
+func (w replacedLegacyOwner) GetHeadendV4OwnerIn(v uint32, prefix string) (bpf.OwnerTag, bool, error) {
+	if v != 0 {
+		return w.Writer.GetHeadendV4OwnerIn(v, prefix)
+	}
+	return w.GetHeadendV4Owner(prefix)
+}
+
 func TestLegacyMigrationDoesNotDeleteReplacementOwner(t *testing.T) {
 	fh := newFakeHeadend()
 	const prefix = "10.0.0.0/24"

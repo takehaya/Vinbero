@@ -298,7 +298,7 @@ func TestSharedMUPGateRetainsOtherOwner(t *testing.T) {
 	p, f := compositionOps(t)
 	builtin := bpf.OwnerBGPMUPGate(65000)
 	mode := uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
-	if err := p.headend.SetGateReferences(AFv4, "192.0.2.1/32", mode, builtin, 1); err != nil {
+	if err := p.headend.SetGateReferences(AFv4, 0, "192.0.2.1/32", mode, builtin, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := putComposition(p, desiredComposition(1)); err != nil {
@@ -311,11 +311,11 @@ func TestSharedMUPGateRetainsOtherOwner(t *testing.T) {
 		t.Fatal("deleted sibling gate")
 	}
 	f.failDel = "192.0.2.1/32"
-	if err := p.headend.SetGateReferences(AFv4, "192.0.2.1/32", mode, builtin, 0); err == nil {
+	if err := p.headend.SetGateReferences(AFv4, 0, "192.0.2.1/32", mode, builtin, 0); err == nil {
 		t.Fatal("delete failure ignored")
 	}
 	f.failDel = ""
-	if err := p.headend.SetGateReferences(AFv4, "192.0.2.1/32", mode, builtin, 0); err != nil {
+	if err := p.headend.SetGateReferences(AFv4, 0, "192.0.2.1/32", mode, builtin, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.v4) != 0 {

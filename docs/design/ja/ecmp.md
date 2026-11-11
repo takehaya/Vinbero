@@ -120,7 +120,7 @@ group を削除し、両方の削除が成功した後に group ID を再利用�
 
 `HeadendGroupService` で group を読めます。`vbctl headend-group list` が group 一覧、`vbctl headend-group get <group-id>` が member の segment list と weight と policy と生死を返します。書き込み API はありません。group は BGP 受信経路が経路の到着に応じて書くので、operator が作るものではないためです。
 
-prefix は group 側に記録されていないため、headend map を走査して `group_id` が一致する trigger エントリから引きます。applier の in-memory 状態に依存しないので、group を誰が書いたかに関わらず同じ答えになり、再起動で applier の状態が消えても引けます。逆に trigger がまだ書かれていない group では prefix が空になり得ます。
+prefix は group 側に記録されていないため、headend map を走査して `group_id` が一致する trigger エントリから引きます。applier の in-memory 状態に依存しないので、group を誰が書いたかに関わらず同じ答えになり、再起動で applier の状態が消えても引けます。逆に trigger がまだ書かれていない group では prefix が空になり得ます。走査はすべての VRF が対象です。global VRF の trigger は prefix だけを、それ以外の VRF の trigger は `10.2.0.0/24 vrf tenant-a` のように VRF 名を付けて表示します (VRF が存在しない vrf_id は `vrf_id=N` と表示します)。
 
 liveness は「prober の報告がまだ無い」状態と「実際に全 path が生きている」状態を区別して出します。data plane はどちらも全 path を使うので挙動は同じですが、なぜトラフィックが動いたのかを調べるときに意味が違うためです。
 
