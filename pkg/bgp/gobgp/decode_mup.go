@@ -103,7 +103,9 @@ func teidToUint32(a netip.Addr) uint32 {
 }
 
 // decodeMUPSegmentID returns the BGP MUP Extended Community segment identifier
-// halves (draft §3.2), or (0, 0) when the community is absent.
+// halves (draft §3.2), or (0, 0) when the community is absent. Only the
+// Direct Segment sub-type (0) counts: GoBGP also decodes the Interwork Segment
+// sub-type into a MUPExtended, and that one does not identify a direct segment.
 func decodeMUPSegmentID(attrs []gobgppkt.PathAttributeInterface) (uint16, uint32) {
 	for _, a := range attrs {
 		ec, ok := a.(*gobgppkt.PathAttributeExtendedCommunities)
@@ -111,7 +113,7 @@ func decodeMUPSegmentID(attrs []gobgppkt.PathAttributeInterface) (uint16, uint32
 			continue
 		}
 		for _, c := range ec.Value {
-			if mup, ok := c.(*gobgppkt.MUPExtended); ok {
+			if mup, ok := c.(*gobgppkt.MUPExtended); ok && mup.SubType == gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG {
 				return mup.SegmentID2, mup.SegmentID4
 			}
 		}

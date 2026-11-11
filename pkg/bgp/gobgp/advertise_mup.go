@@ -138,7 +138,7 @@ func mupExtComms(r bgp.MUPRoute, withSegmentID bool) (gobgppkt.PathAttributeInte
 		return nil, err
 	}
 	if withSegmentID && (r.SegmentID2 != 0 || r.SegmentID4 != 0) {
-		ecs = append(ecs, gobgppkt.NewMUPExtended(r.SegmentID2, r.SegmentID4))
+		ecs = append(ecs, gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG, r.SegmentID2, r.SegmentID4))
 	}
 	if len(ecs) == 0 {
 		return nil, nil

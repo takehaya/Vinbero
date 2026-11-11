@@ -310,7 +310,7 @@ type RouteEvent struct {
 }
 
 // BGPPathCodec identifies the packet codec, including the MUP framing fork.
-const BGPPathCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
+const BGPPathCodec = "gobgp-v4.11.0-mup-draft01/binary-v1"
 
 type EncodedBGPPath struct {
 	Codec         string
