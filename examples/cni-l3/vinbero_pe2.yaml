@@ -1,4 +1,4 @@
-# PE2: the VRF and its BGP binding are declared here, so they survive a
+# PE2: the VRFs and their BGP bindings are declared here, so they survive a
 # daemon restart. The CNI network configuration only names the VRF.
 internal:
   devices: [eth1]
@@ -18,6 +18,8 @@ vrfs:
   entries:
     - name: tenant-a
       table_id: 100
+    - name: tenant-b
+      table_id: 200
 bgp:
   global:
     local_asn: 65100
@@ -43,6 +45,15 @@ bgp:
         vpnv4:
           route_targets:
             - rt: "65000:100"
+              direction: both
+    - vrf_name: tenant-b
+      rd: "65100:12"
+      default_locator: LOC1
+      redistribute: [static]
+      families:
+        vpnv4:
+          route_targets:
+            - rt: "65000:200"
               direction: both
   peers:
     - neighbor: "2001:db8:ff::1"

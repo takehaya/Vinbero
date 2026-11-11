@@ -2,7 +2,8 @@
 # Runs the vinbero CNI plugin the way a container runtime does (CNI_COMMAND
 # and the network configuration on stdin) against two PEs, and checks
 # pod-to-pod traffic over SRv6, the /32 VPNv4 advertisement, and that DEL
-# withdraws the route and detaches the veth.
+# withdraws the route and detaches the veth. A second tenant reuses the
+# first tenant's subnets, down to the addresses, and the two stay apart.
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -83,22 +84,28 @@ eventually() {
     if wait_for "$desc" "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi
 }
 
-# netconf <node>: PE1's network configuration carries the BGP binding, so
-# the first ADD creates the VRF and binds it; PE2's only names the VRF,
-# whose binding comes from vinbero_pe2.yaml.
+# netconf <node> [tenant]: PE1's network configuration carries the BGP
+# binding, so the first ADD creates the VRF and binds it; PE2's only names
+# the VRF, whose binding comes from vinbero_pe2.yaml. tenant-b (table 200,
+# route target 65000:200) has tenant-a's subnets. host-local keeps its
+# leases per network name, so it hands out the same addresses in both, and
+# both networks share the plugin's dataDir.
 netconf() {
-    local node=$1 binding=""
+    local node=$1 tenant=${2:-tenant-a} binding="" table=100 rd="65100:1" rt="65000:100"
+    if [[ "$tenant" == tenant-b ]]; then
+        table=200 rd="65100:11" rt="65000:200"
+    fi
     if [[ "$node" == 1 ]]; then
-        binding='"rd": "65100:1", "rts": [{"family": "vpnv4", "rt": "65000:100", "direction": "both"}], "locator": "LOC1",'
+        binding='"rd": "'$rd'", "rts": [{"family": "vpnv4", "rt": "'$rt'", "direction": "both"}], "locator": "LOC1",'
     fi
     cat <<JSON
 {
   "cniVersion": "1.0.0",
-  "name": "tenant-a",
+  "name": "$tenant",
   "type": "vinbero",
   "server": "127.0.0.1:8084",
-  "vrf": "tenant-a",
-  "tableId": 100,
+  "vrf": "$tenant",
+  "tableId": $table,
   $binding
   "dataDir": "$work/cni-pe$node",
   "ipam": {
@@ -111,10 +118,10 @@ netconf() {
 JSON
 }
 
-# cni <node> <command> <pod>: run the plugin on a PE for a pod netns.
+# cni <node> <command> <pod> [tenant]: run the plugin on a PE for a pod netns.
 cni() {
-    local node=$1 cmd=$2 pod=$3
-    netconf "$node" | ip netns exec "cnil3-pe$node" env \
+    local node=$1 cmd=$2 pod=$3 tenant=${4:-tenant-a}
+    netconf "$node" "$tenant" | ip netns exec "cnil3-pe$node" env \
         CNI_COMMAND="$cmd" CNI_CONTAINERID="$pod" CNI_NETNS="/var/run/netns/$pod" \
         CNI_IFNAME=net1 CNI_PATH="$cni_path" "$cni_path/vinbero"
 }
@@ -127,13 +134,13 @@ pod_ip() {
     jq -r '.ips[0].address | split("/")[0]' "$work/$1.json"
 }
 
-# headend_to <node> <ip>: the PE has an encap entry for ip/32 in tenant-a
-# whose service SID is in the other PE's locator, i.e. it imported the VPNv4
-# route into the VRF its pods' ports classify to, and nothing for it in the
-# global VRF.
+# headend_to <node> <ip> [vrf]: the PE has an encap entry for ip/32 in the
+# VRF (tenant-a by default) whose service SID is in the other PE's locator,
+# i.e. it imported the VPNv4 route into the VRF its pods' ports classify to,
+# and nothing for it in the global VRF.
 headend_to() {
-    local node=$1 ip=$2 other=$((3 - $1))
-    ctl "cnil3-pe$node" --json headend-v4 list --vrf tenant-a |
+    local node=$1 ip=$2 vrf=${3:-tenant-a} other=$((3 - $1))
+    ctl "cnil3-pe$node" --json headend-v4 list --vrf "$vrf" |
         jq -e --arg p "$ip/32" --arg loc "fd00:$other:" \
             'any(.[]?; .trigger_prefix == $p and (.segments[0] | startswith($loc)))' &&
         ctl "cnil3-pe$node" --json headend-v4 list --vrf global |
@@ -145,6 +152,26 @@ no_headend_to() {
     ctl "cnil3-pe$1" --json headend-v4 list --all-vrfs | jq -e --arg p "$2/32" 'all(.[]?; .trigger_prefix != $p)'
 }
 
+# no_headend_in <node> <ip> <vrf>: the VRF has no encap entry for ip/32.
+no_headend_in() {
+    ctl "cnil3-pe$1" --json headend-v4 list --vrf "$3" | jq -e --arg p "$2/32" 'all(.[]?; .trigger_prefix != $p)'
+}
+
+# sid_of <node> <ip> <vrf>: the service SID the VRF encaps ip/32 to.
+sid_of() {
+    ctl "cnil3-pe$1" --json headend-v4 list --vrf "$3" |
+        jq -r --arg p "$2/32" 'first(.[]? | select(.trigger_prefix == $p) | .segments[0]) // empty'
+}
+
+# sids_differ <node> <ip>: tenant-a and tenant-b encap the same /32 to
+# different service SIDs (each to the other PE's End.DT4 of its own VRF).
+sids_differ() {
+    local a b
+    a=$(sid_of "$1" "$2" tenant-a)
+    b=$(sid_of "$1" "$2" tenant-b)
+    [[ -n "$a" && -n "$b" && "$a" != "$b" ]]
+}
+
 device_attached() {
     ctl "cnil3-pe$1" --json device list |
         jq -e --arg n "$2" 'any(.devices[]?; .name == $n and .mode == "generic" and (.config | not))'
@@ -152,20 +179,20 @@ device_attached() {
 
 has_ac() {
     ctl "cnil3-pe$1" --json vrf show |
-        jq -e --arg n "$2" 'any(.vrfs[]? | select(.name == "tenant-a") | .acs[]?; .interface_name == $n)'
+        jq -e --arg n "$2" --arg v "${3:-tenant-a}" 'any(.vrfs[]? | select(.name == $v) | .acs[]?; .interface_name == $n)'
 }
 
 static_route() {
-    ip -n "cnil3-pe$1" -j route show table 100 "$2/32" proto static | jq -e 'length == 1'
+    ip -n "cnil3-pe$1" -j route show table "${3:-100}" "$2/32" proto static | jq -e 'length == 1'
 }
 
 cni_add() {
-    cni "$1" ADD "$2" > "$work/$2.json"
+    cni "$1" ADD "$2" "${3:-tenant-a}" > "$work/$2.json"
 }
 
 bound_with_rd() {
     ctl "cnil3-pe$1" --json vrf-bgp list |
-        jq -e --arg rd "$2" 'any(.[]?; .vrf_name == "tenant-a" and .rd == $rd)'
+        jq -e --arg rd "$2" --arg v "${3:-tenant-a}" 'any(.[]?; .vrf_name == $v and .rd == $rd)'
 }
 
 only_config_device() {
@@ -189,7 +216,7 @@ pod_mtu() {
 }
 
 vrf_table() {
-    ip -n "cnil3-pe$1" -d link show tenant-a | grep -q "vrf table $2"
+    ip -n "cnil3-pe$1" -d link show "${3:-tenant-a}" | grep -q "vrf table $2"
 }
 
 permanent_neigh() {
@@ -202,6 +229,22 @@ has_xdp() {
 
 ping_from() {
     ip netns exec "$1" ping -c 2 -W 2 "$2"
+}
+
+# in_echos <pod>: ICMP echo requests the pod's network namespace received.
+in_echos() {
+    ip netns exec "$1" awk '/^Icmp:/ { if (!c) { for (i = 1; i <= NF; i++) if ($i == "InEchos") c = i } else { print $c; exit } }' /proc/net/snmp
+}
+
+# reaches_only <from> <ip> <pod> <other>: a ping from <from> to ip is
+# answered by <pod>, and <other>, which has the same address in the other
+# tenant, sees none of it.
+reaches_only() {
+    local from=$1 ip=$2 pod=$3 other=$4 pod0 other0
+    pod0=$(in_echos "$pod")
+    other0=$(in_echos "$other")
+    ping_from "$from" "$ip" || return 1
+    (($(in_echos "$pod") > pod0 && $(in_echos "$other") == other0))
 }
 
 echo "=========================================="
@@ -244,14 +287,56 @@ check "pod2 -> pod1b across the PEs" ping_from "$POD2" "$ip1b"
 check "pod1 -> pod1b on the same PE" ping_from "$POD1" "$ip1b"
 check "CHECK pod1" cni 1 CHECK $POD1
 
-# A restart keeps the config binding and re-attaches the veth from the
-# state file; the pod route is still in the VRF table and is advertised
-# again.
+# tenant-b: the same subnets, and the same addresses, in another VRF on
+# both PEs. Each tenant's packets reach only its own pod.
+check "ADD pod1x (tenant-b) on PE1" cni_add 1 $POD1X tenant-b
+check "ADD pod2x (tenant-b) on PE2" cni_add 2 $POD2X tenant-b
+ip1x=$(pod_ip "$POD1X")
+ip2x=$(pod_ip "$POD2X")
+veth1x=$(host_veth "$POD1X")
+echo "pod1x $ip1x ($veth1x), pod2x $ip2x"
+check "pod1x has pod1's address" test "$ip1x" = "$ip1"
+check "pod2x has pod2's address" test "$ip2x" = "$ip2"
+check "PE1 created tenant-b on table 200" vrf_table 1 200 tenant-b
+check "pod1x's /32 is in table 200" static_route 1 "$ip1x" 200
+check "pod1's /32 is still in table 100" static_route 1 "$ip1" 100
+check "pod1x's host veth is an AC of tenant-b" has_ac 1 "$veth1x" tenant-b
+check "PE1 bound tenant-b from the network configuration" bound_with_rd 1 65100:11 tenant-b
+eventually "PE1 imported pod2x's /32 into tenant-b" headend_to 1 "$ip2x" tenant-b
+eventually "PE2 imported pod1x's /32 into tenant-b" headend_to 2 "$ip1x" tenant-b
+check "PE1 encaps the shared /32 to another SID per tenant" sids_differ 1 "$ip2"
+check "PE2 encaps the shared /32 to another SID per tenant" sids_differ 2 "$ip1"
+check "pod1 -> $ip2 reaches tenant-a's pod2 only" reaches_only "$POD1" "$ip2" "$POD2" "$POD2X"
+check "pod1x -> $ip2 reaches tenant-b's pod2x only" reaches_only "$POD1X" "$ip2x" "$POD2X" "$POD2"
+check "pod2x -> $ip1 reaches tenant-b's pod1x only" reaches_only "$POD2X" "$ip1x" "$POD1X" "$POD1"
+check "pod1b -> $ip1 on the same PE reaches tenant-a's pod1 only" reaches_only "$POD1B" "$ip1" "$POD1" "$POD1X"
+check "CHECK pod1x" cni 1 CHECK $POD1X tenant-b
+check "CHECK pod1 beside pod1x" cni 1 CHECK $POD1
+
+# A restart keeps the config bindings and re-attaches the veths from the
+# state file; the pod routes are still in the VRF tables and are advertised
+# again, each in its own VRF.
 stop_pe 2
 start_pe 2
 check "host veth re-attached after restart (PE2)" device_attached 2 "$veth2"
 eventually "PE1 imported pod2's /32 again after the restart" headend_to 1 "$ip2"
+eventually "PE1 imported pod2x's /32 again after the restart" headend_to 1 "$ip2x" tenant-b
 eventually "pod1 -> pod2 after the PE2 restart" ping_from "$POD1" "$ip2"
+check "pod1 -> $ip2 reaches pod2 only after the restart" reaches_only "$POD1" "$ip2" "$POD2" "$POD2X"
+eventually "pod1x -> pod2x after the PE2 restart" ping_from "$POD1X" "$ip2x"
+check "pod1x -> $ip2 reaches pod2x only after the restart" reaches_only "$POD1X" "$ip2x" "$POD2X" "$POD2"
+
+# DEL of a tenant-b pod leaves tenant-a's pod with the same address alone.
+check "DEL pod1x" cni 1 DEL $POD1X tenant-b
+eventually "PE2 withdrew pod1x's /32 from tenant-b" no_headend_in 2 "$ip1x" tenant-b
+check "PE2 still has pod1's /32 in tenant-a" headend_to 2 "$ip1"
+check "pod1's /32 is still in table 100 after pod1x's DEL" static_route 1 "$ip1" 100
+check "tenant-b's lease released" test ! -e "$work/ipam-pe1/tenant-b/$ip1x"
+check "tenant-a's lease of the same address kept" test -e "$work/ipam-pe1/tenant-a/$ip1"
+check "pod2 -> pod1 still works" reaches_only "$POD2" "$ip1" "$POD1" "$POD1X"
+check "DEL pod2x" cni 2 DEL $POD2X tenant-b
+eventually "PE1 withdrew pod2x's /32 from tenant-b" no_headend_in 1 "$ip2x" tenant-b
+check "PE1 still has pod2's /32 in tenant-a" headend_to 1 "$ip2"
 
 check "DEL pod1" cni 1 DEL $POD1
 eventually "PE2 withdrew pod1's /32" no_headend_to 2 "$ip1"
