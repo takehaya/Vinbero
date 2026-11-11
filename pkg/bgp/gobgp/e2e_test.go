@@ -68,6 +68,38 @@ func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool)
 	t.Fatalf("timeout after %s waiting for %s", timeout, what)
 }
 
+// waitSessionEstablished waits until both ends of the test session report it
+// ESTABLISHED: the receiving Session (pe2) and the sending gobgp (pe1).
+//
+// Waiting on the receiver alone is not enough before the sender adds a path.
+// The two FSMs finish the handshake independently, and gobgp sends its
+// initial table to a new peer before it marks that peer established. A path
+// added on the sender in between is too late for the initial table and is
+// not sent as an update either, so the receiver never sees it. Once the
+// sender's ListPeer reports ESTABLISHED, that step is over and an AddPath is
+// sent as a normal update.
+func waitSessionEstablished(t *testing.T, pe2 *gobgp.Session, pe1 *gobgpsrv.BgpServer) {
+	t.Helper()
+	ctx := context.Background()
+	waitFor(t, "BGP session ESTABLISHED on both speakers", 30*time.Second, func() bool {
+		peers, err := pe2.Peers(ctx)
+		if err != nil || len(peers) == 0 {
+			return false
+		}
+		for _, p := range peers {
+			if p.SessionState != "established" {
+				return false
+			}
+		}
+		up, n := true, 0
+		err = pe1.ListPeer(ctx, &gobgpapi.ListPeerRequest{}, func(p *gobgpapi.Peer) {
+			n++
+			up = up && p.GetState().GetSessionState() == gobgpapi.PeerState_SESSION_STATE_ESTABLISHED
+		})
+		return err == nil && n > 0 && up
+	})
+}
+
 // e2eReceive is the data plane produced by the BGP receive pipeline.
 type e2eReceive struct {
 	objs   *bpf.BpfObjects
@@ -152,18 +184,7 @@ func setupVPNv4Receive(t *testing.T) e2eReceive {
 	}
 
 	// --- Wait for the session to come up ---
-	waitFor(t, "BGP session ESTABLISHED", 30*time.Second, func() bool {
-		peers, err := pe2.Peers(ctx)
-		if err != nil {
-			return false
-		}
-		for _, p := range peers {
-			if p.SessionState == "established" {
-				return true
-			}
-		}
-		return false
-	})
+	waitSessionEstablished(t, pe2, pe1)
 
 	// --- PE1 advertises a VPNv4 route with an SRv6 End.DT4 service SID ---
 	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
