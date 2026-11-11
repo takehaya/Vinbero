@@ -57,7 +57,7 @@ func TestSelectorsAndGTP4Builders(t *testing.T) {
 	if err != nil || out.Entry.Segments[0] != "fd00:a:0:1ac:1000:126:0:100" {
 		t.Fatalf("RQI %v %v", out, err)
 	}
-	ext := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 0)})
+	ext := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)})
 	st2 := ST2Selector().Project(entry(bgp.NewMUPType2SessionTransformedRoute(rd(), 56, addr("192.0.2.9"), teid(0xabcdef12)), ext))
 	dsd := DSDSelector().Project(entry(bgp.NewMUPDirectSegmentDiscoveryRoute(rd(), addr("192.0.2.10")), ext, sidAttribute(bgp.END_DT4)))
 	if st2.State != resolve.Present || dsd.State != resolve.Present || st2.Value.TEID != 0xabcdef00 || st2.Value.TEIDBits != 24 || st2.Value.Direct.State != resolve.Present {
@@ -76,10 +76,10 @@ func TestDirectSegmentPresenceAndKinds(t *testing.T) {
 		reason      string
 	}{
 		{"missing", nil, resolve.Missing, "ST2+ISD"},
-		{"zero", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 0)}, resolve.Present, ""},
-		{"duplicate", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 0), bgp.NewMUPExtended(0, 0)}, resolve.Ambiguous, "duplicate"},
-		{"different", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(1, 2), bgp.NewMUPExtended(1, 3)}, resolve.Ambiguous, "duplicate"},
-		{"mixed", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(1, 2), bgp.NewUnknownExtended(bgp.EC_TYPE_MUP, []byte{3})}, resolve.Invalid, "mixed"},
+		{"zero", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)}, resolve.Present, ""},
+		{"duplicate", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0), bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)}, resolve.Ambiguous, "duplicate"},
+		{"different", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 1, 2), bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 1, 3)}, resolve.Ambiguous, "duplicate"},
+		{"mixed", []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 1, 2), bgp.NewUnknownExtended(bgp.EC_TYPE_MUP, []byte{3})}, resolve.Invalid, "mixed"},
 		{"new-direct-format", []bgp.ExtendedCommunityInterface{bgp.NewUnknownExtended(bgp.EC_TYPE_MUP, []byte{1})}, resolve.Invalid, "unsupported"},
 	}
 	for _, tt := range tests {
@@ -216,7 +216,7 @@ func TestDirectRuleUsesTypedSegmentAndUniqueDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ext := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 0)})
+	ext := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)})
 	st := event(t, bgp.NewMUPType2SessionTransformedRoute(rd(), 64, addr("192.0.2.1"), teid(7)), "192.0.2.10", ext)
 	d1 := event(t, bgp.NewMUPDirectSegmentDiscoveryRoute(rd(), addr("192.0.2.2")), "192.0.2.11", ext, sidAttribute(bgp.END_DT4))
 	d2 := d1

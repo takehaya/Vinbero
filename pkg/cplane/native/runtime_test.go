@@ -45,6 +45,10 @@ func (r *recorder) ApplyCommit(uint64) error {
 func (r *recorder) ApplyAbort(uint64) { r.aborts++ }
 
 func configuration(observe bool) []byte {
+	return configurationWithCodec(observe, cplane.BGPPathCodec)
+}
+
+func configurationWithCodec(observe bool, codec string) []byte {
 	var b, ctx wire.Encoder
 	b.Uint(1, 1)
 	payload := `{"context":"mobile","source":"fd00:feed::1","args_offset":7,"observe_only":false}`
@@ -52,7 +56,7 @@ func configuration(observe bool) []byte {
 		payload = strings.Replace(payload, "false", "true", 1)
 	}
 	b.Bytes(2, []byte(payload))
-	b.String(3, cplane.BGPPathCodec)
+	b.String(3, codec)
 	ctx.String(1, "mobile")
 	ctx.String(2, "mup_ipv4")
 	ctx.String(2, "mup_ipv6")

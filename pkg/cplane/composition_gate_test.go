@@ -39,7 +39,7 @@ func TestCompositionBackendSharedGateArbitration(t *testing.T) {
 				t.Fatal("initial forwarding absent")
 			}
 			rt, _ := gp.ParseRouteTarget("65000:7")
-			ext := gp.NewPathAttributeExtendedCommunities([]gp.ExtendedCommunityInterface{rt, gp.NewMUPExtended(0, 0)})
+			ext := gp.NewPathAttributeExtendedCommunities([]gp.ExtendedCommunityInterface{rt, gp.NewMUPExtended(gp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)})
 			n := gp.NewMUPType1SessionTransformedRoute(gp.NewRouteDistinguisherTwoOctetAS(65000, 8), netip.MustParsePrefix("192.0.2.1/32"), netip.MustParseAddr("0.0.1.0"), 9, netip.MustParseAddr("172.16.0.1"), nil)
 			r := nativeInput(t, n, ext)
 			collision := bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, Source: bgp.PathSource{Peer: netip.MustParseAddr(r.Peer)}, MUP: &bgp.MUPRoute{Type: bgp.MUPRouteType(3), RD: "65000:8"}, BGPPath: &bgp.EncodedBGPPath{Codec: r.BgpPath.Codec, AFI: uint16(r.BgpPath.Afi), SAFI: uint8(r.BgpPath.Safi), NLRI: r.BgpPath.Nlri, RouteKey: r.BgpPath.RouteKey, Attributes: r.BgpPath.Attributes}}

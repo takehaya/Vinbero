@@ -280,7 +280,9 @@ func foldTransposedLabel(sid []byte, label uint32, length, offset uint8) bool {
 // decodeRouteTargets returns every route-target extended community on
 // the path, each rendered "as:admin" (e.g. "65000:100"). Non-RT
 // communities (Site-of-Origin etc.) share the same wire types and are
-// distinguished by sub-type.
+// distinguished by sub-type. The BGP MUP Extended Community uses sub-type 2
+// for a Direct Segment identifier with a 4-octet AS, which prints like a
+// 4-octet AS route target, so its type is excluded.
 func decodeRouteTargets(attrs []gobgppkt.PathAttributeInterface) []string {
 	var rts []string
 	for _, a := range attrs {
@@ -289,7 +291,7 @@ func decodeRouteTargets(attrs []gobgppkt.PathAttributeInterface) []string {
 			continue
 		}
 		for _, c := range ec.Value {
-			if _, sub := c.GetTypes(); sub == gobgppkt.EC_SUBTYPE_ROUTE_TARGET {
+			if typ, sub := c.GetTypes(); sub == gobgppkt.EC_SUBTYPE_ROUTE_TARGET && typ != gobgppkt.EC_TYPE_MUP {
 				rts = append(rts, c.String())
 			}
 		}

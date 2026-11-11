@@ -2,7 +2,7 @@
 
 *(English: [README.md](./README.md))*
 
-`vinbero` CNI plugin を container runtime と同じ形で実行します。`CNI_COMMAND` を環境変数で、network configuration を stdin で渡します。2 つの PE namespace で vinberod を動かし、loopback 間に iBGP の VPNv4 session を張ります。session は PE1 だけが張りに行きます (PE2 は `passive`)。空の namespace を pod の代わりに使います (PE1 に `pod1`、`pod1b`、`pod1x`、PE2 に `pod2`、`pod2x`)。IPAM は reference plugin の `host-local` です。
+`vinbero` CNI plugin を container runtime と同じ形で実行します。`CNI_COMMAND` を環境変数で、network configuration を stdin で渡します。2 つの PE namespace で vinberod を動かし、loopback 間に iBGP の VPNv4 session を張ります。空の namespace を pod の代わりに使います (PE1 に `pod1`、`pod1b`、`pod1x`、PE2 に `pod2`、`pod2x`)。IPAM は reference plugin の `host-local` です。
 
 `pod1`、`pod1b`、`pod2` は tenant-a (table 100、route target 65000:100) です。`pod1x` と `pod2x` は tenant-b (table 200、route target 65000:200) で、network configuration には tenant-a と同じ subnet を書きます。host-local は network の名前ごとに lease を持つので、`pod1x` は `pod1` と、`pod2x` は `pod2` と同じアドレスになります。
 

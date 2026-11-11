@@ -255,6 +255,8 @@ For native packet types, import the optional `cplane/gobgppath` package and call
 The returned NLRI and attributes own their data and use `github.com/osrg/gobgp/v4/pkg/packet/bgp` types.
 This adapter does not expose GoBGP server calls or change write permissions.
 The codec is pinned to the host's MUP fork; consumer modules must repeat the GoBGP replacement from the [observer example](../../examples/cplane-bgp-observer/go.mod).
+`cplane.BGPPathCodec` names it (`gobgp-v4.11.0-mup-draft01/binary-v1`), and the host sends its own value in the configure envelope and on every `BGPPath`.
+`DecodeInputConfig` refuses an envelope with another codec, so a guest built with the SDK of another Vinbero version fails `Configure` and must be rebuilt with the SDK and GoBGP replacement of the host's version; `gobgppath.Decode` returns `ErrCodec` for such a path.
 The base SDK remains independent of GoBGP.
 
 Use `Route.BGPKey()` to identify retained inputs.

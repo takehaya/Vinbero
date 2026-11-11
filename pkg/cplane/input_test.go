@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,29 @@ func inputRoute(t *testing.T, rt string) *v1.PluginRoute {
 }
 func inputBatch(r *v1.PluginRoute) *v1.PluginEventBatch {
 	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{Kind: v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE, Sequence: 1, Route: r}}}
+}
+
+// A guest built for another GoBGP packet codec refuses the configuration and
+// says what to do about it.
+func TestInputConfigRejectsOtherCodec(t *testing.T) {
+	const other = "gobgp-v4.7.0-mup-draft01/binary-v1"
+	wire, err := proto.Marshal(&v1.PluginInputConfig{Version: 1, Codec: other,
+		Contexts: []*v1.PluginInputContext{{Name: "mobile", Families: []string{"mup_ipv4"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sdk.DecodeInputConfig(wire, sdk.FeatureBGPPath|sdk.FeatureInputContexts)
+	if err == nil {
+		t.Fatal("configuration with another codec accepted")
+	}
+	for _, want := range []string{other, sdk.BGPPathCodec, "rebuild the plugin"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if sdk.BGPPathCodec != bgp.BGPPathCodec {
+		t.Errorf("SDK codec %q differs from the host's %q", sdk.BGPPathCodec, bgp.BGPPathCodec)
+	}
 }
 func TestInputCatalogAndFiltering(t *testing.T) {
 	policy := compositionPolicy()
@@ -160,7 +184,7 @@ func mupFixtureWithTEID(t *testing.T, value uint32) []bgp.RouteEvent {
 		return gp.NewPathAttributePrefixSID(gp.NewSRv6ServiceTLV(gp.TLVTypeSRv6L3Service, gp.NewSRv6InformationSubTLV(a("fd00:a:0:100::"), b, gp.NewSRv6SIDStructureSubSubTLV(32, 16, 8, 72, 0, 0))))
 	}
 	ec, _ := gp.ParseRouteTarget("65000:7")
-	ext := gp.NewPathAttributeExtendedCommunities([]gp.ExtendedCommunityInterface{ec, gp.NewMUPExtended(0, 0)})
+	ext := gp.NewPathAttributeExtendedCommunities([]gp.ExtendedCommunityInterface{ec, gp.NewMUPExtended(gp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)})
 	ns := []gp.NLRI{gp.NewMUPType1SessionTransformedRoute(rd, p("10.0.0.1/32"), netip.AddrFrom4(teid), 9, a("172.16.0.1"), nil), gp.NewMUPInterworkSegmentDiscoveryRoute(rd, p("172.16.0.0/24")), gp.NewMUPType2SessionTransformedRoute(rd, 64, a("192.0.2.1"), netip.AddrFrom4(teid)), gp.NewMUPDirectSegmentDiscoveryRoute(rd, a("192.0.2.2"))}
 	var out []bgp.RouteEvent
 	for i, n := range ns {

@@ -92,7 +92,7 @@ func parityRoutes(t testing.TB, teid uint32) []*v1.PluginEvent {
 	sid := func(behavior bgp.SRBehavior) bgp.PathAttributeInterface {
 		return bgp.NewPathAttributePrefixSID(bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service, bgp.NewSRv6InformationSubTLV(a("fd00:a:0:100::"), behavior, bgp.NewSRv6SIDStructureSubSubTLV(32, 16, 8, 72, 0, 0))))
 	}
-	direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 0)})
+	direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)})
 	return []*v1.PluginEvent{
 		parityRoute(t, bgp.NewMUPType1SessionTransformedRoute(rd, p("10.0.0.1/32"), netip.AddrFrom4(rawTEID), 9, a("172.16.0.1"), nil)),
 		parityRoute(t, bgp.NewMUPInterworkSegmentDiscoveryRoute(rd, p("172.16.0.0/24")), sid(bgp.ENDM_GTP4E)),

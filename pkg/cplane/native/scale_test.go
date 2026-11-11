@@ -340,8 +340,34 @@ func BenchmarkCompositionScale(b *testing.B) {
 }
 
 func scaleInputSHA(f scaleFixture) string {
+	return inputSHA(configuration(false), f.replay, f.updates[0], f.updates[1])
+}
+
+// frozenScaleCodec is the codec label the frozen scale protocol was recorded
+// with. The label is part of the hashed bytes, so frozenScaleInputSHA puts it
+// back to compare everything else with the recorded digests.
+const frozenScaleCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
+
+func frozenScaleInputSHA(t testing.TB, f scaleFixture) string {
+	t.Helper()
+	relabel := func(raw []byte) []byte {
+		var batch v1.PluginEventBatch
+		if err := proto.Unmarshal(raw, &batch); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range batch.Events {
+			if p := e.GetRoute().GetBgpPath(); p != nil {
+				p.Codec = frozenScaleCodec
+			}
+		}
+		return scaleEvents(t, batch.Events...)
+	}
+	return inputSHA(configurationWithCodec(false, frozenScaleCodec), relabel(f.replay), relabel(f.updates[0]), relabel(f.updates[1]))
+}
+
+func inputSHA(inputs ...[]byte) string {
 	h := sha256.New()
-	for _, raw := range [][]byte{configuration(false), f.replay, f.updates[0], f.updates[1]} {
+	for _, raw := range inputs {
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
 		h.Write(length[:])
@@ -410,7 +436,7 @@ func TestScaleSharedInputsRetainFrozenBytes(t *testing.T) {
 		for _, mode := range []string{"", "shared"} {
 			t.Run(fmt.Sprintf("n%d-%s-b%d-%s", tc.n, tc.change, tc.batch, mode), func(t *testing.T) {
 				f := newScaleFixture(t, tc.n, tc.batch, tc.change, mode)
-				if got := scaleInputSHA(f); got != tc.want {
+				if got := frozenScaleInputSHA(t, f); got != tc.want {
 					t.Fatalf("shared inputs changed: %s, want %s", got, tc.want)
 				}
 			})

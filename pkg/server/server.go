@@ -7,8 +7,6 @@ import (
 	"sync"
 
 	"go.uber.org/zap"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -382,14 +380,19 @@ func (s *Server) Setup() {
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	addr := s.cfg.InternalConfig.Server.BindAddress
-	s.server = &http.Server{
-		Addr: addr,
-		// Use h2c to support HTTP/2 without TLS (required for gRPC)
-		Handler: h2c.NewHandler(s.mux, &http2.Server{}),
-	}
+	s.server = newHTTPServer(addr, s.mux)
 
 	s.logger.Info("Starting Connect RPC server", zap.String("address", addr))
 	return s.server.ListenAndServe()
+}
+
+// newHTTPServer serves HTTP/1.1 and HTTP/2 without TLS. gRPC clients use
+// HTTP/2 with prior knowledge; Connect clients may use either.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Server{Addr: addr, Handler: h, Protocols: protocols}
 }
 
 // Shutdown gracefully shuts down the server

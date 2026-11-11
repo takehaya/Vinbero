@@ -56,12 +56,8 @@ bgp:
             - rt: "65000:200"
               direction: both
   peers:
-    # Only PE1 dials. With both ends dialing, the two connections can cross
-    # and each end keep a different one; the first session then never
-    # leaves OpenConfirm (no hold timer runs there before it has been up).
     - neighbor: "2001:db8:ff::1"
       peer_asn: 65100
-      passive: true
       hold_time_sec: 30
       keepalive_sec: 10
       families: [vpnv4]

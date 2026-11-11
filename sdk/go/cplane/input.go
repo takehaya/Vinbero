@@ -66,8 +66,11 @@ func DecodeInputConfig(data []byte, features uint64) (InputConfig, error) {
 	if err != nil {
 		return InputConfig{}, err
 	}
-	if out.Version != 1 || out.Codec != BGPPathCodec {
-		return InputConfig{}, fmt.Errorf("unsupported input version %d or codec %q", out.Version, out.Codec)
+	if out.Version != 1 {
+		return InputConfig{}, fmt.Errorf("unsupported input version %d", out.Version)
+	}
+	if out.Codec != BGPPathCodec {
+		return InputConfig{}, fmt.Errorf("host BGP path codec %q differs from this guest's %q: rebuild the plugin with the SDK of the host's Vinbero version", out.Codec, BGPPathCodec)
 	}
 	seen := make(map[string]bool)
 	for _, ctx := range out.Contexts {

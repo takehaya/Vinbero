@@ -1205,6 +1205,9 @@ JSON で設定する専用例は `custom-cdplane-behavior`（version `1`）で�
 key があれば `"slot": 0` のような値もそのまま検証します。
 headend scope が IPv6 prefix だけなら IPv4 の経路を一切受け付けず、その旨を log に 1 行出して起動します。
 observer は設定を解釈せず BGPPath 機能を確認し、MUP と EVPN は context input envelope を decode します。
+BGPPath は host が固定した GoBGP の packet codec（`gobgp-v4.11.0-mup-draft01/binary-v1`）で符号化します。
+SDK の `DecodeInputConfig` は codec が自分と異なる envelope を拒否するので、別の版の SDK で build した plugin は `Configure` で失敗します。
+その場合は host の Vinbero と同じ版の SDK と GoBGP の replace で plugin を build し直します。
 JSON の厳密な decode は SDK の `jsonconfig` が共通に提供し、両 backend で同じ結果になります。
 
 ## plugin を書く

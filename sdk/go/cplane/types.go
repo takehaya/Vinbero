@@ -47,7 +47,7 @@ type Route struct {
 }
 
 // BGPPathCodec names the pinned GoBGP packet format, including its MUP fork.
-const BGPPathCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
+const BGPPathCodec = "gobgp-v4.11.0-mup-draft01/binary-v1"
 
 // FeatureBGPPath says that received BGP events carry the full packet model.
 const FeatureBGPPath uint64 = 1

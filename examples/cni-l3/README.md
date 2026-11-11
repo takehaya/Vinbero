@@ -5,9 +5,9 @@
 Runs the `vinbero` CNI plugin the way a container runtime does, with
 `CNI_COMMAND` in the environment and the network configuration on stdin.
 Two PE namespaces run vinberod with an iBGP VPNv4 session between their
-loopbacks, which only PE1 dials (`passive` on PE2); empty namespaces stand
-in for pods: `pod1`, `pod1b` and `pod1x` on PE1, `pod2` and `pod2x` on PE2.
-IPAM is the reference `host-local` plugin.
+loopbacks; empty namespaces stand in for pods: `pod1`, `pod1b` and `pod1x`
+on PE1, `pod2` and `pod2x` on PE2. IPAM is the reference `host-local`
+plugin.
 
 `pod1`, `pod1b` and `pod2` are in tenant-a (table 100, route target
 65000:100). `pod1x` and `pod2x` are in tenant-b (table 200, route target
