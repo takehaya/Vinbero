@@ -450,8 +450,12 @@ func neighManaged(n netlink.Neigh) bool { return n.FlagsExt&netlink.NTF_EXT_MANA
 //     included;
 //   - when a device with a next hop of the set gets its carrier back, the
 //     unresolved managed entries on it are marked managed again, which makes
-//     the kernel probe them at once instead of at its next periodic re-probe
-//     of managed entries (DELAY_PROBE_TIME, 5 s by default);
+//     the kernel probe a failed one at once instead of at its next periodic
+//     re-probe of managed entries (interval_probe_time_ms, 5 s by default).
+//     The mark does not restart an entry that is still probing: it resolves
+//     at its next solicitation, within the retransmit interval (1 s by
+//     default), or fails then, and a second mark carrierRecheck later
+//     probes it;
 //   - at start and every resweep, a full walk of the maps (EncapDestinations)
 //     picks up writers that do not notify (a plugin writing a map directly,
 //     the data plane's End.AD cache) and drops destinations no entry uses
@@ -474,6 +478,9 @@ type EncapNeighKeeper struct {
 	// subRoutes subscribes to route, nexthop-object and ip-rule changes
 	// (shared with the BUM devmap sync); tests replace it.
 	subRoutes func() (*routeSub, error)
+	// carrierRecheck is the delay of the second mark after a carrier came
+	// back; tests shorten it.
+	carrierRecheck time.Duration
 
 	// pmu guards what the events ask for; Notify takes only it, so a map
 	// writer never waits for a pass.
@@ -518,6 +525,13 @@ const encapNeighResweep = 30 * time.Second
 // pass.
 const encapNeighDebounce = 200 * time.Millisecond
 
+// encapNeighCarrierRecheck is when, after a carrier came back, the
+// unresolved entries on the device are marked a second time. An entry whose
+// last solicitation went out before the carrier came back fails one
+// retransmit interval (1 s by default) after it; the first mark found it
+// still probing and did nothing.
+const encapNeighCarrierRecheck = 1100 * time.Millisecond
+
 // NewEncapNeighKeeper builds a keeper over mapOps.
 func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighKeeper {
 	if logger == nil {
@@ -530,6 +544,8 @@ func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighK
 		logger:  logger.Named("encap.neigh"),
 		resweep: encapNeighResweep,
 		wake:    make(chan struct{}, 1),
+
+		carrierRecheck: encapNeighCarrierRecheck,
 		pending: map[netip.Addr]struct{}{},
 		relink:  map[uint32]struct{}{},
 		dests:   map[netip.Addr][]NeighTarget{},
@@ -838,10 +854,11 @@ func (k *EncapNeighKeeper) applyLocked(relink map[uint32]struct{}) error {
 }
 
 // remarkAfterCarrier reports whether a managed entry is marked managed again
-// when its device gets its carrier back: one that is not resolved (failed,
-// or still probing from while the carrier was down) and carries the flags
-// the mark sets, so that the mark changes nothing but makes the kernel probe
-// it at once. A resolved entry is left alone: the mark would reset it.
+// when its device gets its carrier back: one that is not resolved and
+// carries the flags the mark sets, so that the mark changes nothing but its
+// state. The kernel keeps the state of a managed entry it marks and probes
+// it (neigh_event_send): a failed one at once, one still probing at its next
+// solicitation as before. A resolved entry needs nothing.
 func remarkAfterCarrier(n netlink.Neigh) bool {
 	return n.State&nudValid == 0 && n.Flags&netlink.NTF_EXT_LEARNED != 0 && neighManaged(n)
 }
@@ -909,6 +926,10 @@ func (k *EncapNeighKeeper) rescuePLocked(dsts []netip.Addr) bool {
 		_, collected := k.walkNotified[d]
 		if queued || collected {
 			k.dests[d] = k.dropped[d]
+			for _, t := range k.dests[d] {
+				k.wanted[t.key()] = struct{}{}
+				k.wantedDevs[t.Ifindex] = struct{}{}
+			}
 			rescued = true
 		}
 	}
@@ -1020,6 +1041,12 @@ func (k *EncapNeighKeeper) subscribeLinks() (*linkSub, error) {
 	return s, nil
 }
 
+// drain reads ch until it is closed.
+func drain[T any](ch <-chan T) {
+	for range ch {
+	}
+}
+
 // carrierState is what the link updates said of each device's carrier.
 type carrierState map[int32]bool
 
@@ -1043,14 +1070,19 @@ func (c carrierState) cameUp(u netlink.LinkUpdate) bool {
 
 func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *neighSub, links *linkSub) {
 	defer func() {
+		// The subscriptions' readers block on a full channel; drained, they
+		// see the closed socket and end.
 		if routes != nil {
 			close(routes.done)
+			go drain(routes.routes)
 		}
 		if neighs != nil {
 			close(neighs.done)
+			go drain(neighs.updates)
 		}
 		if links != nil {
 			close(links.done)
+			go drain(links.updates)
 		}
 	}()
 	carrier := carrierState{}
@@ -1131,9 +1163,13 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 				carrier = carrierState{}
 				continue
 			}
-			if carrier.cameUp(u) && k.hasNexthopsOn(int(u.Index)) {
-				k.carrierUp(uint32(u.Index))
+			if ifindex := u.Index; carrier.cameUp(u) && k.hasNexthopsOn(int(ifindex)) {
+				k.carrierUp(uint32(ifindex))
 				pending()
+				time.AfterFunc(k.carrierRecheck, func() {
+					k.carrierUp(uint32(ifindex))
+					k.poke()
+				})
 			}
 		case <-k.wake:
 			pending()

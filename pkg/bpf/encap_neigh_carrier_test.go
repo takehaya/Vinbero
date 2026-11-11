@@ -2,11 +2,14 @@ package bpf
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net"
 	"net/netip"
 	"runtime"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,20 +62,69 @@ func runKeeperHere(t *testing.T, k *EncapNeighKeeper) {
 }
 
 // carrierFlapBound is how soon after the uplink gets its carrier back its
-// next hop must be resolved and the encapsulation redirected again. A pass
-// waits for the debounce (200 ms) and the gateway answers at once; the
-// kernel's own re-probe of a failed managed entry comes up to
-// DELAY_PROBE_TIME (5 s) later, and an entry nothing makes again after the
-// flush waits for the resweep (30 s).
+// failed next hop must be resolved and the encapsulation redirected again.
+// A pass waits for the debounce (200 ms) and the gateway answers at once;
+// the kernel's own re-probe of a failed managed entry comes up to
+// interval_probe_time_ms (5 s) later, and an entry nothing makes again after
+// the flush waits for the resweep (30 s).
 const carrierFlapBound = time.Second
+
+// flapTimeline records, for a failure message, what the keeper and the
+// neighbour entry did since the carrier came back.
+type flapTimeline struct {
+	mu    sync.Mutex
+	start time.Time
+	lines []string
+}
+
+func (l *flapTimeline) reset() {
+	l.mu.Lock()
+	l.start, l.lines = time.Now(), nil
+	l.mu.Unlock()
+}
+
+func (l *flapTimeline) add(format string, args ...any) {
+	l.mu.Lock()
+	l.lines = append(l.lines, fmt.Sprintf("%7.3fs ", time.Since(l.start).Seconds())+fmt.Sprintf(format, args...))
+	l.mu.Unlock()
+}
+
+func (l *flapTimeline) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
+// noTentativeAddrs waits until no address in the namespace is tentative: a
+// finished DAD adds a local route, and the route change would make the
+// keeper re-resolve, and so make a flushed entry again, by chance.
+func noTentativeAddrs(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		addrs, err := netlink.AddrList(nil, netlink.FAMILY_V6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tentative := slices.ContainsFunc(addrs, func(a netlink.Addr) bool { return a.Flags&unix.IFA_F_TENTATIVE != 0 })
+		if !tentative {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("addresses still tentative after 10s: %v", addrs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
 
 // A device that loses its carrier flushes its neighbours, managed ones
 // included. The keeper makes the uplink's next hop managed again while the
 // carrier is down, whoever made the entry managed first (the keeper itself,
-// or the BUM flood slots before the keeper started), and once the carrier is
-// back marks it managed again so the kernel probes it at once: the tenant
-// encapsulation, which cannot solicit the gateway by itself, is redirected
-// again within carrierFlapBound of every flap.
+// or the BUM flood slots before the keeper started); the entry fails while
+// the carrier stays down. Once the carrier is back the keeper marks it
+// managed again, so the kernel probes it at once: the tenant encapsulation,
+// which cannot solicit the gateway by itself, is redirected again within
+// carrierFlapBound of every flap.
 func TestEncapNeighKeeperCarrierFlap(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -99,23 +151,34 @@ func TestEncapNeighKeeperCarrierFlap(t *testing.T) {
 				ret, out := h.runOnIfindex(slices.Clone(pkt), e.tenant)
 				return ret == XDP_REDIRECT && slices.Equal(out[0:6], []byte(e.peerMAC))
 			}
-			resolved := func() bool {
+			var tl flapTimeline
+			lastState := ""
+			// entry samples the next hop's entry and records a change.
+			entry := func() (netlink.Neigh, bool) {
 				n, ok := e.neigh(e.gw1)
-				return ok && neighManaged(n) && n.State&(netlink.NUD_REACHABLE|netlink.NUD_STALE|netlink.NUD_DELAY|netlink.NUD_PROBE) != 0
+				st := "absent"
+				if ok {
+					st = fmt.Sprintf("state %#x managed %v", n.State, neighManaged(n))
+				}
+				if st != lastState {
+					tl.add("entry %s", st)
+					lastState = st
+				}
+				return n, ok
 			}
-			// recovers waits up to limit for the next hop to be managed and
-			// resolved and the encapsulation redirected, and returns how long
-			// that took.
-			recovers := func(limit time.Duration) (time.Duration, bool) {
+			// waitEntry waits up to limit for the next hop's entry to be
+			// managed and in one of states, and returns how long that took.
+			waitEntry := func(limit time.Duration, states int, alsoRedirected bool) (time.Duration, bool) {
 				start := time.Now()
 				for time.Since(start) < limit {
-					if resolved() && redirected() {
+					if n, ok := entry(); ok && neighManaged(n) && n.State&states != 0 && (!alsoRedirected || redirected()) {
 						return time.Since(start), true
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
 				return time.Since(start), false
 			}
+			const resolvedStates = netlink.NUD_REACHABLE | netlink.NUD_STALE | netlink.NUD_DELAY | netlink.NUD_PROBE
 
 			if tc.bumFirst {
 				key := neighKey(uint32(e.uplink), e.gw1)
@@ -125,6 +188,12 @@ func TestEncapNeighKeeperCarrierFlap(t *testing.T) {
 				}
 			}
 			k := NewEncapNeighKeeper(h.mapOps, zap.NewNop())
+			set := k.neigh.setManaged
+			k.neigh.setManaged = func(ifindex uint32, ip net.IP) error {
+				err := set(ifindex, ip)
+				tl.add("keeper marks %s managed: %v", ip, err)
+				return err
+			}
 			runKeeperHere(t, k)
 			k.mu.Lock()
 			_, owned := k.owned[neighKey(uint32(e.uplink), e.gw1)]
@@ -132,25 +201,27 @@ func TestEncapNeighKeeperCarrierFlap(t *testing.T) {
 			if owned == tc.bumFirst {
 				t.Fatalf("keeper owns the entry: %v, want %v", owned, !tc.bumFirst)
 			}
-			if _, ok := recovers(10 * time.Second); !ok {
+			if _, ok := waitEntry(10*time.Second, resolvedStates, true); !ok {
 				t.Fatal("the next hop is not resolved before the first flap")
 			}
+			noTentativeAddrs(t)
 
 			for cycle := 1; cycle <= 3; cycle++ {
+				tl.reset()
 				e.setPeerLink(t, false)
-				// Long enough for the kernel to give up on the entry
-				// (3 probes, 1 s apart): it is FAILED when the carrier
-				// comes back.
-				time.Sleep(4 * time.Second)
-				if n, ok := e.neigh(e.gw1); !ok || !neighManaged(n) {
-					t.Errorf("cycle %d: with the carrier down the next hop's entry is %+v (present %v), want it made managed again", cycle, n, ok)
+				tl.add("carrier down")
+				// The kernel flushes the entry, the keeper makes it again
+				// and it fails after 3 probes 1 s apart.
+				if _, ok := waitEntry(10*time.Second, netlink.NUD_FAILED, false); !ok {
+					t.Errorf("cycle %d: with the carrier down the next hop's entry was not made managed again and failed:\n%s", cycle, &tl)
 				}
+				tl.reset()
 				e.setPeerLink(t, true)
-				took, ok := recovers(35 * time.Second)
+				tl.add("carrier up")
+				took, ok := waitEntry(35*time.Second, resolvedStates, true)
 				t.Logf("cycle %d: resolved and redirected %v after the carrier came back", cycle, took.Round(time.Millisecond))
 				if !ok || took > carrierFlapBound {
-					n, _ := e.neigh(e.gw1)
-					t.Errorf("cycle %d: recovered %v (in %v), want within %v; entry %+v", cycle, ok, took.Round(time.Millisecond), carrierFlapBound, n)
+					t.Errorf("cycle %d: recovered %v in %v, want within %v:\n%s", cycle, ok, took.Round(time.Millisecond), carrierFlapBound, &tl)
 				}
 			}
 		})
@@ -179,6 +250,7 @@ func TestEncapNeighKeeperWatchFlushAndCarrier(t *testing.T) {
 	bumNeighClaims.Store(bum, struct{}{})
 	t.Cleanup(func() { bumNeighClaims.Delete(bum) })
 	k, _ := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
+	k.carrierRecheck = 2 * encapNeighDebounce
 	if _, err := k.Sweep(); err != nil {
 		t.Fatal(err)
 	}
@@ -277,8 +349,10 @@ func TestEncapNeighKeeperWatchFlushAndCarrier(t *testing.T) {
 	start()
 	link(4, unix.IFF_UP|unix.IFF_LOWER_UP) // no next hop on it
 	expect("a carrier on a device without next hops")
+	// Marked at once and once more after carrierRecheck: the fake leaves
+	// the entry unresolved.
 	link(2, unix.IFF_UP|unix.IFF_LOWER_UP)
-	expect("the carrier back on device 2", "2/fe80::1")
+	expect("the carrier back on device 2", "2/fe80::1", "2/fe80::1")
 	link(2, unix.IFF_UP|unix.IFF_LOWER_UP) // still up: not a change
 	expect("a link update with the carrier still up")
 	stop()
@@ -302,6 +376,37 @@ func TestEncapNeighKeeperWatchFlushAndCarrier(t *testing.T) {
 	}
 	if _, mine := k.owned[bum]; mine {
 		t.Errorf("the keeper still owns the BUM next hop")
+	}
+}
+
+// A destination a sweep drops and a write puts back before its next hop is
+// given back keeps its device among those whose carrier the watch follows.
+func TestEncapNeighKeeperRescueKeepsDevice(t *testing.T) {
+	a, b := netip.MustParseAddr("fc00:1::1"), netip.MustParseAddr("fc00:2::1")
+	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2), route("fc00:2::/32", "fe80::2", 3)}
+	walk := []netip.Addr{a, b}
+	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{}}
+	k, _ := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	walk = []netip.Addr{a}
+	if _, err := k.Sweep(); err != nil { // the first miss
+		t.Fatal(err)
+	}
+	k.res.dumpMain = func() ([]netlink.Route, error) {
+		k.Notify([]netip.Addr{b}) // written after the walk
+		return main, nil
+	}
+	if _, err := k.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.dests[b]; !ok {
+		t.Fatal("fc00:2::1 was not put back")
+	}
+	if !k.hasNexthopsOn(3) || !k.keepsNeigh(3, net.ParseIP("fe80::2")) {
+		t.Errorf("after the rescue the watch does not follow device 3 (%v) or its next hop (%v)",
+			k.hasNexthopsOn(3), k.keepsNeigh(3, net.ParseIP("fe80::2")))
 	}
 }
 
