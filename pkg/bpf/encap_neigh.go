@@ -444,7 +444,14 @@ func neighManaged(n netlink.Neigh) bool { return n.FlagsExt&netlink.NTF_EXT_MANA
 //   - a map write hands it the destinations it wrote (SetEncapChangeHook),
 //     and only a destination not yet in the set is resolved;
 //   - a route, nexthop-object or ip-rule change re-resolves the set;
-//   - a deleted neighbour entry the keeper holds is made managed again;
+//   - a deleted neighbour entry of a next hop in the set, or of one the
+//     keeper made, is made managed again, whoever made it managed first: a
+//     device that loses its carrier flushes its neighbours, managed ones
+//     included;
+//   - when a device with a next hop of the set gets its carrier back, the
+//     unresolved managed entries on it are marked managed again, which makes
+//     the kernel probe them at once instead of at its next periodic re-probe
+//     of managed entries (DELAY_PROBE_TIME, 5 s by default);
 //   - at start and every resweep, a full walk of the maps (EncapDestinations)
 //     picks up writers that do not notify (a plugin writing a map directly,
 //     the data plane's End.AD cache) and drops destinations no entry uses
@@ -453,7 +460,8 @@ func neighManaged(n netlink.Neigh) bool { return n.FlagsExt&netlink.NTF_EXT_MANA
 // A next hop no destination uses any more is given back: the managed entry
 // the keeper made is deleted. Entries that were static (permanent, noarp),
 // already managed when the keeper first saw them, or kept for the BUM flood
-// slots are left alone. Each pass reads the neighbour table once per
+// slots are left alone. An entry the keeper made again after a flush is its
+// own, unless the BUM flood slots hold it. Each pass reads the neighbour table once per
 // device and family.
 type EncapNeighKeeper struct {
 	walk    func() ([]netip.Addr, error)
@@ -473,6 +481,7 @@ type EncapNeighKeeper struct {
 	pending map[netip.Addr]struct{} // written, not yet resolved
 	reroute bool                    // routes changed: re-resolve the set
 	rekeep  bool                    // a kept entry was deleted
+	relink  map[uint32]struct{}     // devices whose carrier came back
 	// walkNotified collects what is written while a sweep runs, from the
 	// start of its walk to the end of its releases (nil when no sweep
 	// runs): the sweep keeps it whatever the walk saw.
@@ -494,6 +503,10 @@ type EncapNeighKeeper struct {
 	beforeReleaseDel func(NeighTarget)
 	// owned are the next hops whose managed entry this keeper made.
 	owned map[string]NeighTarget
+	// wanted and wantedDevs are the next hops of the set and their
+	// devices, as of the last pass; the watch reads them.
+	wanted     map[string]struct{}
+	wantedDevs map[uint32]struct{}
 	// warned holds what was logged, so a lasting condition logs once.
 	warned map[string]string
 }
@@ -518,6 +531,7 @@ func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighK
 		resweep: encapNeighResweep,
 		wake:    make(chan struct{}, 1),
 		pending: map[netip.Addr]struct{}{},
+		relink:  map[uint32]struct{}{},
 		dests:   map[netip.Addr][]NeighTarget{},
 		missed:  map[netip.Addr]int{},
 		owned:   map[string]NeighTarget{},
@@ -540,15 +554,30 @@ func (k *EncapNeighKeeper) Notify(dsts []netip.Addr) {
 	k.poke()
 }
 
+// keeperEvents is what the events since the last pass asked for.
+type keeperEvents struct {
+	pending         map[netip.Addr]struct{}
+	reroute, rekeep bool
+	relink          map[uint32]struct{}
+}
+
 // takeEvents returns and clears what the events since the last pass asked
 // for.
-func (k *EncapNeighKeeper) takeEvents() (pending map[netip.Addr]struct{}, reroute, rekeep bool) {
+func (k *EncapNeighKeeper) takeEvents() keeperEvents {
 	k.pmu.Lock()
 	defer k.pmu.Unlock()
-	pending, reroute, rekeep = k.pending, k.reroute, k.rekeep
+	ev := keeperEvents{pending: k.pending, reroute: k.reroute, rekeep: k.rekeep, relink: k.relink}
 	k.pending = map[netip.Addr]struct{}{}
+	k.relink = map[uint32]struct{}{}
 	k.reroute, k.rekeep = false, false
-	return pending, reroute, rekeep
+	return ev
+}
+
+// carrierUp queues a re-probe of the unresolved next hops on ifindex.
+func (k *EncapNeighKeeper) carrierUp(ifindex uint32) {
+	k.pmu.Lock()
+	k.relink[ifindex] = struct{}{}
+	k.pmu.Unlock()
 }
 
 func (k *EncapNeighKeeper) setFlag(reroute, rekeep bool) {
@@ -598,9 +627,10 @@ const sweepsBeforeRelease = 2
 // delete is resolved again by the next pass (releaseLocked). A walk that failed
 // part-way may add destinations, never remove them.
 func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
-	// Events from before the walk are covered by it; writes from its start
-	// to the end of the releases are collected.
-	_, _, _ = k.takeEvents()
+	// Events from before the walk are covered by it, except a carrier that
+	// came back; writes from its start to the end of the releases are
+	// collected.
+	relink := k.takeEvents().relink
 	k.pmu.Lock()
 	k.walkNotified = map[netip.Addr]struct{}{}
 	k.pmu.Unlock()
@@ -634,7 +664,7 @@ func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
 	}
 	if werr != nil {
 		// Incomplete: add and re-resolve what was seen, keep the rest.
-		err := k.resolveLocked(list, false)
+		err := k.resolveLocked(list, false, relink)
 		return k.targetsLocked(), errors.Join(werr, err)
 	}
 	for d := range k.dests {
@@ -652,40 +682,41 @@ func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
 		}
 		k.dropped[d] = k.dests[d]
 	}
-	err := k.resolveLocked(list, true)
+	err := k.resolveLocked(list, true, relink)
 	return k.targetsLocked(), err
 }
 
 // pass runs what the events since the last pass asked for.
 func (k *EncapNeighKeeper) pass() error {
-	pending, reroute, rekeep := k.takeEvents()
+	ev := k.takeEvents()
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	var dsts []netip.Addr
-	if reroute {
+	if ev.reroute {
 		for d := range k.dests {
 			dsts = append(dsts, d)
 		}
 	}
-	for d := range pending {
+	for d := range ev.pending {
 		delete(k.missed, d) // written again: in use
 		if _, known := k.dests[d]; !known {
 			dsts = append(dsts, d)
 		}
 	}
-	if len(dsts) == 0 && !rekeep {
+	if len(dsts) == 0 && !ev.rekeep && len(ev.relink) == 0 {
 		return nil
 	}
 	if len(dsts) == 0 {
-		return k.applyLocked()
+		return k.applyLocked(ev.relink)
 	}
-	return k.resolveLocked(dsts, false)
+	return k.resolveLocked(dsts, false, ev.relink)
 }
 
 // resolveLocked resolves dsts and merges them into the set: replace makes
 // dsts the whole set (a destination not in it is dropped), otherwise they
-// are added. Then the neighbour entries are brought in line.
-func (k *EncapNeighKeeper) resolveLocked(dsts []netip.Addr, replace bool) error {
+// are added. Then the neighbour entries are brought in line (applyLocked,
+// with relink).
+func (k *EncapNeighKeeper) resolveLocked(dsts []netip.Addr, replace bool, relink map[uint32]struct{}) error {
 	resolved, nhObject, rerr := k.res.resolve(dsts)
 	if resolved == nil {
 		k.warnOnce("resolve", "cannot resolve the next hops of encapsulation destinations", rerr)
@@ -707,20 +738,26 @@ func (k *EncapNeighKeeper) resolveLocked(dsts []netip.Addr, replace bool) error 
 			k.dests[d] = ts
 		}
 	}
-	return errors.Join(rerr, k.applyLocked())
+	return errors.Join(rerr, k.applyLocked(relink))
 }
 
 // applyLocked makes every next hop of the set managed and gives back the
-// owned ones no destination uses, reading each device's neighbours once.
-func (k *EncapNeighKeeper) applyLocked() error {
+// owned ones no destination uses, reading each device's neighbours once. On
+// the devices in relink, whose carrier came back, it marks the unresolved
+// managed entries managed again (remarkAfterCarrier).
+func (k *EncapNeighKeeper) applyLocked(relink map[uint32]struct{}) error {
 	wanted := map[string]NeighTarget{}
 	for _, ts := range k.dests {
 		for _, t := range ts {
 			wanted[t.key()] = t
 		}
 	}
+	k.wanted = make(map[string]struct{}, len(wanted))
+	k.wantedDevs = map[uint32]struct{}{}
 	byDev := map[neighGroup][]NeighTarget{}
-	for _, t := range wanted {
+	for key, t := range wanted {
+		k.wanted[key] = struct{}{}
+		k.wantedDevs[t.Ifindex] = struct{}{}
 		g := neighGroup{int(t.Ifindex), ipFamily(t.IP)}
 		byDev[g] = append(byDev[g], t)
 	}
@@ -755,8 +792,19 @@ func (k *EncapNeighKeeper) applyLocked() error {
 		}
 		for _, t := range ts {
 			key := t.key()
-			if n, exists := dump[t.IP.String()]; exists && (neighStatic(n) || neighManaged(n)) {
-				continue // static, or already managed (by this keeper or someone else)
+			n, exists := dump[t.IP.String()]
+			if exists && neighStatic(n) {
+				continue
+			}
+			if exists && neighManaged(n) {
+				// Already managed, by this keeper or someone else.
+				if _, up := relink[t.Ifindex]; up && remarkAfterCarrier(n) {
+					if err := k.neigh.setManaged(t.Ifindex, t.IP); err != nil {
+						k.logger.Debug("cannot re-probe an encapsulation next hop after its carrier came back",
+							zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP), zap.Error(err))
+					}
+				}
+				continue
 			}
 			if err := k.neigh.setManaged(t.Ifindex, t.IP); err != nil {
 				k.warnOnce("keep "+key, "cannot keep an encapsulation next hop resolved", err,
@@ -788,6 +836,20 @@ func (k *EncapNeighKeeper) applyLocked() error {
 	}
 	return errors.Join(errs...)
 }
+
+// remarkAfterCarrier reports whether a managed entry is marked managed again
+// when its device gets its carrier back: one that is not resolved (failed,
+// or still probing from while the carrier was down) and carries the flags
+// the mark sets, so that the mark changes nothing but makes the kernel probe
+// it at once. A resolved entry is left alone: the mark would reset it.
+func remarkAfterCarrier(n netlink.Neigh) bool {
+	return n.State&nudValid == 0 && n.Flags&netlink.NTF_EXT_LEARNED != 0 && neighManaged(n)
+}
+
+// nudValid is the kernel's NUD_VALID: the states with a usable link-layer
+// address.
+const nudValid = netlink.NUD_PERMANENT | netlink.NUD_NOARP | netlink.NUD_REACHABLE |
+	netlink.NUD_PROBE | netlink.NUD_STALE | netlink.NUD_DELAY
 
 // neighGroup is one device and family, the unit of a neighbour list.
 type neighGroup struct{ ifindex, family int }
@@ -872,31 +934,58 @@ func (k *EncapNeighKeeper) targetsLocked() []NeighTarget {
 	return out
 }
 
-func (k *EncapNeighKeeper) isOwned(ifindex int, ip net.IP) bool {
+// keepsNeigh reports whether a deleted entry is to be made again: the next
+// hop is in the set, whoever made its entry, or the keeper made it.
+func (k *EncapNeighKeeper) keepsNeigh(ifindex int, ip net.IP) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	_, ok := k.owned[neighKey(uint32(ifindex), ip)]
+	key := neighKey(uint32(ifindex), ip)
+	_, wanted := k.wanted[key]
+	_, owned := k.owned[key]
+	return wanted || owned
+}
+
+// hasNexthopsOn reports whether a next hop of the set is on ifindex.
+func (k *EncapNeighKeeper) hasNexthopsOn(ifindex int) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	_, ok := k.wantedDevs[uint32(ifindex)]
 	return ok
 }
 
-// Run sweeps once and then follows writes, route changes, deleted entries
-// and the resweep until ctx ends. It returns after the first sweep; the
-// watch runs in the background.
+// Run sweeps once and then follows writes, route changes, deleted entries,
+// carrier changes and the resweep until ctx ends. It returns after the first
+// sweep; the watch runs in the background.
 func (k *EncapNeighKeeper) Run(ctx context.Context) error {
 	if _, err := k.Sweep(); err != nil {
 		k.logger.Warn("initial encapsulation next-hop sweep incomplete", zap.Error(err))
 	}
+	routes, neighs, links, err := k.subscribe()
+	if err != nil {
+		return err
+	}
+	go k.watch(ctx, routes, neighs, links)
+	return nil
+}
+
+// subscribe opens the subscriptions the watch follows.
+func (k *EncapNeighKeeper) subscribe() (*routeSub, *neighSub, *linkSub, error) {
 	routes, err := k.subRoutes()
 	if err != nil {
-		return fmt.Errorf("subscribe to route updates: %w", err)
+		return nil, nil, nil, fmt.Errorf("subscribe to route updates: %w", err)
 	}
 	neighs, err := k.subscribeNeighs()
 	if err != nil {
 		close(routes.done)
-		return err
+		return nil, nil, nil, err
 	}
-	go k.watch(ctx, routes, neighs)
-	return nil
+	links, err := k.subscribeLinks()
+	if err != nil {
+		close(routes.done)
+		close(neighs.done)
+		return nil, nil, nil, err
+	}
+	return routes, neighs, links, nil
 }
 
 type neighSub struct {
@@ -915,7 +1004,44 @@ func (k *EncapNeighKeeper) subscribeNeighs() (*neighSub, error) {
 	return s, nil
 }
 
-func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *neighSub) {
+type linkSub struct {
+	updates chan netlink.LinkUpdate
+	done    chan struct{}
+}
+
+func (k *EncapNeighKeeper) subscribeLinks() (*linkSub, error) {
+	s := &linkSub{updates: make(chan netlink.LinkUpdate, 256), done: make(chan struct{})}
+	if err := netlink.LinkSubscribeWithOptions(s.updates, s.done, netlink.LinkSubscribeOptions{
+		ErrorCallback: func(err error) { k.logger.Warn("link subscription failed", zap.Error(err)) },
+	}); err != nil {
+		close(s.done)
+		return nil, fmt.Errorf("subscribe to link updates: %w", err)
+	}
+	return s, nil
+}
+
+// carrierState is what the link updates said of each device's carrier.
+type carrierState map[int32]bool
+
+// cameUp records u and reports whether its device got its carrier back: it
+// is up with a carrier (IFF_UP and IFF_LOWER_UP) and was not, or was not
+// seen yet.
+func (c carrierState) cameUp(u netlink.LinkUpdate) bool {
+	if u.Family == unix.AF_BRIDGE {
+		return false // a bridge port's own message
+	}
+	ifindex := u.Index
+	if u.Header.Type == unix.RTM_DELLINK {
+		delete(c, ifindex)
+		return false
+	}
+	up := u.Flags&unix.IFF_UP != 0 && u.Flags&unix.IFF_LOWER_UP != 0
+	was, seen := c[ifindex]
+	c[ifindex] = up
+	return up && (!seen || !was)
+}
+
+func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *neighSub, links *linkSub) {
 	defer func() {
 		if routes != nil {
 			close(routes.done)
@@ -923,7 +1049,11 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 		if neighs != nil {
 			close(neighs.done)
 		}
+		if links != nil {
+			close(links.done)
+		}
 	}()
+	carrier := carrierState{}
 	resweep := time.NewTicker(k.resweep)
 	defer resweep.Stop()
 	timer := time.NewTimer(encapNeighDebounce)
@@ -977,8 +1107,32 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 				pending()
 				continue
 			}
-			if u.Type == unix.RTM_DELNEIGH && k.isOwned(u.LinkIndex, u.IP) {
+			if u.Type == unix.RTM_DELNEIGH && k.keepsNeigh(u.LinkIndex, u.IP) {
 				k.setFlag(false, true)
+				pending()
+			}
+		case u, ok := <-links.updates:
+			if !ok {
+				// Carrier changes may be lost; the kernel's periodic
+				// re-probe of managed entries still covers them.
+				close(links.done)
+				links = nil
+				for links == nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+					var err error
+					if links, err = k.subscribeLinks(); err != nil {
+						k.logger.Warn("link resubscribe failed; retrying", zap.Error(err))
+					}
+				}
+				carrier = carrierState{}
+				continue
+			}
+			if carrier.cameUp(u) && k.hasNexthopsOn(int(u.Index)) {
+				k.carrierUp(uint32(u.Index))
 				pending()
 			}
 		case <-k.wake:

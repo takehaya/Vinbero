@@ -91,7 +91,11 @@ type encapNeighEnv struct {
 	uplink   int
 	peerMAC  net.HardwareAddr
 	gw1, gw2 net.IP
+	peer     *netlink.Handle // the gateway's namespace
 }
+
+// encapNeighGwAddrs are the gateway's addresses (gw1, gw2).
+var encapNeighGwAddrs = []string{"fd00:e::2/64", "fd00:e::3/64"}
 
 func newEncapNeighEnv(t *testing.T) *encapNeighEnv {
 	t.Helper()
@@ -123,22 +127,13 @@ func newEncapNeighEnv(t *testing.T) *encapNeighEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ph.Close()
+	t.Cleanup(ph.Close)
 	gwLink, err = ph.LinkByName("eneigh-gw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &encapNeighEnv{gw1: net.ParseIP("fd00:e::2"), gw2: net.ParseIP("fd00:e::3"), peerMAC: gwLink.Attrs().HardwareAddr}
-	for _, a := range []string{"fd00:e::2/64", "fd00:e::3/64"} {
-		addr, _ := netlink.ParseAddr(a)
-		addr.Flags = unix.IFA_F_NODAD
-		if err := ph.AddrAdd(gwLink, addr); err != nil {
-			t.Fatalf("peer address %s: %v", a, err)
-		}
-	}
-	if err := ph.LinkSetUp(gwLink); err != nil {
-		t.Fatal(err)
-	}
+	e := &encapNeighEnv{gw1: net.ParseIP("fd00:e::2"), gw2: net.ParseIP("fd00:e::3"), peerMAC: gwLink.Attrs().HardwareAddr, peer: ph}
+	e.setPeerLink(t, true)
 
 	up, err := netlink.LinkByName("eneigh-up")
 	if err != nil {
@@ -182,6 +177,34 @@ func newEncapNeighEnv(t *testing.T) *encapNeighEnv {
 	return e
 }
 
+// setPeerLink takes the gateway's end of the uplink up or down, which gives
+// the uplink its carrier or takes it away. Going up, the gateway's addresses
+// are added (again): an IPv6 admin down drops them (keep_addr_on_down=0),
+// where a real router keeps them.
+func (e *encapNeighEnv) setPeerLink(t *testing.T, up bool) {
+	t.Helper()
+	l, err := e.peer.LinkByName("eneigh-gw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !up {
+		if err := e.peer.LinkSetDown(l); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := e.peer.LinkSetUp(l); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range encapNeighGwAddrs {
+		addr, _ := netlink.ParseAddr(a)
+		addr.Flags = unix.IFA_F_NODAD
+		if err := e.peer.AddrReplace(l, addr); err != nil {
+			t.Fatalf("peer address %s: %v", a, err)
+		}
+	}
+}
+
 func (e *encapNeighEnv) routeSIDsVia(t *testing.T, gw net.IP) {
 	t.Helper()
 	_, sids, _ := net.ParseCIDR("fc00:e00::/32")
@@ -191,13 +214,19 @@ func (e *encapNeighEnv) routeSIDsVia(t *testing.T, gw net.IP) {
 }
 
 func (e *encapNeighEnv) hasNeigh(ip net.IP) bool {
+	_, ok := e.neigh(ip)
+	return ok
+}
+
+// neigh is the uplink's neighbour entry for ip.
+func (e *encapNeighEnv) neigh(ip net.IP) (netlink.Neigh, bool) {
 	neighs, _ := netlink.NeighList(e.uplink, netlink.FAMILY_V6)
 	for _, n := range neighs {
 		if n.IP.Equal(ip) {
-			return true
+			return n, true
 		}
 	}
-	return false
+	return netlink.Neigh{}, false
 }
 
 // neighCount is the number of global unicast neighbour entries on the
@@ -699,9 +728,10 @@ func TestEncapNeighKeeperResubscribes(t *testing.T) {
 	}
 	first := newSub()
 	neighs := &neighSub{updates: make(chan netlink.NeighUpdate), done: make(chan struct{})}
+	links := &linkSub{updates: make(chan netlink.LinkUpdate), done: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go k.watch(ctx, first, neighs)
+	go k.watch(ctx, first, neighs, links)
 
 	waitFor := func(what string, cond func() bool) {
 		t.Helper()
