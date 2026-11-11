@@ -114,7 +114,7 @@ Vinbero の lookup は次のように分かれます。印が立った family �
 | 同じ lookup で、入口の vrf_id が 0 以外 (tenant VRF の AC) | 同上 | `DIRECT \| TBID` (main table) | たどらない |
 | 同じ lookup で、TBID を使えない場合 | 上の vrf_id が 0 以外の経路すべて | 0 | たどる |
 | IPv6 の転送 | End、End.T、uN、uT、End.B6、End.M.GTP6.D と .E、IPv6 の decap 後の転送 (End.DT6 など)、service proxy の転送、BUM の複製と uplink probe (XDP と tc) | 0 | たどる |
-| IPv6 の隣接解決 (`endpoint_resolve_adjacency()`) | End.X、uA、End.X 系の USD | 0 | たどる |
+| IPv6 の隣接解決 | End.X、uA、End.X 系の USD | 0 | たどる |
 | IPv4 の転送 (`srv6_fib_lookup_and_update_v4()`) | End.DT4 など decap 後の IPv4、End.M.GTP4.E | 0 | たどる |
 
 TBID を使えないのは、kernel が `BPF_FIB_LOOKUP_TBID` を受け付けない場合、起動時の確認が失敗した場合、`internal.bpf.fib_lookup_tbid: "off"` の場合です。End.DT4 / DT6 / DT46 と End.T / uT は、SID に VRF を指定していればその VRF device を ifindex にして引き、VRF の table へは l3mdev rule が向けます。VRF を指定していない End.DT4 / DT6 / DT46 は入口の interface で引きます。
