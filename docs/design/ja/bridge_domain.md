@@ -134,6 +134,10 @@ headend（H.Encaps.L2）側は、顧客ポートで直接XDPが処理するた�
 
 bridgeは `VrfService/VrfBridgeAttach` APIで、VRF オブジェクトの L2 facet として作成します ([vrf.md](vrf.md) 参照)。APIを呼ぶとnetlinkでbridgeを作成し、member interfaceをenslaveし、owning VRF に facet として記録し、FDBWatcherにも自動登録します。1 つの bd_id はちょうど 1 つの VRF に属します。
 
+### bridge の L3 role と host stack
+
+bridge domain の bridge は L2 専用です。IP アドレスも gateway も持たせないでください。bridge device には host の IP 入力経路があり、bridge の port に入った機器 (CNI L2 の pod など) が bridge の MAC 宛にフレームを送ると host stack に届きます。forwarding が有効だと、別 PE の SID 宛や node のアドレス宛のフレームが underlay へ出たり local 配送されたりして、tenant の分離が崩れます。これは「VRF device に enslave されていない AC」の一例です ([vrf.md](vrf.md#local-sid-と-ac))。bridge を tenant の VRF device に enslave しない構成では、bridge device の IP 入力を両 family とも塞いでください (`disable_ipv6`、`ipv4.*.forwarding=0`、`rp_filter=1`、`arp_ignore=8` など)。CNI L2 mode はこれを pod の attach 時に自動で設定し、CHECK で検証します。設定の一覧と理由は [cni.md](cni.md#bridge-に-l3-の役割を持たせない-host-stack-の分離) を参照してください。
+
 ## MAC学習の仕組み
 
 ### ローカル学習で顧客ポートのMACを記録する

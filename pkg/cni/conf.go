@@ -15,6 +15,10 @@ import (
 const (
 	// ModeL3 routes the pod address as a /32 in the VRF (L3VPN).
 	ModeL3 = "l3"
+	// ModeL2 attaches the pod to an EVPN bridge domain: the pod gets an
+	// on-link address and reaches the other nodes' pods of the same network
+	// over an SRv6 L2 segment (End.DT2U/DT2M, MAC routes over BGP).
+	ModeL2 = "l2"
 
 	defaultServer     = "http://127.0.0.1:8080"
 	defaultDeviceMode = "generic"
@@ -23,6 +27,9 @@ const (
 	// defaultMTU leaves room for the outer IPv6 header (40 bytes) and an
 	// SRH carrying one SID (8 + 16 bytes) on a 1500-byte underlay.
 	defaultMTU = 1500 - 40 - (8 + 16)
+	// defaultMTUL2 leaves room, on top of the L3 headroom, for the inner
+	// Ethernet header (14 bytes) that H.Encaps.L2 carries.
+	defaultMTUL2 = defaultMTU - 14
 )
 
 // RouteTarget is one route target of the VRF's BGP binding.
@@ -41,9 +48,17 @@ type NetConf struct {
 	Server string `json:"server,omitempty"`
 	Mode   string `json:"mode,omitempty"`
 	// VRF and TableID name the kernel VRF the pod joins. The VRF is created
-	// when missing; an existing one must use the same table.
+	// when missing; an existing one must use the same table. TableID is for
+	// the L3 kernel-device facet; an L2 bridge domain has no routing table,
+	// so it must not be set in L2 mode.
 	VRF     string `json:"vrf"`
 	TableID uint32 `json:"tableId"`
+
+	// Bridge and BdID name the pre-declared bridge domain the pod joins in
+	// L2 mode. The bridge and its bd_id are declared in the node's vinberod
+	// config; the plugin never creates or destroys them.
+	Bridge string `json:"bridge,omitempty"`
+	BdID   uint32 `json:"bdId,omitempty"`
 
 	// RD, RTs and Locator describe the VRF's BGP binding. When set, the
 	// plugin creates the binding if the VRF has none. When omitted, the
@@ -81,7 +96,11 @@ func ParseConf(data []byte) (*NetConf, error) {
 		c.DeviceMode = defaultDeviceMode
 	}
 	if c.MTU == 0 {
-		c.MTU = defaultMTU
+		if c.Mode == ModeL2 {
+			c.MTU = defaultMTUL2
+		} else {
+			c.MTU = defaultMTU
+		}
 	}
 	if c.DataDir == "" {
 		c.DataDir = defaultDataDir
@@ -96,20 +115,16 @@ func (c *NetConf) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if c.Mode != ModeL3 {
-		return fmt.Errorf("mode %q is not supported (only %q)", c.Mode, ModeL3)
+	switch c.Mode {
+	case ModeL3, ModeL2:
+	default:
+		return fmt.Errorf("mode %q is not supported (only %q or %q)", c.Mode, ModeL3, ModeL2)
 	}
 	if err := validIfname(c.VRF); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
 	if c.VRF == "global" {
 		return fmt.Errorf("vrf: %q is reserved for the underlay", c.VRF)
-	}
-	switch c.TableID {
-	case 0:
-		return fmt.Errorf("tableId is required")
-	case 253, 254, 255:
-		return fmt.Errorf("tableId %d is a reserved kernel table", c.TableID)
 	}
 	if c.IPAM.Type == "" {
 		return fmt.Errorf("ipam.type is required")
@@ -121,6 +136,39 @@ func (c *NetConf) validate() error {
 	}
 	if c.MTU < 68 || c.MTU > 65535 {
 		return fmt.Errorf("mtu %d out of range (68..65535)", c.MTU)
+	}
+	if c.Mode == ModeL2 {
+		return c.validateL2()
+	}
+	return c.validateL3()
+}
+
+// validateL3 checks the L3-mode fields: a routing table and an optional
+// VPNv4/VPNv6 binding.
+func (c *NetConf) validateL3() error {
+	if c.Bridge != "" || c.BdID != 0 {
+		return fmt.Errorf("bridge and bdId are only for mode %q", ModeL2)
+	}
+	switch c.TableID {
+	case 0:
+		return fmt.Errorf("tableId is required")
+	case 253, 254, 255:
+		return fmt.Errorf("tableId %d is a reserved kernel table", c.TableID)
+	}
+	return c.validateBinding()
+}
+
+// validateL2 checks the L2-mode fields: a pre-declared bridge domain and an
+// optional EVPN binding. The bridge domain has no routing table.
+func (c *NetConf) validateL2() error {
+	if c.TableID != 0 {
+		return fmt.Errorf("tableId is not used in mode %q (the bridge domain has no routing table)", ModeL2)
+	}
+	if err := validIfname(c.Bridge); err != nil {
+		return fmt.Errorf("bridge: %w", err)
+	}
+	if c.BdID == 0 || c.BdID > 65535 {
+		return fmt.Errorf("bdId %d out of range (1..65535)", c.BdID)
 	}
 	return c.validateBinding()
 }
@@ -138,8 +186,11 @@ func (c *NetConf) validateBinding() error {
 		return fmt.Errorf("rd, rts and locator must be set together")
 	}
 	for i, rt := range c.RTs {
-		switch rt.Family {
-		case "vpnv4", "vpnv6":
+		switch {
+		case c.Mode == ModeL2 && rt.Family == "evpn":
+		case c.Mode != ModeL2 && (rt.Family == "vpnv4" || rt.Family == "vpnv6"):
+		case c.Mode == ModeL2:
+			return fmt.Errorf("rts[%d]: family %q: want \"evpn\" in mode %q", i, rt.Family, ModeL2)
 		default:
 			return fmt.Errorf("rts[%d]: family %q: want \"vpnv4\" or \"vpnv6\"", i, rt.Family)
 		}

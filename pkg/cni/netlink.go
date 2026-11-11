@@ -57,6 +57,36 @@ type Netops interface {
 	DeleteVeth(hostIf string) error
 	CheckPod(p PodConfig) error
 	CheckHost(h HostConfig) error
+
+	// --- L2 mode ---
+	// LinkUp brings a host interface up; a missing one is an error.
+	LinkUp(ifname string) error
+	// ConfigurePodL2 puts the pod address on the pod interface on-link (the
+	// whole prefix, no /32, no gateway) and brings it up. IPv6 and ARP ride
+	// the bridge domain, so no neighbour entry is written.
+	ConfigurePodL2(p PodL2Config) error
+	// HardenBridge closes every path from a pod port into the host stack
+	// through the bridge-domain bridge (see bridgeHardening). Idempotent.
+	HardenBridge(bridge string) error
+	// CheckBridgeHardening verifies HardenBridge is in effect.
+	CheckBridgeHardening(bridge string) error
+	// AddStaticFDB adds a permanent static FDB entry for the pod MAC on the
+	// host veth, so the pod's MAC is advertised as an EVPN RT2 even before
+	// the pod sends a frame. Idempotent.
+	AddStaticFDB(hostIf string, mac net.HardwareAddr) error
+	// DelStaticFDB removes it; a missing entry or interface succeeds.
+	DelStaticFDB(hostIf string, mac net.HardwareAddr) error
+	CheckPodL2(p PodL2Config) error
+	// CheckL2Host verifies the host veth is a member of the bridge domain's
+	// bridge.
+	CheckL2Host(hostIf, bridge string) error
+}
+
+// PodL2Config is the pod side of an L2 attachment.
+type PodL2Config struct {
+	Netns   string
+	IfName  string
+	Address netip.Prefix // configured on-link (the whole prefix)
 }
 
 // kernelNetops implements Netops with netlink handles, one per namespace,

@@ -22,6 +22,11 @@ type Binding struct {
 	RTs         []RouteTarget
 	Locator     string
 	MaxPrefixes uint32
+	// Redistribute is the redistribution list the binding must carry. L3
+	// mode sets ["static"] (the pod /32s are redistributed as VPNv4); L2
+	// mode leaves it nil (EVPN RT2 comes from MAC learning, not a route
+	// table).
+	Redistribute []string
 }
 
 // Daemon is the part of the vinberod API the plugin drives. Every call is
@@ -31,8 +36,8 @@ type Daemon interface {
 	// the same table; another table is an error.
 	EnsureVRF(ctx context.Context, name string, tableID uint32) error
 	// EnsureBinding binds the VRF when it has no binding yet. An existing
-	// binding is kept; it must use the same RD and redistribute static
-	// routes.
+	// binding is kept; it must use the same RD and the binding's
+	// redistribution list.
 	EnsureBinding(ctx context.Context, b Binding) error
 	AddAC(ctx context.Context, vrf, ifname string) error
 	RemoveAC(ctx context.Context, vrf, ifname string) error
@@ -40,6 +45,23 @@ type Daemon interface {
 	// DetachDevice succeeds when the device is not attached.
 	DetachDevice(ctx context.Context, ifname string) error
 	DeviceAttached(ctx context.Context, ifname string) (bool, error)
+
+	// --- L2 mode ---
+	// EnsureBridgeDomain verifies that the VRF carries the pre-declared
+	// bridge facet with the given bd_id. The plugin never creates or
+	// destroys a bridge domain, so a missing or mismatched facet is an
+	// error the operator fixes in the node's vinberod config.
+	EnsureBridgeDomain(ctx context.Context, vrf, bridge string, bdID uint32) error
+	AddBridgeMember(ctx context.Context, vrf, ifname string) error
+	// RemoveBridgeMember succeeds when the port is not a member.
+	RemoveBridgeMember(ctx context.Context, vrf, ifname string) error
+	// CreateL2Circuit registers the port as a BD circuit (headend_l2 with
+	// bd_id; source and segments come from the peer, so they are omitted).
+	CreateL2Circuit(ctx context.Context, ifname string, bdID uint32) error
+	// DeleteL2Circuit succeeds when the circuit is already gone.
+	DeleteL2Circuit(ctx context.Context, ifname string) error
+	// L2CircuitPresent reports whether the port has a BD circuit for bd_id.
+	L2CircuitPresent(ctx context.Context, ifname string, bdID uint32) (bool, error)
 }
 
 // rpcDaemon talks to vinberod over Connect RPC, like vbctl. Each RPC gets its
@@ -50,6 +72,7 @@ type rpcDaemon struct {
 	vrf     vinberov1connect.VrfServiceClient
 	vrfBgp  vinberov1connect.VrfBgpServiceClient
 	device  vinberov1connect.DeviceServiceClient
+	hl2     vinberov1connect.HeadendL2ServiceClient
 	timeout time.Duration
 }
 
@@ -64,6 +87,7 @@ func NewDaemon(serverURL string) Daemon {
 		vrf:     vinberov1connect.NewVrfServiceClient(c, serverURL),
 		vrfBgp:  vinberov1connect.NewVrfBgpServiceClient(c, serverURL),
 		device:  vinberov1connect.NewDeviceServiceClient(c, serverURL),
+		hl2:     vinberov1connect.NewHeadendL2ServiceClient(c, serverURL),
 		timeout: rpcTimeout,
 	}
 }
@@ -139,7 +163,7 @@ func (d *rpcDaemon) EnsureBinding(ctx context.Context, b Binding) error {
 			VrfName:        b.VRF,
 			Rd:             b.RD,
 			DefaultLocator: b.Locator,
-			Redistribute:   []string{"static"},
+			Redistribute:   b.Redistribute,
 			MaxPrefixes:    b.MaxPrefixes,
 			Families:       families,
 		}},
@@ -164,8 +188,10 @@ func checkBinding(cur *v1.VrfBgpBinding, want Binding) error {
 	if cur.GetDefaultLocator() != want.Locator {
 		return fmt.Errorf("vrf %s is already bound with locator %q, the network configuration says %q", want.VRF, cur.GetDefaultLocator(), want.Locator)
 	}
-	if !slices.Contains(cur.GetRedistribute(), "static") {
-		return fmt.Errorf("vrf %s is bound without redistribute static, so pod routes would not be advertised", want.VRF)
+	for _, r := range want.Redistribute {
+		if !slices.Contains(cur.GetRedistribute(), r) {
+			return fmt.Errorf("vrf %s is bound without redistribute %s, so pod routes would not be advertised", want.VRF, r)
+		}
 	}
 	if want.MaxPrefixes != 0 && cur.GetMaxPrefixes() != want.MaxPrefixes {
 		return fmt.Errorf("vrf %s is already bound with maxPrefixes %d, the network configuration says %d", want.VRF, cur.GetMaxPrefixes(), want.MaxPrefixes)
@@ -265,5 +291,105 @@ func (d *rpcDaemon) DeviceAttached(ctx context.Context, ifname string) (bool, er
 	}
 	return slices.ContainsFunc(resp.Msg.GetDevices(), func(dev *v1.Device) bool {
 		return dev.GetName() == ifname
+	}), nil
+}
+
+// EnsureBridgeDomain verifies the pre-declared bridge facet is on the VRF
+// with the configured bd_id. The plugin does not create bridge domains, so a
+// missing or mismatched facet is a node-configuration error.
+func (d *rpcDaemon) EnsureBridgeDomain(ctx context.Context, vrf, bridge string, bdID uint32) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	show, err := d.vrf.VrfShow(ctx, connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		return fmt.Errorf("VrfShow: %w", err)
+	}
+	for _, v := range show.Msg.GetVrfs() {
+		if v.GetName() != vrf {
+			continue
+		}
+		br := v.GetBridge()
+		if br == nil {
+			return fmt.Errorf("vrf %s has no bridge domain; declare it in the vinberod config (vrfs.entries[].bridge)", vrf)
+		}
+		if br.GetName() != bridge {
+			return fmt.Errorf("vrf %s has bridge %q, the network configuration says %q", vrf, br.GetName(), bridge)
+		}
+		if br.GetBdId() != bdID {
+			return fmt.Errorf("vrf %s bridge %s has bd_id %d, the network configuration says %d", vrf, bridge, br.GetBdId(), bdID)
+		}
+		return nil
+	}
+	return fmt.Errorf("vrf %s does not exist; declare it and its bridge domain in the vinberod config", vrf)
+}
+
+func (d *rpcDaemon) AddBridgeMember(ctx context.Context, vrf, ifname string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	_, err := d.vrf.VrfBridgeMemberAdd(ctx, connect.NewRequest(&v1.VrfBridgeMemberAddRequest{
+		VrfName: vrf, InterfaceName: ifname,
+	}))
+	if err != nil {
+		return fmt.Errorf("VrfBridgeMemberAdd %s/%s: %w", vrf, ifname, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) RemoveBridgeMember(ctx context.Context, vrf, ifname string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	_, err := d.vrf.VrfBridgeMemberRemove(ctx, connect.NewRequest(&v1.VrfBridgeMemberRemoveRequest{
+		VrfName: vrf, InterfaceName: ifname,
+	}))
+	// A port that is gone, or not a member, succeeds (see the RPC contract).
+	if err != nil && connect.CodeOf(err) != connect.CodeNotFound {
+		return fmt.Errorf("VrfBridgeMemberRemove %s/%s: %w", vrf, ifname, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) CreateL2Circuit(ctx context.Context, ifname string, bdID uint32) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	resp, err := d.hl2.HeadendL2Create(ctx, connect.NewRequest(&v1.HeadendL2CreateRequest{
+		HeadendL2S: []*v1.HeadendL2{{InterfaceName: ifname, VlanId: 0, BdId: bdID}},
+	}))
+	if err != nil {
+		return fmt.Errorf("HeadendL2Create %s bd %d: %w", ifname, bdID, err)
+	}
+	if err := opErrors(resp.Msg.GetErrors()); err != nil {
+		return fmt.Errorf("HeadendL2Create %s bd %d: %w", ifname, bdID, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) DeleteL2Circuit(ctx context.Context, ifname string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	resp, err := d.hl2.HeadendL2Delete(ctx, connect.NewRequest(&v1.HeadendL2DeleteRequest{
+		Targets: []*v1.HeadendL2DeleteTarget{{InterfaceName: ifname, VlanId: 0}},
+	}))
+	if err != nil {
+		return fmt.Errorf("HeadendL2Delete %s: %w", ifname, err)
+	}
+	// A circuit the link watcher already swept, or one on a vanished
+	// interface, comes back as ReasonNotFound: that is the teardown's goal.
+	for _, e := range resp.Msg.GetErrors() {
+		if !strings.Contains(e.GetReason(), v1.ReasonNotFound) {
+			return fmt.Errorf("HeadendL2Delete %s: %s", ifname, e.GetReason())
+		}
+	}
+	return nil
+}
+
+func (d *rpcDaemon) L2CircuitPresent(ctx context.Context, ifname string, bdID uint32) (bool, error) {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	resp, err := d.hl2.HeadendL2List(ctx, connect.NewRequest(&v1.HeadendL2ListRequest{}))
+	if err != nil {
+		return false, fmt.Errorf("HeadendL2List: %w", err)
+	}
+	return slices.ContainsFunc(resp.Msg.GetHeadendL2S(), func(h *v1.HeadendL2) bool {
+		return h.GetInterfaceName() == ifname && h.GetVlanId() == 0 && h.GetBdId() == bdID
 	}), nil
 }
