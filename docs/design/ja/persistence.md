@@ -21,7 +21,7 @@
 | auto-advertise の service SID (End.DT4 / DT6 / DT46、End.DT2U / DT2M) と広告 | binding と locator から作り直す | 起動時に exporter が割り当て直す。値は再起動の前と同じとは限らない ([locator](#locator)) |
 | SID function / aux (`sid create`)、SID owner | `pin_maps` | `locator_ref` で割り当てた SID は、locator の割り当て状態 (使用中の function) が戻らない ([locator](#locator)) |
 | Headend v4 / v6 (`hv4` / `hv6 create`) | `pin_maps` | BGP を有効にした起動では、BGP の applier が書いた entry を全 VRF から消す ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除)) |
-| BD peer / VLAN table / 静的 FDB (`peer`、`vt`、`fdb create`) | `pin_maps` | FDB は学習でも埋まる。BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消す |
+| BD peer / VLAN table / 静的 FDB (`peer`、`vt`、`fdb create`) | `pin_maps` | FDB は学習でも埋まる。BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消す。peer の index の範囲に合わない entry が残っていれば起動を拒否する ([BD peer の index](#bd-peer-の-index)) |
 | BGP で受信した経路 (headend、EVPN の FDB と peer、ES の member と DF 選出、SR Policy) | BGP | session が上がって経路を受け直すと書き直す |
 | operator の BGP 広告 (`bgp advertise-*`)、MUP route (`mup create`)、local SR Policy (`sr-policy`) | 戻らない | `pin_maps` の有無にかかわらず、再起動の後に API から入れ直す |
 | 登録済み plugin (`PROG_ARRAY`) | 戻らない (pin しない) | register RPC を再実行 |
@@ -337,6 +337,19 @@ sudo systemctl start vinberod
 ```
 
 pin dir を消すと、SID、headend、owner、SR Policy、ECMP group など、pin されていた制御状態がすべて消えます。RPC や vbctl で入れた entry と plugin の宣言は投入し直し、BGP 由来の entry は session が上がって経路を受け直すと戻ります。
+
+### BD peer の index
+
+`bd_peer_map` の index は範囲ごとに役割が決まっています (0〜7 が flood スロット、8〜31 は空けてある範囲、32〜63 が Ethernet Segment の peer、64〜127 が RT2 などの unicast だけの peer。[bum_mode.md](bum_mode.md#flood-スロットと-bd-の-node-数))。key と value の形は同じなので、[互換条件](#pin-の互換条件) では違いを検出できません。そこで起動時、XDP の attach の前に次を行います。
+
+1. BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消します (index に関係なく owner で判断します)。あわせて、Ethernet Segment の peer の範囲 (32〜63) と、flood スロットと RT2 の peer が 0〜7 を共有し Ethernet Segment の peer を 8〜39 に置く配置で書かれた範囲 (8〜39) から、owner の無い peer とそれを指す FDB を消します。消した peer を指していた学習済みの MAC (owner が無く static でない remote の FDB) も消します。残すと、同じ index に後から入る別の peer (別の PE の flood peer など) へ既知 unicast が届くためです。
+2. BGP の有無にかかわらず、空けてある範囲 (8〜31) に peer、owner の記録、reverse entry、remote の FDB の参照が残っていれば、起動を拒否します。どれも推測では消しません。エラーには BD、index、owner が並びます。
+
+```
+the pinned bridge-domain maps use peer indices of the reserved flood [8, 32) range, which the peer index layout keeps free (1 in all): peer {bd 300, index 10} (bgp:v1:asn=65001:evpn). ...
+```
+
+拒否されたときは、その owner の ASN で BGP を有効にして起動する (その applier が自分の entry を消します) か、daemon を止めて pin dir を消し、状態を入れ直してください。index 0〜7 の operator の peer (`vbctl peer create`) は flood スロットのまま使われ続けます。
 
 ### Aux index の allocator recovery
 

@@ -9,6 +9,26 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 
 `tc` はこれまでと同じ動作です。`xdp` を設定しない限り、データプレーンの命令列も変わりません（`bum_xdp_enabled` 定数が 0 のとき、xdp モードの分岐は verifier が取り除きます）。
 
+## flood スロットと BD の node 数
+
+BD のリモート PE は `bd_peer_map` の `{bd_id, index}` に入ります。index の範囲で役割が決まります。
+
+| index | 役割 | 入るもの |
+|---|---|---|
+| 0〜7 | flood スロット（BUM のコピー先） | EVPN の RT3（End.DT2M）の peer、`vbctl peer create` の peer、plugin の flood peer |
+| 8〜31 | flood スロットを増やすときのために空けてある範囲 | なし |
+| 32〜63 | Ethernet Segment の peer（EVPN aliasing の合成 peer。[ecmp.md](ecmp.md)） | BGP applier が作る peer |
+| 64〜127 | 既知 unicast だけに使う peer | EVPN の RT2（End.DT2U）の peer、plugin の unicast 専用の peer |
+
+どちらのモードも、BUM の複製では flood スロット（0〜7）だけを見ます。RT2 の peer は flood スロットを使いません。そのため、1 つの BD に入る node 数は flood スロットの数で決まります。
+
+- 1 BD のリモート PE は 8 台まで、ローカルの PE を含めて 9 node までです。リモート PE は RT3 の peer ごとにスロットを 1 つ使います。
+- `vbctl peer create` の peer も同じ 8 スロットを使います。手動の peer を作ると、その数だけ入る PE が減ります。
+- RT2 の peer は BD あたり 64 個までです（リモート PE の End.DT2U SID ごとに 1 個）。
+- 空きがないとき、`peer create` はエラーを返します。BGP の経路は書き込まず、警告をログに出します。その BD の同じ範囲で peer が消えて空きができると、vinberod は受信済みの EVPN 経路をすべて入れ直し、入らなかった経路を書き込みます。
+
+xdp モードの devmap は、ローカル AC のデバイスと flood スロットを合わせて 32 エントリーまでです（「要件と制約」）。
+
 ## xdp モードの経路
 
 送信側（AC から入った BUM）:

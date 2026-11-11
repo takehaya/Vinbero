@@ -127,12 +127,14 @@ func (f *serviceFake) CreateBdPeerOwned(bd, idx uint16, e *bpf.HeadendEntry, _ [
 	return nil
 }
 func (f *serviceFake) CreateBdPeerAtFreeIndexOwned(bd uint16, e *bpf.HeadendEntry, esi [bpf.ESILen]byte, remote [16]byte, rev bool, o bpf.OwnerTag) (uint16, error) {
-	for i := uint16(0); i < 64; i++ {
+	// The range the real allocator takes for the entry.
+	r := bpf.PeerRangeFor(e)
+	for i := r.Base; i < r.End(); i++ {
 		if f.peers[bpf.BdPeerKey{BdId: bd, Index: i}] == "" {
 			return i, f.CreateBdPeerOwned(bd, i, e, esi, remote, rev, o)
 		}
 	}
-	return 0, errors.New("peer limit")
+	return 0, bpf.ErrBdPeerRangeFull
 }
 func (f *serviceFake) DeleteBdPeerOwned(bd, idx uint16, o bpf.OwnerTag) (bool, error) {
 	k := bpf.BdPeerKey{BdId: bd, Index: idx}

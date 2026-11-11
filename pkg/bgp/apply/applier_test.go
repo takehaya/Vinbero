@@ -130,12 +130,17 @@ func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, esi 
 	return nil
 }
 
+// CreateBdPeerAtFreeIndex allocates from the range the real allocator takes
+// for the entry (bpf.PeerRangeFor) and fails with bpf.ErrBdPeerRangeFull
+// like it.
 func (f *fakeHeadend) CreateBdPeerAtFreeIndex(bdID uint16, e *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) (uint16, error) {
-	idx := f.FindFreeBdPeerIndex(bdID)
-	if idx >= bpf.MaxBumNexthops {
-		return idx, fmt.Errorf("bd %d: maximum number of peers (%d) reached", bdID, bpf.MaxBumNexthops)
+	r := bpf.PeerRangeFor(e)
+	for idx := r.Base; idx < r.End(); idx++ {
+		if _, ok := f.bdPeers[bdPeerKey{bdID, idx}]; !ok {
+			return idx, f.CreateBdPeer(bdID, idx, e, esi, remoteSrc, writeReverse)
+		}
 	}
-	return idx, f.CreateBdPeer(bdID, idx, e, esi, remoteSrc, writeReverse)
+	return r.End(), fmt.Errorf("%w: bd %d: %s", bpf.ErrBdPeerRangeFull, bdID, r)
 }
 
 func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) (bool, error) {

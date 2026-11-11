@@ -172,6 +172,9 @@ func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *Heade
 	if entry == nil {
 		return errors.New("nil BD peer entry")
 	}
+	if err := checkBdPeerIndex(index, entry); err != nil {
+		return fmt.Errorf("bd %d: %w", bdID, err)
+	}
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	owned, err := checkControlOwner[BdPeerKey, HeadendEntry](m.objs.BdPeerMap, m.bdPeerOwners, key, owner, false)
 	if err != nil {
@@ -256,24 +259,94 @@ func (m *MapOperations) UpdateBdPeersOwned(bdID uint16, updates []BdPeerUpdate, 
 	return errs
 }
 
+// CreateBdPeerAtFreeIndexOwned installs entry at the lowest free index of the
+// range it belongs to (PeerRangeFor: the unicast range for a FloodExclude
+// entry, the flood slots otherwise), probing and creating under one critical
+// section. A full range returns ErrBdPeerRangeFull, and the next freed index
+// of that range in this BD runs the hook SetBdPeerFreedHook installed.
 func (m *MapOperations) CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) (uint16, error) {
+	defer m.notifyBdPeerFreed()
 	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
-	index := m.findFreeBdPeerIndexLocked(bdID)
-	if index >= MaxBumNexthops {
-		return index, fmt.Errorf("bd %d: maximum number of peers (%d) reached", bdID, MaxBumNexthops)
+	r := PeerRangeFor(entry)
+	rk := bdPeerRangeKey{bd: bdID, base: r.Base}
+	index, ok := m.findFreeBdPeerIndexLocked(bdID, r)
+	if !ok {
+		if m.bdPeerStarved == nil {
+			m.bdPeerStarved = make(map[bdPeerRangeKey]struct{})
+		}
+		m.bdPeerStarved[rk] = struct{}{}
+		return r.End(), fmt.Errorf("%w: bd %d: all %d %s peer indices are in use", ErrBdPeerRangeFull, bdID, r.Count, r.Name)
 	}
+	delete(m.bdPeerStarved, rk)
 	if _, err := m.deleteBdPeerOwnedLocked(bdID, index, owner); err != nil {
 		return index, err
 	}
 	return index, m.createBdPeerOwnedLocked(bdID, index, entry, esi, remoteSrc, writeReverse, owner)
 }
 func (m *MapOperations) DeleteBdPeerOwned(bdID, index uint16, owner OwnerTag) (bool, error) {
+	defer m.notifyBdPeerFreed()
 	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	return m.deleteBdPeerOwnedLocked(bdID, index, owner)
+}
+
+// checkBdPeerIndex refuses an index outside the flood, Ethernet Segment and
+// unicast ranges (the reserved part of the flood range included: nothing
+// floods to it yet), and a flood peer (FloodExclude clear) in the unicast
+// range, where nothing would ever flood to it either.
+func checkBdPeerIndex(index uint16, entry *HeadendEntry) error {
+	switch {
+	case FloodPeerRange.Contains(index), EsPeerRange.Contains(index):
+		return nil
+	case UnicastPeerRange.Contains(index):
+		if entry.FloodExclude == 0 {
+			return fmt.Errorf("peer index %d is in the %s range, which is never flooded to, but the entry is a flood peer", index, UnicastPeerRange)
+		}
+		return nil
+	}
+	return fmt.Errorf("peer index %d is outside the %s, %s and %s ranges", index, FloodPeerRange, EsPeerRange, UnicastPeerRange)
+}
+
+// bdPeerRangeKey is one allocation range (by its base) of one BD.
+type bdPeerRangeKey struct {
+	bd   uint16
+	base uint16
+}
+
+// SetBdPeerFreedHook installs what runs when an index is freed in a range a
+// CreateBdPeerAtFreeIndex found full in that bridge domain: the daemon
+// replays the EVPN routes, so a route that did not fit is installed. It runs
+// after the bd_peer lock is released, once per call that freed such an
+// index, and must not block.
+func (m *MapOperations) SetBdPeerFreedHook(f func()) { m.onBdPeerFreed.Store(&f) }
+
+// noteBdPeerFreedLocked records that the index of the BD is free again. The
+// caller holds bdPeerLifecycle.
+func (m *MapOperations) noteBdPeerFreedLocked(bdID, index uint16) {
+	for _, r := range []BdPeerRange{FloodPeerRange, UnicastPeerRange} {
+		if !r.Contains(index) {
+			continue
+		}
+		rk := bdPeerRangeKey{bd: bdID, base: r.Base}
+		if _, starved := m.bdPeerStarved[rk]; starved {
+			delete(m.bdPeerStarved, rk)
+			m.bdPeerFreed.Store(true)
+		}
+	}
+}
+
+// notifyBdPeerFreed runs the freed hook if the call it is deferred in freed
+// an index a full range was waiting for. Called without bdPeerLifecycle.
+func (m *MapOperations) notifyBdPeerFreed() {
+	if !m.bdPeerFreed.Swap(false) {
+		return
+	}
+	if f := m.onBdPeerFreed.Load(); f != nil {
+		(*f)()
+	}
 }
 func (m *MapOperations) deleteBdPeerOwnedLocked(bdID, index uint16, owner OwnerTag) (bool, error) {
 	key := &BdPeerKey{BdId: bdID, Index: index}
@@ -296,6 +369,9 @@ func (m *MapOperations) deleteBdPeerOwnedLocked(bdID, index uint16, owner OwnerT
 	}
 	if err := m.bdPeerOwners.Delete(key); err != nil {
 		return true, err
+	}
+	if existed || owned {
+		m.noteBdPeerFreedLocked(bdID, index)
 	}
 	return existed, nil
 }

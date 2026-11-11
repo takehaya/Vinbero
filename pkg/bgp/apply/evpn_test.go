@@ -194,24 +194,34 @@ func TestApplier_EVPNRT2TwoPEsDistinctIndex(t *testing.T) {
 	}
 }
 
-// When the bridge domain is full (MaxBumNexthops peers), a further new PE is
-// rejected without writing an FDB entry.
+// When the bridge domain's unicast range is full (MaxUnicastPeersPerBd RT2
+// peers), a further new PE is rejected without writing an FDB entry, and the
+// flood slots stay free for RT3.
 func TestApplier_EVPNRT2BdFull(t *testing.T) {
 	a, fh := evpnApplier(t)
-	for i := 0; i < bpf.MaxBumNexthops; i++ {
+	for i := 0; i < bpf.MaxUnicastPeersPerBd; i++ {
 		mac := fmt.Sprintf("aa:bb:cc:00:00:%02x", i)
 		sid := fmt.Sprintf("fd00:2:2:%x::", i)
 		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2(mac, sid)})
 	}
-	if len(fh.bdPeers) != bpf.MaxBumNexthops {
-		t.Fatalf("want %d peers, got %d", bpf.MaxBumNexthops, len(fh.bdPeers))
+	if len(fh.bdPeers) != bpf.MaxUnicastPeersPerBd {
+		t.Fatalf("want %d peers, got %d", bpf.MaxUnicastPeersPerBd, len(fh.bdPeers))
+	}
+	for k := range fh.bdPeers {
+		if !bpf.UnicastPeerRange.Contains(k.index) {
+			t.Errorf("RT2 peer at index %d, outside the unicast range %s", k.index, bpf.UnicastPeerRange)
+		}
 	}
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:ff", "fd00:2:2:ffff::")})
-	if len(fh.bdPeers) != bpf.MaxBumNexthops {
+	if len(fh.bdPeers) != bpf.MaxUnicastPeersPerBd {
 		t.Errorf("BD-full must reject a further peer; got %d", len(fh.bdPeers))
 	}
 	if _, ok := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:ff"}]; ok {
 		t.Error("BD-full must not write an FDB entry for the rejected MAC")
+	}
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:d3::")})
+	if st, ok := a.evpn.mcast[evpnMcastKey{rd: "65000:100"}]; !ok || !bpf.FloodPeerRange.Contains(st.index) {
+		t.Errorf("RT3 with the unicast range full: ledger %+v installed=%v, want a flood slot", st, ok)
 	}
 }
 

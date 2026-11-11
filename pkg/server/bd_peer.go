@@ -7,6 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
@@ -93,13 +94,15 @@ func (s *BdPeerServer) BdPeerDelete(
 			continue
 		}
 		deleted := false
-		// Only the operator-managed flood range. The ES-peer range above it
-		// belongs to the BGP applier's EVPN aliasing state: deleting those
-		// entries here would leave the applier's ledger, the FDB pointers
-		// and the ECMP group referencing a peer that no longer exists, with
-		// nothing to trigger a repair. Leftovers in that range are swept by
-		// the applier itself at startup.
-		for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
+		// Only the flood slots, where the operator's peers are. The ES
+		// range belongs to the BGP applier's EVPN aliasing state: deleting
+		// those entries here would leave the applier's ledger, the FDB
+		// pointers and the ECMP group referencing a peer that no longer
+		// exists, with nothing to trigger a repair (leftovers in that range
+		// are swept by the applier itself at startup). The unicast range
+		// holds the RT2 and plugin peers, which the owner check would refuse
+		// anyway.
+		for i := bpf.FloodPeerRange.Base; i < bpf.FloodPeerRange.End(); i++ {
 			existed, err := s.mapOps.DeleteBdPeer(uint16(bdID), i)
 			if err != nil {
 				resp.Errors = append(resp.Errors, &v1.OperationError{
@@ -168,6 +171,14 @@ func (s *BdPeerServer) BdPeerList(
 	}
 
 	return connect.NewResponse(resp), nil
+}
+
+// bdPeerFreedReplay is the hook the map operations call when a bridge
+// domain's peer range that was full frees an index: it asks for a replay of
+// the EVPN routes, so a route that did not fit is installed. It does not
+// block; the replay runs on the replayer's goroutine.
+func bdPeerFreedReplay(request func([]bgp.Family)) func() {
+	return func() { request([]bgp.Family{bgp.FamilyEVPN}) }
 }
 
 func (s *BdPeerServer) protoToEntry(peer *v1.BdPeer) (*bpf.HeadendEntry, error) {

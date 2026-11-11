@@ -14,7 +14,7 @@
 // ========================================================================
 
 // Find peer_index by {bd_id, outer_src} via bd_peer_reverse_map.
-// O(1) single hash lookup instead of iterating up to MAX_BUM_NEXTHOPS entries.
+// O(1) single hash lookup instead of iterating the BD's peers.
 // Returns BD_PEER_INDEX_INVALID if not found.
 static __always_inline __u16 find_peer_index_by_src(
     __u16 bd_id,
@@ -63,7 +63,7 @@ static __always_inline void fdb_learn_remote_mac(
     __builtin_memcpy(learn_key.mac, inner_eth->h_source, ETH_ALEN);
 
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &learn_key);
-    // An entry pointing above the flood range is the control plane's EVPN
+    // An entry pointing into the ES peer range is the control plane's EVPN
     // aliasing pointer (synthetic ES peer). The frame's sender is one member
     // PE of that segment; rewriting the entry to the sender's own peer would
     // pin every flow to whichever PE delivered the last frame and erase the
@@ -73,7 +73,7 @@ static __always_inline void fdb_learn_remote_mac(
     // back, where an unchanged RT2 re-apply would never re-install it.
     if (existing) {
         union fdb_forward old = fdb_read_forward(existing);
-        if (old.is_static || (old.is_remote && old.peer_index >= MAX_BUM_NEXTHOPS))
+        if (old.is_static || (old.is_remote && bd_peer_index_is_es(old.peer_index)))
             return;
         if (!old.is_remote || old.peer_index != peer_idx) {
             union fdb_forward next = { .is_remote = 1, .peer_index = peer_idx };

@@ -159,6 +159,59 @@ func (a *Applier) resetEVPNGroups() {
 	a.seedEVPNGroupIDs()
 }
 
+// inESSweepRange reports whether the startup sweep treats index as an ES
+// peer index: the ES range, or the one of the earlier index layout.
+func inESSweepRange(index uint16) bool {
+	return bpf.EsPeerRange.Contains(index) || bpf.LegacyEsPeerRange.Contains(index)
+}
+
+// sweepDanglingLearnedFDB removes the remote MACs the data plane learned (no
+// owner, not static) that point at a peer index no peer holds: after the
+// sweep removed the peers a previous run's applier wrote, the index such a
+// MAC names is handed to whichever peer is installed next -- an RT3 flood
+// peer of another PE, say -- and its known unicast would go there until the
+// MAC is learned again. At boot it runs before the data plane is attached;
+// a MAC learned while it runs later points at a peer that exists (learning
+// takes the index from the reverse entry of a live peer) and stays. It
+// reports how many it removed and whether it could remove them all.
+func (a *Applier) sweepDanglingLearnedFDB() (int, bool) {
+	peers, err := a.fdbBd.ListBdPeers()
+	if err != nil {
+		a.logger.Error("list bd_peers; learned MACs of removed peers may be left behind", zap.Error(err))
+		return 0, false
+	}
+	fdbs, err := a.fdbBd.ListFdb()
+	if err != nil {
+		a.logger.Error("list fdb; learned MACs of removed peers may be left behind", zap.Error(err))
+		return 0, false
+	}
+	owners, err := a.fdbBd.ListFdbOwners()
+	if err != nil {
+		a.logger.Error("list fdb owners; learned MACs of removed peers may be left behind", zap.Error(err))
+		return 0, false
+	}
+	removed, ok := 0, true
+	for k, e := range fdbs {
+		if e.IsRemote == 0 || e.IsStatic != 0 {
+			continue
+		}
+		if _, owned := owners[k]; owned {
+			continue
+		}
+		if _, held := peers[bpf.BdPeerKey{BdId: k.BdId, Index: e.PeerIndex}]; held {
+			continue
+		}
+		if err := a.fdbBd.DeleteFdbOwned(k.BdId, net.HardwareAddr(k.Mac[:]), bpf.OwnerBGPEVPN(a.localASN)); err != nil {
+			a.logger.Error("sweep learned MAC of a removed EVPN peer",
+				zap.Uint16("bd_id", k.BdId), zap.Uint16("index", e.PeerIndex), zap.Error(err))
+			ok = false
+			continue
+		}
+		removed++
+	}
+	return removed, ok
+}
+
 // sweepEVPNState removes the EVPN state the applier of localASN left in the
 // pinned maps: its FDB entries and peers, the FDB pointers and synthetic
 // peers in the ES range, and its segment groups. It reports how many entries
@@ -166,11 +219,13 @@ func (a *Applier) resetEVPNGroups() {
 func (a *Applier) sweepEVPNState() (int, bool) {
 	removed := 0
 	// The synthetic ES peers live in an applier-exclusive index range (the
-	// operator RPC allocates below EsPeerIndexBase), so every entry found
-	// there is a previous run's leftover. Sweep them: under pinned maps a
-	// restart would otherwise leak one slot per generation, and a stale
-	// entry keeps referencing a group id this reset is about to delete and
-	// re-hand out to a different segment.
+	// operator RPC and the other allocations never use it), so every entry
+	// found there is a previous run's leftover. Sweep them: under pinned
+	// maps a restart would otherwise leak one slot per generation, and a
+	// stale entry keeps referencing a group id this reset is about to
+	// delete and re-hand out to a different segment. The ES range of the
+	// earlier index layout is swept by the same rule: a run of that layout
+	// left its ES peers there.
 	// FDB entries pointing into the ES range go first: with pinned maps
 	// they too survive a restart, and a MAC that the replayed rib no
 	// longer carries would keep aiming at an index a different segment may
@@ -182,8 +237,7 @@ func (a *Applier) sweepEVPNState() (int, bool) {
 		sweepOK = false
 	} else {
 		for k, e := range fdbs {
-			if e.IsRemote == 0 || e.PeerIndex < bpf.EsPeerIndexBase ||
-				e.PeerIndex >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
+			if e.IsRemote == 0 || !inESSweepRange(e.PeerIndex) {
 				continue
 			}
 			tag, owned, oerr := a.fdbBd.GetFdbOwner(k.BdId, net.HardwareAddr(k.Mac[:]))
@@ -217,10 +271,11 @@ func (a *Applier) sweepEVPNState() (int, bool) {
 		sweepOK = false
 	} else {
 		for k := range peers {
-			// Only the reserved ES range: an index above it is not ours
-			// (a future use, or something injected into the map directly)
-			// and must survive the sweep.
-			if k.Index < bpf.EsPeerIndexBase || k.Index >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
+			// Only the ES ranges: an index outside them is not ours to
+			// sweep by range (a flood or unicast peer is swept by owner
+			// above, and something injected into the map directly must
+			// survive).
+			if !inESSweepRange(k.Index) {
 				continue
 			}
 			tag, owned, oerr := a.fdbBd.GetBdPeerOwner(k.BdId, k.Index)
@@ -249,6 +304,11 @@ func (a *Applier) sweepEVPNState() (int, bool) {
 				zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index))
 			removed++
 		}
+	}
+	if sweepOK {
+		n, ok := a.sweepDanglingLearnedFDB()
+		removed += n
+		sweepOK = ok
 	}
 
 	owners, err := a.ecmp.ListEcmpGroupOwners()

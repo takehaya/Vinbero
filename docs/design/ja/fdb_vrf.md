@@ -56,6 +56,7 @@ End.DT2 受信側
     ② デカプセル → inner L2フレーム
     ③ inner src MACをリモートエントリとして学習する
        bd_peer_reverse_map で outer src → peer_index を O(1) 解決
+       Ethernet Segment の peer（index 32〜63）を指すエントリは書き換えない
     ④ fdb_map[(bd_id, dst_MAC)] lookup
        ├─ hit, local → bpf_redirect(oif)（fast-path）
        ├─ hit, remote → XDP_PASS（routing loop防止）
@@ -102,8 +103,10 @@ XDPがbridgeより先にフレームを処理するため、H.Encaps.L2処理時
 | `sid_function_map` | IPv6 prefix（LPM） | action, vrf_ifindex, bd_id, bridge_ifindex | SID → Endpoint function |
 | `headend_l2_map` | (ifindex, vlan_id) | segments, src_addr, bd_id | Port+VLAN → L2 encap設定 |
 | `fdb_map` | (bd_id, MAC) | oif, is_remote, peer_index, bd_id | BD内のMAC → 出力先判定 |
-| `bd_peer_map` | (bd_id, index) | headend_entry | BD内のリモートPE flood list |
+| `bd_peer_map` | (bd_id, index) | headend_entry | BD内のリモートPE。index 0〜7 が flood スロット、32〜63 が Ethernet Segment の peer、64〜127 が RT2 などの unicast だけの peer |
 | `bd_peer_reverse_map` | (bd_id, src_addr) | peer_index | outer src → peer_indexの逆引き |
+
+`bd_peer_map` の index の範囲と、1 BD に入る node 数（リモート PE 8 台、計 9 node）は [bum_mode.md](bum_mode.md#flood-スロットと-bd-の-node-数) を参照してください。MAC 学習は、学習先の peer が flood スロットでも unicast の範囲でも同じように FDB エントリを書き換えます。書き換えないのは、制御プレーンが Ethernet Segment の peer を指したエントリだけです。
 
 ## リソース管理
 

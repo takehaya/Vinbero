@@ -158,7 +158,7 @@ transposition の取り出し元も 2 形式で違います。per-EVI は RT2/RT
 
 per-EVI A-D が運ぶ SID を使い、multi-homed segment への転送を PE 群への ECMP group にします (RFC 7432 8.4)。
 
-group の置き場所は既存の bd_peer 機構を再利用します。`{bridge domain, ESI}` ごとに合成の ES peer を 1 つ作り、その `headend_entry` に group_id を持たせます。segment 上で学習した MAC の FDB エントリは、広告元 PE の bd_peer ではなくこの ES peer を指します。`l2_headend.c` の FDB hit 側は `ecmp_resolve_headend` を通してから tail_call するだけなので、side table も新規マップも増えません。ES peer は flood index 域 (`0..MAX_BUM_NEXTHOPS-1`) の上、index 8 以降の予約域に置き、あわせて flood-exclude を立てるので、TC の BUM 複製から構造的に見えません。
+group の置き場所は既存の bd_peer 機構を再利用します。`{bridge domain, ESI}` ごとに合成の ES peer を 1 つ作り、その `headend_entry` に group_id を持たせます。segment 上で学習した MAC の FDB エントリは、広告元 PE の bd_peer ではなくこの ES peer を指します。`l2_headend.c` の FDB hit 側は `ecmp_resolve_headend` を通してから tail_call するだけなので、side table も新規マップも増えません。ES peer は flood スロット (`0..MAX_BUM_NEXTHOPS-1`) の外、Ethernet Segment の peer の範囲 (index 32〜63、[bum_mode.md](bum_mode.md#flood-スロットと-bd-の-node-数)) に置き、あわせて flood-exclude を立てるので、BUM 複製から構造的に見えません。MAC 学習もこの範囲を指す FDB エントリは書き換えません。
 
 group の member は、per-EVI A-D を広告している PE のうち、per-ES A-D で all-active を宣言している PE の per-EVI SID です。member 集合は経路 state (`eviAD` / `esAD` の台帳) から reconcile のたびに導出し、SID で決定的に sort、同一 SID (anycast) は dedupe、データプレーンの上限 8 で cap します。L3VPN の `vpngroup` と同じ判断です。group_id は `0x80000000` 以上を EVPN 用に区切り、L3VPN 側の allocator と衝突しないようにします。owner は `OwnerBGPEVPNGroup` で、再起動時に前世代の group を sweep してから rib replay で再構築します。
 
