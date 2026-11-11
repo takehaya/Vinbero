@@ -454,8 +454,9 @@ func neighManaged(n netlink.Neigh) bool { return n.FlagsExt&netlink.NTF_EXT_MANA
 //     re-probe of managed entries (interval_probe_time_ms, 5 s by default).
 //     The mark does not restart an entry that is still probing: it resolves
 //     at its next solicitation, within the retransmit interval (1 s by
-//     default), or fails then, and a second mark carrierRecheck later
-//     probes it;
+//     default), or fails then; the first failure on the device within
+//     encapNeighCarrierWindow of the carrier coming back asks for one more
+//     mark;
 //   - at start and every resweep, a full walk of the maps (EncapDestinations)
 //     picks up writers that do not notify (a plugin writing a map directly,
 //     the data plane's End.AD cache) and drops destinations no entry uses
@@ -478,9 +479,6 @@ type EncapNeighKeeper struct {
 	// subRoutes subscribes to route, nexthop-object and ip-rule changes
 	// (shared with the BUM devmap sync); tests replace it.
 	subRoutes func() (*routeSub, error)
-	// carrierRecheck is the delay of the second mark after a carrier came
-	// back; tests shorten it.
-	carrierRecheck time.Duration
 
 	// pmu guards what the events ask for; Notify takes only it, so a map
 	// writer never waits for a pass.
@@ -525,12 +523,13 @@ const encapNeighResweep = 30 * time.Second
 // pass.
 const encapNeighDebounce = 200 * time.Millisecond
 
-// encapNeighCarrierRecheck is when, after a carrier came back, the
-// unresolved entries on the device are marked a second time. An entry whose
-// last solicitation went out before the carrier came back fails one
-// retransmit interval (1 s by default) after it; the first mark found it
-// still probing and did nothing.
-const encapNeighCarrierRecheck = 1100 * time.Millisecond
+// encapNeighCarrierWindow is how long after a carrier came back the first
+// failure of a kept entry on the device makes the keeper mark the device's
+// unresolved entries once more. An entry whose last solicitation went out
+// before the carrier came back fails one retransmit interval after it (1 s
+// by default); the mark at the carrier-up found it still probing and did
+// nothing.
+const encapNeighCarrierWindow = 10 * time.Second
 
 // NewEncapNeighKeeper builds a keeper over mapOps.
 func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighKeeper {
@@ -544,8 +543,6 @@ func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighK
 		logger:  logger.Named("encap.neigh"),
 		resweep: encapNeighResweep,
 		wake:    make(chan struct{}, 1),
-
-		carrierRecheck: encapNeighCarrierRecheck,
 		pending: map[netip.Addr]struct{}{},
 		relink:  map[uint32]struct{}{},
 		dests:   map[netip.Addr][]NeighTarget{},
@@ -1086,6 +1083,9 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 		}
 	}()
 	carrier := carrierState{}
+	// rearm holds, per device whose carrier came back, until when the first
+	// failure of a kept entry on it asks for one more mark.
+	rearm := map[int32]time.Time{}
 	resweep := time.NewTicker(k.resweep)
 	defer resweep.Stop()
 	timer := time.NewTimer(encapNeighDebounce)
@@ -1139,9 +1139,17 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 				pending()
 				continue
 			}
-			if u.Type == unix.RTM_DELNEIGH && k.keepsNeigh(u.LinkIndex, u.IP) {
+			switch {
+			case u.Type == unix.RTM_DELNEIGH && k.keepsNeigh(u.LinkIndex, u.IP):
 				k.setFlag(false, true)
 				pending()
+			case u.Type == unix.RTM_NEWNEIGH && u.State == netlink.NUD_FAILED:
+				dev := int32(u.LinkIndex)
+				if until, ok := rearm[dev]; ok && time.Now().Before(until) && k.keepsNeigh(u.LinkIndex, u.IP) {
+					delete(rearm, dev)
+					k.carrierUp(uint32(dev))
+					pending()
+				}
 			}
 		case u, ok := <-links.updates:
 			if !ok {
@@ -1163,13 +1171,12 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 				carrier = carrierState{}
 				continue
 			}
-			if ifindex := u.Index; carrier.cameUp(u) && k.hasNexthopsOn(int(ifindex)) {
-				k.carrierUp(uint32(ifindex))
+			if carrier.cameUp(u) && k.hasNexthopsOn(int(u.Index)) {
+				k.carrierUp(uint32(u.Index))
 				pending()
-				time.AfterFunc(k.carrierRecheck, func() {
-					k.carrierUp(uint32(ifindex))
-					k.poke()
-				})
+				rearm[u.Index] = time.Now().Add(encapNeighCarrierWindow)
+			} else if !carrier[u.Index] {
+				delete(rearm, u.Index) // down again, or gone
 			}
 		case <-k.wake:
 			pending()

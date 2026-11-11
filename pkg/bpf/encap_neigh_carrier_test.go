@@ -250,7 +250,6 @@ func TestEncapNeighKeeperWatchFlushAndCarrier(t *testing.T) {
 	bumNeighClaims.Store(bum, struct{}{})
 	t.Cleanup(func() { bumNeighClaims.Delete(bum) })
 	k, _ := newFakeKeeper(t, &main, &walk, nt, zap.NewNop())
-	k.carrierRecheck = 2 * encapNeighDebounce
 	if _, err := k.Sweep(); err != nil {
 		t.Fatal(err)
 	}
@@ -349,12 +348,30 @@ func TestEncapNeighKeeperWatchFlushAndCarrier(t *testing.T) {
 	start()
 	link(4, unix.IFF_UP|unix.IFF_LOWER_UP) // no next hop on it
 	expect("a carrier on a device without next hops")
-	// Marked at once and once more after carrierRecheck: the fake leaves
-	// the entry unresolved.
 	link(2, unix.IFF_UP|unix.IFF_LOWER_UP)
-	expect("the carrier back on device 2", "2/fe80::1", "2/fe80::1")
+	expect("the carrier back on device 2", "2/fe80::1")
 	link(2, unix.IFF_UP|unix.IFF_LOWER_UP) // still up: not a change
 	expect("a link update with the carrier still up")
+	// The entry was still probing and fails now: marked once more, and only
+	// on the first failure; a failure on a device whose carrier did not
+	// come back asks for nothing.
+	failedNow := func(ifindex int, ip string) {
+		neighs.updates <- netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH,
+			Neigh: netlink.Neigh{LinkIndex: ifindex, IP: net.ParseIP(ip), State: netlink.NUD_FAILED}}
+	}
+	failedNow(3, "fe80::3")
+	expect("a failure on a device whose carrier did not come back")
+	failedNow(2, "fe80::1")
+	expect("the first failure after the carrier came back", "2/fe80::1")
+	failedNow(2, "fe80::1")
+	expect("a second failure")
+	// Down and up again: armed again.
+	link(2, unix.IFF_UP)
+	link(2, unix.IFF_UP|unix.IFF_LOWER_UP)
+	expect("the carrier back again", "2/fe80::1")
+	link(2, unix.IFF_UP)
+	failedNow(2, "fe80::1")
+	expect("a failure after the carrier went down again")
 	stop()
 	if _, mine := k.owned[bum]; !mine {
 		t.Errorf("the keeper does not own the BUM next hop it made again")
