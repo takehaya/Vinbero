@@ -12,6 +12,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeEsiMap is esi_map in memory; it is empty at every start, as the map
@@ -275,6 +276,34 @@ func TestEthernetSegmentsRestoreRefuses(t *testing.T) {
 		if len(m) != 0 {
 			t.Errorf("%+v: wrote %+v before refusing", recs, m)
 		}
+	}
+}
+
+// A segment stored with an ESI that BGP peers would reject does not stop the
+// start: it is restored to the data plane, and a warning names it.
+func TestEthernetSegmentsRestoreWarnsOnUnadvertisableESI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	res, err := netresource.NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const bad = "01:aa:bb:cc:00:00:01:00:05:01"
+	if err := res.SaveEthernetSegments([]netresource.ManagedEthernetSegment{
+		{ESI: bad, RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	m := fakeEsiMap{}
+	if err := NewEthernetSegments(m, res, zap.New(core)).restore(); err != nil {
+		t.Fatalf("restore refused a stored segment: %v", err)
+	}
+	if len(m) != 1 {
+		t.Errorf("segment not restored: %v", m)
+	}
+	w := logs.FilterMessageSnippet("would reject").All()
+	if len(w) != 1 || w[0].ContextMap()["esi"] != bad {
+		t.Errorf("warnings = %+v", logs.All())
 	}
 }
 

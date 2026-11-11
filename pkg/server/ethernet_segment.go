@@ -140,7 +140,7 @@ func (s *EthernetSegmentServer) EsCreate(
 	}
 
 	for _, e := range req.Msg.Entries {
-		esi, err := bpf.ParseESI(e.Esi)
+		esi, err := bpf.ParseValidESI(e.Esi)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: e.Esi, Reason: err.Error()})
 			continue

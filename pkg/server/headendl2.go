@@ -198,7 +198,7 @@ func (s *HeadendL2Server) HeadendL2Create(
 			continue
 		}
 
-		esi, err := bpf.ParseESI(headend.Esi)
+		esi, err := bpf.ParseValidESI(headend.Esi)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),

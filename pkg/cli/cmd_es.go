@@ -9,6 +9,15 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// esiUsage is the help of every flag that takes a new ESI. The daemon refuses
+// any other form, because BGP peers drop the session on it.
+const esiUsage = "RFC 7432 Ethernet Segment Identifier: 10 colon-separated hex octets, the type first. " +
+	"Type 0: any 9 octets. " +
+	"Type 1 (LACP) and 2 (bridge): 6-octet MAC, 2 octets (port key or priority), last octet 00. " +
+	"Type 3 (MAC): 6-octet MAC, 3-octet local discriminator. " +
+	"Type 4 (router ID) and 5 (AS): 4 octets, 4-octet local discriminator, last octet 00. " +
+	"Example: 01:aa:bb:cc:00:00:01:00:05:00"
+
 func esCommand() *cli.Command {
 	return &cli.Command{
 		Name:    "es",
@@ -19,7 +28,7 @@ func esCommand() *cli.Command {
 				Name:  "create",
 				Usage: "Register an Ethernet Segment",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "esi", Required: true, Usage: "RFC 7432 ESI (10 colon-separated hex bytes)"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: esiUsage},
 					&cli.BoolFlag{Name: "local-attached", Usage: "This PE attaches to the ES"},
 					&cli.StringFlag{Name: "local-pe", Usage: "Local PE IPv6 (required when --local-attached, used for DF judgement)"},
 					&cli.StringFlag{Name: "df-pe", Usage: "Initial Designated Forwarder IPv6 (optional; set later with df-set)"},

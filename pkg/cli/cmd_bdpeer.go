@@ -29,7 +29,7 @@ func bdPeerCommand() *cli.Command {
 					&cli.StringFlag{Name: "src-addr", Required: true, Usage: "Outer IPv6 source address"},
 					&cli.StringFlag{Name: "segments", Required: true, Usage: "Segment list (comma-separated)"},
 					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS_L2", Usage: "Headend mode (H_ENCAPS_L2, H_ENCAPS_L2_RED)"},
-					&cli.StringFlag{Name: "esi", Usage: "RFC 7432 Ethernet Segment Identifier (10 colon-separated hex bytes)"},
+					&cli.StringFlag{Name: "esi", Usage: esiUsage},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)

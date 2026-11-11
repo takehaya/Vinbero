@@ -335,7 +335,7 @@ func (s *BgpRouteServer) BgpAdvertiseEvpnEs(
 		Errors:     make([]*v1.OperationError, 0),
 	}
 	for _, m := range req.Msg.Segments {
-		esi, err := bpf.ParseESI(m.GetEsi())
+		esi, err := bpf.ParseValidESI(m.GetEsi())
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnEsTrigger(m.GetRd(), m.GetEsi()), Reason: fmt.Sprintf("invalid ESI: %v", err)})
 			continue
@@ -399,7 +399,7 @@ func (s *BgpRouteServer) BgpAdvertiseEvpnAd(
 		Errors:     make([]*v1.OperationError, 0),
 	}
 	for _, m := range req.Msg.Routes {
-		esi, err := bpf.ParseESI(m.GetEsi())
+		esi, err := bpf.ParseValidESI(m.GetEsi())
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnAdTrigger(m.GetRd(), m.GetEsi(), m.GetEthernetTag()), Reason: fmt.Sprintf("invalid ESI: %v", err)})
 			continue
@@ -471,7 +471,7 @@ func protoToAdvertiseEvpnMac(m *v1.BgpEvpnMac) (bgp.EVPNRoute, error) {
 	}
 	var esi [bpf.ESILen]byte
 	if m.GetEsi() != "" {
-		parsed, err := bpf.ParseESI(m.GetEsi())
+		parsed, err := bpf.ParseValidESI(m.GetEsi())
 		if err != nil {
 			return bgp.EVPNRoute{}, fmt.Errorf("invalid ESI %q: %w", m.GetEsi(), err)
 		}
