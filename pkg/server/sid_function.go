@@ -72,6 +72,23 @@ type SidFunctionServer struct {
 	// capture-then-delete / capture-then-flush ordering would otherwise
 	// race a concurrent unbind. Zero value is usable.
 	mu sync.Mutex
+	// locators keeps the locators registered over the API in the state
+	// file; nil saves nothing. Called under mu.
+	locators LocatorStore
+}
+
+// LocatorStore keeps the locators registered over the API across a restart.
+// Each call writes the state file and fails, changing nothing, when it
+// cannot; a locator the config declares is not saved.
+type LocatorStore interface {
+	SaveLocator(loc locator.Locator) error
+	ForgetLocator(name string) error
+}
+
+// SetLocatorStore hands the server the store LocatorCreate and LocatorDelete
+// save to. Call before serving.
+func (s *SidFunctionServer) SetLocatorStore(store LocatorStore) {
+	s.locators = store
 }
 
 // NewSidFunctionServer creates a new SidFunctionServer. pluginAux may be
@@ -1684,7 +1701,18 @@ func (s *SidFunctionServer) DeleteLocatorGuarded(name string, force bool) error 
 			}
 		}
 	}
-	return s.locatorMgr.Delete(name, force)
+	// The record goes from the state file before the locator goes from
+	// memory, under the manager's lock, so a failed write deletes nothing.
+	var commit func() error
+	if s.locators != nil {
+		commit = func() error {
+			if err := s.locators.ForgetLocator(name); err != nil {
+				return fmt.Errorf("the locator is not deleted: %w", err)
+			}
+			return nil
+		}
+	}
+	return s.locatorMgr.DeleteAndCommit(name, force, commit)
 }
 
 // AddLocatorAndClaim registers loc and, in the same critical section,
@@ -1711,6 +1739,14 @@ func (s *SidFunctionServer) AddLocatorAndClaim(loc *locator.Locator) error {
 		return err
 	}
 	claimed, err := s.reconcileUsidClaimsLocked(*loc)
+	// The locator is saved last, still under s.mu: a failed write rolls it
+	// back the way a failed claim does, so LocatorCreate succeeds only for a
+	// locator that is in the state file too.
+	if err == nil && s.locators != nil {
+		if serr := s.locators.SaveLocator(*loc); serr != nil {
+			err = fmt.Errorf("the locator is not created: %w", serr)
+		}
+	}
 	// Roll back completely: the claims this pass did take have to go back
 	// too, or the bindings outlive the locator (Manager.Delete leaves them)
 	// and re-creating it fails on every one of them.

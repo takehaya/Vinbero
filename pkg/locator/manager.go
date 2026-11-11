@@ -105,6 +105,15 @@ func (m *Manager) Add(loc *Locator) error {
 // responsible for tearing down the upstream SIDs (sid_function_map
 // entries) first. Durable reservations remain pending and are restored on Add.
 func (m *Manager) Delete(name string, force bool) error {
+	return m.DeleteAndCommit(name, force, nil)
+}
+
+// DeleteAndCommit removes a locator like Delete, calling commit once the
+// locator is known to be removable and before it is removed, under the
+// manager's lock: no allocation from the locator can come in between. When
+// commit fails nothing is removed and its error is returned. commit must not
+// call the manager. A nil commit is Delete.
+func (m *Manager) DeleteAndCommit(name string, force bool, commit func() error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.entries[name]; !ok {
@@ -113,6 +122,11 @@ func (m *Manager) Delete(name string, force bool) error {
 	used := m.bindings.ListByLocator(name)
 	if !force && len(used) > 0 {
 		return fmt.Errorf("%w: %q has %d active bindings", ErrLocatorInUse, name, len(used))
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return err
+		}
 	}
 	// A forced delete drops the bindings with the locator. They record
 	// which (locator, function) minted a SID, so keeping them would leave

@@ -122,6 +122,16 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("vrf bindings: %w (repair the state file, settings.state_path, and restart)", err)
 	}
+	// The locators registered over the API, decoded as early for the same
+	// reason; they are registered after the config's, further down.
+	restoredLocators, err := savedLocators(vin.GetResourceManager())
+	if err != nil {
+		return fmt.Errorf("locators: %w (repair the state file, settings.state_path, and restart)", err)
+	}
+	configLocators := make([]string, 0, len(cfg.BGP.Locators))
+	for _, lc := range cfg.BGP.Locators {
+		configLocators = append(configLocators, lc.Name)
+	}
 	err = bringUpDataPlane(func() error {
 		if err := restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetMapOperations(), vin.GetResourceManager(), lg); err != nil {
 			return err
@@ -231,15 +241,10 @@ func run(cliCtx *cli.Context) error {
 	// flood for a bound bridge domain), and RT4 (local Ethernet Segment). nil
 	// unless BGP is enabled with bgp.global.evpn_auto_advertise.
 	var evpnExporter *export.EVPNExporter
+	// Register config-declared locators before VRF bindings: the
+	// auto-advertise exporter resolves each binding's default_locator at
+	// EnableVRF time, and EnableVRF runs at startup before any RPC arrives.
 	if cliCtx.Bool("bgp-enabled") {
-		// Load config-time VRF <-> route-target bindings before the BGP
-		// session starts receiving. EVPN routes require a bridge-domain
-		// binding to be installed; applying bindings here (rather than via
-		// VrfBgpBind after boot) means a route that arrives early is not
-		// dropped for lack of one. Only relevant when BGP is enabled.
-		// Register config-declared locators before VRF bindings: the
-		// auto-advertise exporter resolves each binding's default_locator at
-		// EnableVRF time, and EnableVRF runs at startup before any RPC arrives.
 		for _, lc := range cfg.BGP.Locators {
 			loc, err := configToLocator(lc)
 			if err != nil {
@@ -249,6 +254,19 @@ func run(cliCtx *cli.Context) error {
 				return fmt.Errorf("bgp.locators %q: %w", lc.Name, err)
 			}
 		}
+	}
+	// Then the ones registered over the API: after the SID reservations and
+	// the config's, before anything that resolves a locator runs (the
+	// exporters, the applier's encapsulation source, the plugins, the RPCs).
+	if err := restoreLocators(locatorMgr, restoredLocators, configLocators, vin.GetResourceManager(), lg); err != nil {
+		return fmt.Errorf("locators: %w", err)
+	}
+	if cliCtx.Bool("bgp-enabled") {
+		// Load config-time VRF <-> route-target bindings before the BGP
+		// session starts receiving. EVPN routes require a bridge-domain
+		// binding to be installed; applying bindings here (rather than via
+		// VrfBgpBind after boot) means a route that arrives early is not
+		// dropped for lack of one. Only relevant when BGP is enabled.
 		for _, b := range cfg.BGP.VrfBindings {
 			binding, err := configToBinding(b)
 			if err != nil {
@@ -437,6 +455,8 @@ func run(cliCtx *cli.Context) error {
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, vpnReplay, lg)
 	srv.SetDeviceAttacher(vin)
 	srv.SetL2Circuits(vin.L2Circuits())
+	srv.SetRuntimeStores(locatorStateStore{res: vin.GetResourceManager(), configNames: configLocators},
+		vin.EthernetSegments(), vrfPolicyStore(vin.GetResourceManager(), cfg.VRFs))
 	if liveProber != nil {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
 	}
@@ -674,6 +694,15 @@ func run(cliCtx *cli.Context) error {
 				}
 			}
 		}
+		// The Ethernet Segments restored from the state file were in
+		// esi_map before the session started, so a received RT4 elected
+		// their DF; this elects it once more, as EsCreate does, and
+		// advertises their RT4s.
+		var enableES func([bpf.ESILen]byte, string) error
+		if evpnExporter != nil {
+			enableES = evpnExporter.EnableES
+		}
+		resumeSegments(vin.GetResourceManager().EthernetSegments(), applier.ReelectDF, enableES, lg)
 	}
 
 	// Start the RPC server only after the exporter is watching, so a
@@ -762,6 +791,10 @@ func bringUpDataPlane(classify, attach func() error) error {
 // no longer declares, and that holds nothing, is not restored
 // (vrf.Manager.FinishRestore); a saved binding counts as holding its VRF.
 //
+// Policy: loadVRFs sets the config's, then the one set over the API comes
+// back unless the config states it (restoreVRFPolicy), before the data plane
+// is programmed.
+//
 // Saving: the state is written before ingress_vrf_map, so an id reaches the
 // data plane only after it is on disk. A failed write is a warning, so a
 // daemon without a writable state directory still starts.
@@ -821,6 +854,9 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 	}
 	if err := loadVRFs(cfg, mgr, resMgr, resMgr, lg); err != nil {
 		return fmt.Errorf("vrf: %w", err)
+	}
+	if err := restoreVRFPolicy(cfg, mgr, resMgr, lg); err != nil {
+		return err
 	}
 	before := map[uint32]string{}
 	for _, v := range mgr.List() {

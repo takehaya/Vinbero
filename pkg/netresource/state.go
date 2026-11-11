@@ -28,6 +28,16 @@ type ManagedState struct {
 	// (HeadendL2Create), ordered by ifindex and VLAN. Absent on a file
 	// written before they were recorded, which reads as none saved.
 	RuntimeL2Circuits []ManagedL2Circuit `json:"runtime_l2_circuits,omitempty"`
+	// RuntimeLocators are the SRv6 locators registered over the API
+	// (LocatorCreate), in registration order. The config's bgp.locators are
+	// not here.
+	RuntimeLocators []ManagedLocator `json:"runtime_locators,omitempty"`
+	// RuntimeEthernetSegments are the Ethernet Segments created over the API
+	// (EsCreate), ordered by ESI.
+	RuntimeEthernetSegments []ManagedEthernetSegment `json:"runtime_ethernet_segments,omitempty"`
+	// RuntimeVrfPolicy is the VRF ingress policy set over the API
+	// (VrfSetPolicy), nil when it was not set or the config owns it.
+	RuntimeVrfPolicy *ManagedVrfPolicy `json:"runtime_vrf_policy,omitempty"`
 }
 
 // ManagedVrfBinding is one VRF's BGP binding as it was in memory. The legacy

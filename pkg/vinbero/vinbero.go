@@ -33,6 +33,7 @@ type Vinbero struct {
 	fdbWatcher *netlinkwatch.FDBWatcher
 	resMgr     *netresource.ResourceManager
 	l2         *L2Circuits        // set by InitResourceManager
+	es         *EthernetSegments  // set by InitResourceManager
 	bumSync    *bpf.BumDevmapSync // nil unless a BD runs in xdp BUM mode
 	logger     *zap.Logger
 }
@@ -279,8 +280,15 @@ func (v *Vinbero) InitResourceManager() error {
 	// before the reconcile: the table-close guard reads the map, so a table
 	// with a circuit on a port of its VRF stays open whether or not the map
 	// is pinned.
+	// The Ethernet Segments go back first: they name no interface, and the
+	// circuits restored next may carry their ESIs.
 	var l2 *L2Circuits
+	var es *EthernetSegments
 	if v.mapOps != nil {
+		es = NewEthernetSegments(v.mapOps, resMgr, v.logger)
+		if err := es.restore(); err != nil {
+			return fmt.Errorf("%w (repair the state file, settings.state_path, and restart)", err)
+		}
 		l2 = NewL2Circuits(v.mapOps, resMgr, v.logger)
 		if err := l2.restore(); err != nil {
 			return fmt.Errorf("%w (repair the state file, settings.state_path, and restart)", err)
@@ -297,12 +305,19 @@ func (v *Vinbero) InitResourceManager() error {
 
 	v.resMgr = resMgr
 	v.l2 = l2
+	v.es = es
 	return nil
 }
 
 // L2Circuits returns the L2 headend circuit book InitResourceManager set up.
 func (v *Vinbero) L2Circuits() *L2Circuits {
 	return v.l2
+}
+
+// EthernetSegments returns the Ethernet Segment book InitResourceManager set
+// up.
+func (v *Vinbero) EthernetSegments() *EthernetSegments {
+	return v.es
 }
 
 // StartFDBWatcher starts the FDB watcher. The bridges of the state file and

@@ -91,6 +91,33 @@ type VRFsConfig struct {
 	Entries     []VRFConfig `yaml:"entries,omitempty"`
 	DefaultDeny bool        `yaml:"default_deny,omitempty"`
 	DenyAction  string      `yaml:"deny_action,omitempty"` // "drop" (default) | "pass"
+	// policyKeys is set when the file has default_deny or deny_action.
+	policyKeys bool
+}
+
+// UnmarshalYAML records whether the file states the policy, whatever value
+// it gives it.
+func (c *VRFsConfig) UnmarshalYAML(n *yaml.Node) error {
+	type plain VRFsConfig
+	p := plain(*c)
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*c = VRFsConfig(p)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k := n.Content[i].Value; k == "default_deny" || k == "deny_action" {
+			c.policyKeys = true
+		}
+	}
+	return nil
+}
+
+// PolicyDeclared reports whether the config owns the global policy: the file
+// has default_deny or deny_action, or the values are set. The policy set over
+// the API (VrfSetPolicy) is then not saved, and the config's comes back at the
+// next start.
+func (c VRFsConfig) PolicyDeclared() bool {
+	return c.policyKeys || c.DefaultDeny || c.DenyAction != ""
 }
 
 // VRFConfig is one VRF: its name, ingress access circuits, the optional

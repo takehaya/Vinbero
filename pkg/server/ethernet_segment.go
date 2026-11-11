@@ -9,6 +9,7 @@ import (
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vinbero"
 	"go.uber.org/zap"
 )
 
@@ -31,11 +32,57 @@ type EthernetSegmentServer struct {
 	// at receive time because the ESI was not yet locally attached).
 	reElect func(esi [bpf.ESILen]byte)
 	evpn    EvpnEsHook // RT4 auto-advertise hook; nil when off
-	logger  *zap.Logger
+	// segments writes esi_map and the state file together; nil writes the
+	// map only.
+	segments *vinbero.EthernetSegments
+	logger   *zap.Logger
 }
 
 func NewEthernetSegmentServer(mapOps *bpf.MapOperations, reElect func(esi [bpf.ESILen]byte), evpn EvpnEsHook, logger *zap.Logger) *EthernetSegmentServer {
 	return &EthernetSegmentServer{mapOps: mapOps, reElect: reElect, evpn: evpn, logger: logger}
+}
+
+// SetSegments hands the server the Ethernet Segment book that saves them.
+// Call before serving.
+func (s *EthernetSegmentServer) SetSegments(segments *vinbero.EthernetSegments) {
+	s.segments = segments
+}
+
+func (s *EthernetSegmentServer) createEsi(esi [bpf.ESILen]byte, entry *bpf.EsiEntry, rd string) error {
+	if s.segments != nil {
+		return s.segments.Create(esi, entry, rd)
+	}
+	return s.mapOps.CreateEsi(esi, entry)
+}
+
+// deleteEsi reports whether there was such a segment.
+func (s *EthernetSegmentServer) deleteEsi(esi [bpf.ESILen]byte) (bool, error) {
+	if s.segments != nil {
+		return s.segments.Delete(esi)
+	}
+	if err := s.mapOps.DeleteEsi(esi); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *EthernetSegmentServer) setDF(esi [bpf.ESILen]byte, df [bpf.IPv6AddrLen]byte) (*bpf.EsiEntry, error) {
+	if s.segments != nil {
+		return s.segments.SetDF(esi, df)
+	}
+	return s.mapOps.SetEsiDfPe(esi, df)
+}
+
+// setDFError maps a failed SetDF: a missing segment is not_found, a failed
+// write internal.
+func setDFError(esiStr string, err error) error {
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return connect.NewError(connect.CodeNotFound, fmt.Errorf("ESI %s not found", esiStr))
+	}
+	return connect.NewError(connect.CodeInternal, err)
 }
 
 func protoToEsiCfg(e *v1.EthernetSegment) (bpf.EsiConfig, error) {
@@ -103,7 +150,7 @@ func (s *EthernetSegmentServer) EsCreate(
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: e.Esi, Reason: err.Error()})
 			continue
 		}
-		if err := s.mapOps.CreateEsi(esi, bpf.NewEsiEntry(cfg)); err != nil {
+		if err := s.createEsi(esi, bpf.NewEsiEntry(cfg), e.GetRd()); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: e.Esi, Reason: err.Error()})
 			continue
 		}
@@ -150,11 +197,12 @@ func (s *EthernetSegmentServer) EsDelete(
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: esiStr, Reason: err.Error()})
 			continue
 		}
-		if err := s.mapOps.DeleteEsi(esi); err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				continue
-			}
+		existed, err := s.deleteEsi(esi)
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: esiStr, Reason: err.Error()})
+			continue
+		}
+		if !existed {
 			continue
 		}
 		// Withdraw any RT4 auto-advertised for this ES (a no-op if it was not).
@@ -194,12 +242,9 @@ func (s *EthernetSegmentServer) EsSetDf(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("df_pe_src_addr: %w", err))
 	}
-	entry, err := s.mapOps.SetEsiDfPe(esi, df)
+	entry, err := s.setDF(esi, df)
 	if err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("ESI %s not found", req.Msg.Esi))
-		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, setDFError(req.Msg.Esi, err)
 	}
 	return connect.NewResponse(&v1.EsSetDfResponse{Updated: s.entryToProto(esi, entry)}), nil
 }
@@ -213,12 +258,9 @@ func (s *EthernetSegmentServer) EsClearDf(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	var zero [16]byte
-	entry, err := s.mapOps.SetEsiDfPe(esi, zero)
+	entry, err := s.setDF(esi, zero)
 	if err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("ESI %s not found", req.Msg.Esi))
-		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, setDFError(req.Msg.Esi, err)
 	}
 	return connect.NewResponse(&v1.EsClearDfResponse{Updated: s.entryToProto(esi, entry)}), nil
 }

@@ -214,25 +214,28 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 
 ## 永続化と boot
 
-kernel device facet、vrf_id の割り当て、実行時に足した AC、API で作った BGP binding は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。id は `ingress_vrf_map` に書く前に state に保存し、XDP と TC を attach する前に `ingress_vrf_map` と policy を書き終えます。attach された interface のパケットが未分類で流れる時間はありません。保存に失敗した場合 (state の置き場所が書けない等) は warning を出して起動を続けるので、その id は記録されないまま data plane で使われます。保存が成功するまでは、次の再起動で各 VRF が同じ id を受け取る保証はありません。
+kernel device facet、vrf_id の割り当て、実行時に足した AC、`vbctl vrf policy` で決めた ingress policy、API で作った BGP binding と locator は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。id は `ingress_vrf_map` に書く前に state に保存し、XDP と TC を attach する前に `ingress_vrf_map` と policy を書き終えます。attach された interface のパケットが未分類で流れる時間はありません。保存に失敗した場合 (state の置き場所が書けない等) は warning を出して起動を続けるので、その id は記録されないまま data plane で使われます。保存が成功するまでは、次の再起動で各 VRF が同じ id を受け取る保証はありません。
 
-1. state に保存した L2 headend の回線を `headend_l2_map` と ESI の表に戻します。保存した ifindex の interface が同じ名前と hardware address を持つものだけを戻し、削除中の印が付いたものと照合できないものは記録と entry を消します ([persistence.md](persistence.md#l2-headend-の回線))。次の reconcile が table を閉じるかを決める前に済ませます
-2. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。その前に、各 entry の unreachable default の設定を config の値で決め (config が宣言していない entry は記録の値、未決定なら既定)、opt-out になった entry が足した経路を外します。そのうえで opt-out していない entry の table に経路を足します。L2 headend の circuit が port にある table は開けたままにします ([encap の外側の経路](#encap-の外側の経路) の L2 circuit と同じ確認)。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
-3. `Manager.Restore` が保存された vrf_id と次に割り当てる id、実行時の AC を戻します。これより前に id を割り当てる処理はありません。同じ id を持つ 2 つの VRF や `next_vrf_id` 以上の id のように矛盾した state は、推測で直さずに起動を拒否します。続けて、pin された map のうち vrf_id を key に持つもの (headend と MUP uplink、それぞれの owner map) にある最大の vrf_id より上から割り当てるようにします。state file を失った、または保存できなかった場合でも、map に状態が残っている id を新しい VRF に渡さないためです
-4. `--bgp-enabled` のとき、config の `bgp.vrf_bindings` の VRF に id を割り当てます。続けて BGP の有無にかかわらず、state に保存した binding (API で作ったもの) の VRF を確かめます。保存した id があるので、通常は何も割り当てません
-5. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます。仮の VRF は何も持たなくなるので、次の項目の規則で戻りません)
-6. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy)
-7. `Manager.FinishRestore` が、起動時の読み込みで作られた VRF (`config` 付き) のうち、config がもう宣言しておらず、AC も device も bridge も保存した binding も持たないものを外します。その id は再利用しません。API で作った VRF は `vbctl vrf delete` まで残ります。続けて、どの VRF も持たない vrf_id の headend entry と owner の記録を、owner に関係なく消し、id ごとに件数を log に出します。ここで外した VRF の entry と、state file が記録していなかった id の entry がこれにあたります。存在しない VRF は entry を持てないからで、起動時には拒否する相手がいないので、config に書かれた operator の意図に従います。BGP の applier と plugin の restore はこの後に動きます
-8. state を保存し、`ingress_vrf_map` と policy を書きます。`--bgp-enabled` のときは続けて、前回の BGP applier が書いた entry を消します ([起動時の BGP の entry の削除](#起動時の-bgp-の-entry-の削除))
-9. `internal.devices` と、state に記録された実行時 attach の device に XDP / TC を attach します
-10. state に保存した binding を戻します。config が同じ VRF を bind していれば config を使います ([persistence.md](persistence.md#vrf-の-bgp-binding))。BGP の applier、exporter、plugin はこの後に作られ、session もこの後に起動します
-11. state の bridge とすべての bridge facet を FDB watcher に登録してから、watcher を起動します。起動時に 1 回だけ届く既存の FDB の dump を、登録済みの bridge で処理するためです。起動後に登録した bridge は、登録の時点で既存の FDB を `fdb_map` に入れます。VRF オブジェクトの復元前に登録しようとすると起動を失敗させるので、順序を入れ替えても bridge が黙って監視から漏れることはありません
+1. state に保存した Ethernet Segment を `esi_map` に戻します。Ethernet Segment は interface を持たないので照合しません。ESI を持つ回線の最初のフレームから split horizon と DF の判定が効くように、次の回線より前、attach より前に済ませます ([persistence.md](persistence.md#ethernet-segment))
+2. state に保存した L2 headend の回線を `headend_l2_map` と ESI の表に戻します。保存した ifindex の interface が同じ名前と hardware address を持つものだけを戻し、削除中の印が付いたものと照合できないものは記録と entry を消します ([persistence.md](persistence.md#l2-headend-の回線))。次の reconcile が table を閉じるかを決める前に済ませます
+3. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。その前に、各 entry の unreachable default の設定を config の値で決め (config が宣言していない entry は記録の値、未決定なら既定)、opt-out になった entry が足した経路を外します。そのうえで opt-out していない entry の table に経路を足します。L2 headend の circuit が port にある table は開けたままにします ([encap の外側の経路](#encap-の外側の経路) の L2 circuit と同じ確認)。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
+4. `Manager.Restore` が保存された vrf_id と次に割り当てる id、実行時の AC を戻します。これより前に id を割り当てる処理はありません。同じ id を持つ 2 つの VRF や `next_vrf_id` 以上の id のように矛盾した state は、推測で直さずに起動を拒否します。続けて、pin された map のうち vrf_id を key に持つもの (headend と MUP uplink、それぞれの owner map) にある最大の vrf_id より上から割り当てるようにします。state file を失った、または保存できなかった場合でも、map に状態が残っている id を新しい VRF に渡さないためです
+5. `--bgp-enabled` のとき、config の `bgp.vrf_bindings` の VRF に id を割り当てます。続けて BGP の有無にかかわらず、state に保存した binding (API で作ったもの) の VRF を確かめます。保存した id があるので、通常は何も割り当てません
+6. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます。仮の VRF は何も持たなくなるので、次の項目の規則で戻りません)
+7. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy)。config が `vrfs.default_deny` も `vrfs.deny_action` も書いていなければ、続けて state に保存した ingress policy (`vbctl vrf policy` で決めたもの) を戻します。次の 9 で data plane に書く前なので、attach の後の最初のパケットから効きます ([persistence.md](persistence.md#vrf-の-ingress-policy))
+8. `Manager.FinishRestore` が、起動時の読み込みで作られた VRF (`config` 付き) のうち、config がもう宣言しておらず、AC も device も bridge も保存した binding も持たないものを外します。その id は再利用しません。API で作った VRF は `vbctl vrf delete` まで残ります。続けて、どの VRF も持たない vrf_id の headend entry と owner の記録を、owner に関係なく消し、id ごとに件数を log に出します。ここで外した VRF の entry と、state file が記録していなかった id の entry がこれにあたります。存在しない VRF は entry を持てないからで、起動時には拒否する相手がいないので、config に書かれた operator の意図に従います。BGP の applier と plugin の restore はこの後に動きます
+9. state を保存し、`ingress_vrf_map` と policy を書きます。`--bgp-enabled` のときは続けて、前回の BGP applier が書いた entry を消します ([起動時の BGP の entry の削除](#起動時の-bgp-の-entry-の削除))
+10. `internal.devices` と、state に記録された実行時 attach の device に XDP / TC を attach します
+11. state に保存した binding を戻します。config が同じ VRF を bind していれば config を使います ([persistence.md](persistence.md#vrf-の-bgp-binding))。BGP の applier、exporter、plugin はこの後に作られ、session もこの後に起動します
+12. state の bridge とすべての bridge facet を FDB watcher に登録してから、watcher を起動します。起動時に 1 回だけ届く既存の FDB の dump を、登録済みの bridge で処理するためです。起動後に登録した bridge は、登録の時点で既存の FDB を `fdb_map` に入れます。VRF オブジェクトの復元前に登録しようとすると起動を失敗させるので、順序を入れ替えても bridge が黙って監視から漏れることはありません
+13. locator を登録します。cplane plugin の SID 予約の復元、`--bgp-enabled` のときの config の `bgp.locators`、state に保存した locator (API で登録したもの、BGP の有無にかかわらず) の順です。予約の後なので plugin の function は使用中のまま戻り、config の後なので名前か prefix が config と重なる保存 locator は config に負けます。BGP の applier と exporter、session、plugin の restore、auto-advertise の有効化、RPC server はこの後なので、binding の `default_locator` と `bgp.global.source_locator` は最初から解決できます ([persistence.md](persistence.md#locator))
+14. `--bgp-enabled` のとき、session の起動の後に、state から戻した Ethernet Segment の DF を選び直し、EVPN auto-advertise が有効なら RD を持つものの RT4 を広告します
 
-4 から 6 の順は、id を保存していなかった頃の割り当て順と同じです。`vrf_objects` の無い state で初めて起動しても、各 VRF は前回の起動と同じ id を受け取ります。
+5 から 7 の順は、id を保存していなかった頃の割り当て順と同じです。`vrf_objects` の無い state で初めて起動しても、各 VRF は前回の起動と同じ id を受け取ります。
 
-起動時の VRF の作成が終わった後は、変更のたびに state を書きます。書き込みに失敗した RPC は、変更をメモリと data plane に反映したままエラーを返し、エラーにはそのことが書かれます。`VrfCreate` と `VrfDelete` は、その VRF を `created` / `deleted_names` に入れたうえで `errors` にも入れます。同じ RPC を繰り返すと保存し直し、それ以外の RPC の保存が成功したときも全量が書かれます。削除済みで保存できていない VRF への `VrfDelete` の再実行は、unknown VRF ではなく保存のやり直しになります。binding の RPC は扱いが異なり、書き込みに失敗すると binding を変えずにエラーを返します ([persistence.md](persistence.md#vrf-の-bgp-binding))。bind が VRF を新しく作るときは、その VRF の id を binding より先に保存します。config が bind している VRF の binding は保存しないので、その bind では state の書き込みに失敗しても warning に留め、割り当てた id は次に成功した保存で書きます。起動時の保存も warning に留めるので、state の置き場所が書けない環境でも起動できます。
+起動時の VRF の作成が終わった後は、変更のたびに state を書きます。書き込みに失敗した RPC は、変更をメモリと data plane に反映したままエラーを返し、エラーにはそのことが書かれます。`VrfCreate` と `VrfDelete` は、その VRF を `created` / `deleted_names` に入れたうえで `errors` にも入れます。同じ RPC を繰り返すと保存し直し、それ以外の RPC の保存が成功したときも全量が書かれます。削除済みで保存できていない VRF への `VrfDelete` の再実行は、unknown VRF ではなく保存のやり直しになります。binding の RPC は扱いが異なり、書き込みに失敗すると binding を変えずにエラーを返します ([persistence.md](persistence.md#vrf-の-bgp-binding))。`VrfSetPolicy` も、書き込みに失敗するとメモリと data plane を前の policy に戻してエラーを返します。config が policy を書いているときは保存しません ([persistence.md](persistence.md#vrf-の-ingress-policy))。bind が VRF を新しく作るときは、その VRF の id を binding より先に保存します。config が bind している VRF の binding は保存しないので、その bind では state の書き込みに失敗しても warning に留め、割り当てた id は次に成功した保存で書きます。起動時の保存も warning に留めるので、state の置き場所が書けない環境でも起動できます。
 
-config は加算的です。`vrfs.entries[]` から entry を消しても device は消えません。削除は明示的な `vbctl vrf delete` だけです。device も bridge も AC も持たない VRF は、config から消すと次の起動で戻りません (上の 7)。
+config は加算的です。`vrfs.entries[]` から entry を消しても device は消えません。削除は明示的な `vbctl vrf delete` だけです。device も bridge も AC も持たない VRF は、config から消すと次の起動で戻りません (上の 8)。
 
 ## 操作サーフェス
 
@@ -279,6 +282,8 @@ vrfs:
         bd_id: 100
         members: [eth2]
 ```
+
+`default_deny` か `deny_action` を書くと、値が既定と同じでも ingress policy は config のものになり、`vbctl vrf policy` の変更は保存されずに次の起動で config の値に戻ります。どちらも書かなければ、`vbctl vrf policy` で決めた policy が再起動の後も残ります。
 
 `members` / `enable_l3mdev_rule` / `no_unreachable_default` は device の設定なので `table_id` なしでは拒否されます。`bgp.vrf_bindings[]` は bd_id を持ちません (旧 field は tombstone で、非 0 を設定すると Load 時にエラーになります。0 は未設定と同義です)。EVPN の bridge domain はこの `bridge` facet が唯一の出所です。フィールドの一覧は [configuration.md](configuration.md) を参照してください。
 
