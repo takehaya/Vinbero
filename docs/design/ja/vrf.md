@@ -158,7 +158,9 @@ vinberod は、netns の rule、経路、link の変化を netlink で見張り�
 
 どちらで引いているかは vinberod の log に出ます (`global VRF FIB lookups: direct lookup` / `full lookup` と理由、family ごとに状態が変わったときだけ)。
 
-`BPF_PROG_TEST_RUN` で `bpf_fib_lookup` を繰り返した測定 (VM、kernel 7.0、6.12、6.6) では、direct mode の 1 回の lookup (direct lookup と local の map の確認) は、rule を一度足した netns の full lookup より IPv6 で 36〜43 ns、IPv4 で 26〜42 ns 短く、一度も rule を足していない netns ではほぼ同じ (IPv4 で -1〜+1 ns、IPv6 で 4〜8 ns 短い) でした。`"rules"` の program では direct lookup の部分を verifier が取り除き、lookup ごとに残るのは設定を読む 2 命令だけです。実際の `vinbero_main` (H.Encaps と End.DT4) を同じ方法で測ると、`"rules"` と変更前の差は 1 packet あたり ±3 ns の測定のばらつきの中でした。
+`"auto"` で direct lookup になっている間は、転送の速さが netns の rule の履歴に左右されなくなります。また、一度も rule を足していない netns の kernel の近道よりも少し速くなります。近道も IPv6 では local table を引いてから main table を引きますが、direct lookup は local table を引かず、local の宛先は map で確かめるためです。IPv4 の近道は local と main を 1 つの table として引くので、差はほとんどありません。つまり `"auto"` は rule をたどる分を取り戻すだけでなく、IPv6 では kernel 自身の近道より速い引き方です。
+
+`BPF_PROG_TEST_RUN` で `bpf_fib_lookup` を繰り返した測定 (VM、kernel 7.0、6.12、6.6) では、direct mode の 1 回の lookup (direct lookup と local の map の確認) は、rule を一度足した netns の full lookup より IPv6 で 36〜43 ns、IPv4 で 26〜42 ns 短く、一度も rule を足していない netns では IPv6 で 4〜8 ns 短く、IPv4 では -1〜+1 ns でした。`"rules"` の program では direct lookup の部分を verifier が取り除き、lookup ごとに残るのは設定を読む 2 命令だけです。実際の `vinbero_main` (H.Encaps と End.DT4) を同じ方法で測ると、`"rules"` と変更前の差は 1 packet あたり ±3 ns の測定のばらつきの中でした。
 
 ### encap の next hop の neighbour
 
