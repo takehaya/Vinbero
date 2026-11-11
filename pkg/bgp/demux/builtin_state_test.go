@@ -147,3 +147,48 @@ func TestBuiltinDeliveryScanDoesNotKeepWithdrawnPaths(t *testing.T) {
 		t.Fatal("completed scan retained withdrawn paths or scan history")
 	}
 }
+
+// With the VRFs of each VPN path known, a claimed path keeps the other paths
+// of its prefix out of its own VRFs only: a path sharing one of them is
+// re-delivered without it, a path in other VRFs is untouched, a path left
+// with no VRF is withdrawn, and the claimed path's withdraw gives the VRFs
+// back.
+func TestBuiltinDeliveryStateExcludesClaimedVRFs(t *testing.T) {
+	placement := map[string][]uint32{"65000:1": {1, 2}, "65000:2": {2}, "65000:3": {3}, "65000:4": {1, 2}}
+	state := newBuiltinDeliveryState(forwardingKey)
+	state.vrfs = func(ev bgp.RouteEvent) ([]uint32, bool) { return placement[ev.VPN.RD], ev.VPN != nil }
+	claimed := func(ev bgp.RouteEvent) bool { return ev.EndpointBehavior == 0xFE01 }
+	excluding := func(ev bgp.RouteEvent, vrfs ...uint32) bgp.RouteEvent {
+		ev.ExcludedVRFs = vrfs
+		return ev
+	}
+	shared := vpnEventFrom("192.0.2.1", "65000:1", "10.0.0.0/24", 0x0013)
+	other := vpnEventFrom("192.0.2.3", "65000:3", "10.0.0.0/24", 0x0013)
+	private := vpnEventFrom("192.0.2.2", "65000:2", "10.0.0.0/24", 0xFE01)
+	wide := vpnEventFrom("192.0.2.4", "65000:4", "10.0.0.0/24", 0xFE01)
+
+	assertDeliveryActions(t, state.handle(shared, false, claimed), shared)
+	assertDeliveryActions(t, state.handle(other, false, claimed), other)
+	assertDeliveryActions(t, state.handle(private, false, claimed), withdrawal(private), excluding(shared, 2))
+	assertDeliveryActions(t, state.handle(other, false, claimed), other)
+
+	assertDeliveryActions(t, state.handle(wide, false, claimed), withdrawal(shared), withdrawal(wide))
+	gone := withdrawal(wide)
+	gone.EndpointBehavior = 0
+	assertDeliveryActions(t, state.handle(gone, true, claimed), excluding(shared, 2))
+	gone = withdrawal(private)
+	gone.EndpointBehavior = 0
+	assertDeliveryActions(t, state.handle(gone, true, claimed), shared)
+}
+
+// A path whose VRFs are not known withholds its whole group when claimed, as
+// it does for a demux with no resolver.
+func TestBuiltinDeliveryStateUnknownPlacementWithholdsTheGroup(t *testing.T) {
+	state := newBuiltinDeliveryState(forwardingKey)
+	state.vrfs = func(bgp.RouteEvent) ([]uint32, bool) { return nil, false }
+	claimed := func(ev bgp.RouteEvent) bool { return ev.EndpointBehavior == 0xFE01 }
+	ordinary := vpnEventFrom("192.0.2.1", "65000:1", "10.0.0.0/24", 0x0013)
+	private := vpnEventFrom("192.0.2.2", "65000:2", "10.0.0.0/24", 0xFE01)
+	assertDeliveryActions(t, state.handle(ordinary, false, claimed), ordinary)
+	assertDeliveryActions(t, state.handle(private, false, claimed), withdrawal(ordinary), withdrawal(private))
+}

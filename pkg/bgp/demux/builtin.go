@@ -40,10 +40,21 @@ func (s *builtinScan) retract(ev bgp.RouteEvent) {
 }
 
 func (d *Demux) newBuiltinView(h bgp.RouteHandler) *builtinView {
-	return &builtinView{
-		state: newBuiltinDeliveryState(forwardingKey), handler: h,
-		claimed: d.routeClaimed,
+	state := newBuiltinDeliveryState(forwardingKey)
+	state.vrfs = d.vpnPlacement
+	return &builtinView{state: state, handler: h, claimed: d.routeClaimed}
+}
+
+// vpnPlacement is the VRFs the built-in applier places a VPN path in, and
+// false when that is unknown: another family, or no resolver installed.
+func (d *Demux) vpnPlacement(ev bgp.RouteEvent) ([]uint32, bool) {
+	d.mu.RLock()
+	resolve := d.importVRFs
+	d.mu.RUnlock()
+	if ev.VPN == nil || resolve == nil {
+		return nil, false
 	}
+	return resolve(ev.VPN), true
 }
 
 func forwardingKey(ev bgp.RouteEvent) string {

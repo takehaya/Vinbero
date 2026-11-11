@@ -1,6 +1,7 @@
 package demux
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -21,10 +22,25 @@ type builtinGroup struct {
 // The view serializes transitions and action dispatch under its existing lock.
 // A delivery record is not an acknowledgement of a successful kernel write.
 // The key adapter groups VPN paths by forwarding prefix and other families by NLRI.
+//
+// A claimed path takes its group away from the built-in applier only where
+// the applier would put it. vrfs names those VRFs for a VPN path; the other
+// paths of the prefix are then kept out of those VRFs alone (see
+// bgp.RouteEvent.ExcludedVRFs) and still reach the applier for the rest. A
+// path vrfs cannot place (any other family, or no vrfs at all) withholds its
+// whole group when it is claimed.
 type builtinDeliveryState struct {
 	groups map[string]*builtinGroup
 	key    func(bgp.RouteEvent) string
 	scans  map[*builtinScanState]struct{}
+	vrfs   func(bgp.RouteEvent) ([]uint32, bool)
+}
+
+// builtinDelivery is what one retained path should be to the applier: not
+// delivered, or delivered and kept out of excluded.
+type builtinDelivery struct {
+	deliver  bool
+	excluded []uint32
 }
 
 // Scan-local changes protect retraction from old RIB data without permanent
@@ -126,53 +142,119 @@ func (s *builtinDeliveryState) update(ev bgp.RouteEvent, retract bool, key strin
 	} else {
 		g.routes[path] = ev
 	}
-	claimed := false
-	for _, route := range g.routes {
-		if isClaimed(route) {
-			claimed = true
-			break
-		}
-	}
+	plan, whole := s.plan(g, isClaimed)
 	retracted := false
 	for _, previous := range sortedPaths(g.delivered) {
-		if _, still := g.routes[previous]; still && !claimed {
+		if plan[previous].deliver {
 			continue
 		}
 		gone := g.delivered[previous]
-		gone.IsWithdraw = true
+		gone.IsWithdraw, gone.ExcludedVRFs = true, nil
 		actions = append(actions, gone)
 		if previous == path {
 			retracted = true
 		}
 		delete(g.delivered, previous)
 	}
-	if (retract || claimed && !ev.IsWithdraw) && !retracted {
+	if (retract || !ev.IsWithdraw && !plan[path].deliver) && !retracted {
 		// The applier may have installed this path through an independent
 		// replay. Cleanup cannot depend solely on this view's history.
 		gone := ev
-		gone.IsWithdraw = true
+		gone.IsWithdraw, gone.ExcludedVRFs = true, nil
 		actions = append(actions, gone)
 	}
-	if !claimed {
-		if ev.IsWithdraw && !known && !claimedWithdraw {
-			// The applier can own state from an earlier daemon run or an
-			// independent replay. Preserve ordinary withdrawals even when
-			// this view never observed their advertisements.
-			actions = append(actions, ev)
+	if ev.IsWithdraw && !known && !claimedWithdraw && !whole {
+		// The applier can own state from an earlier daemon run or an
+		// independent replay. Preserve ordinary withdrawals even when
+		// this view never observed their advertisements.
+		actions = append(actions, ev)
+	}
+	for _, current := range sortedPaths(g.routes) {
+		want := plan[current]
+		if !want.deliver {
+			continue
 		}
-		for _, current := range sortedPaths(g.routes) {
-			if _, sent := g.delivered[current]; sent && (ev.IsWithdraw || current != path) {
-				continue
-			}
-			route := g.routes[current]
-			actions = append(actions, route)
-			g.delivered[current] = route
+		if sent, ok := g.delivered[current]; ok && (ev.IsWithdraw || current != path) && slices.Equal(sent.ExcludedVRFs, want.excluded) {
+			continue
 		}
+		route := g.routes[current]
+		route.ExcludedVRFs = want.excluded
+		actions = append(actions, route)
+		g.delivered[current] = route
 	}
 	if len(g.routes) == 0 {
 		delete(s.groups, key)
 	}
 	return actions
+}
+
+// plan decides every retained path of g. A claimed path is never delivered.
+// An unclaimed one is kept out of the VRFs the claimed paths are placed in,
+// and is not delivered when that leaves it none. whole reports a claimed
+// path whose VRFs are unknown, which withholds the whole group.
+func (s *builtinDeliveryState) plan(g *builtinGroup, isClaimed func(bgp.RouteEvent) bool) (map[routePath]builtinDelivery, bool) {
+	plan := make(map[routePath]builtinDelivery, len(g.routes))
+	taken := make(map[uint32]struct{})
+	whole := false
+	for path, route := range g.routes {
+		if !isClaimed(route) {
+			continue
+		}
+		plan[path] = builtinDelivery{}
+		vrfs, ok := s.placement(route)
+		if !ok {
+			whole = true
+		}
+		for _, v := range vrfs {
+			taken[v] = struct{}{}
+		}
+	}
+	for path, route := range g.routes {
+		if _, claimed := plan[path]; claimed {
+			continue
+		}
+		if whole {
+			plan[path] = builtinDelivery{}
+			continue
+		}
+		if len(taken) == 0 {
+			plan[path] = builtinDelivery{deliver: true}
+			continue
+		}
+		vrfs, ok := s.placement(route)
+		if !ok {
+			plan[path] = builtinDelivery{}
+			continue
+		}
+		var excluded []uint32
+		for _, v := range vrfs {
+			if _, ok := taken[v]; ok {
+				excluded = append(excluded, v)
+			}
+		}
+		if len(excluded) > 0 && len(excluded) == len(vrfs) {
+			plan[path] = builtinDelivery{}
+			continue
+		}
+		slices.Sort(excluded)
+		plan[path] = builtinDelivery{deliver: true, excluded: excluded}
+	}
+	return plan, whole
+}
+
+// placement is the VRFs the applier places route in, deduplicated, and
+// whether they are known.
+func (s *builtinDeliveryState) placement(route bgp.RouteEvent) ([]uint32, bool) {
+	if s.vrfs == nil {
+		return nil, false
+	}
+	vrfs, ok := s.vrfs(route)
+	if !ok {
+		return nil, false
+	}
+	vrfs = slices.Clone(vrfs)
+	slices.Sort(vrfs)
+	return slices.Compact(vrfs), true
 }
 
 func sortedPaths(routes map[routePath]bgp.RouteEvent) []routePath {
