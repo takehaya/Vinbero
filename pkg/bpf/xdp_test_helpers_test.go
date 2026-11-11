@@ -142,10 +142,14 @@ func (h *xdpTestHelper) useUnroutableNetns() {
 		fwd, readErr = os.ReadFile(fwdPath)
 	}()
 	<-done
+	// netns.New can succeed and the sysctl write after it fail, so the
+	// handle is released whenever it exists.
+	if ns != 0 {
+		h.t.Cleanup(func() { _ = ns.Close() })
+	}
 	if nsErr != nil {
 		h.t.Fatalf("create the unroutable test namespace: %v", nsErr)
 	}
-	h.t.Cleanup(func() { _ = ns.Close() })
 	if readErr != nil || string(bytes.TrimSpace(fwd)) != "0" {
 		h.t.Fatalf("test namespace must have IPv6 forwarding off, got %q (%v)", fwd, readErr)
 	}
