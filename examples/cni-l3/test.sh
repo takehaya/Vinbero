@@ -42,9 +42,18 @@ declare -A pids=()
 cleanup() {
     local rc=$?
     trap - EXIT
+    if ((rc != 0)); then
+        for ns in "$PE1" "$PE2"; do
+            echo "--- BGP sockets in $ns"
+            ip netns exec "$ns" ss -tno '( sport = :179 or dport = :179 )' || true
+        done
+    fi
     for node in "${!pids[@]}"; do kill -TERM "${pids[$node]}" 2>/dev/null || true; done
     for node in "${!pids[@]}"; do wait "${pids[$node]}" 2>/dev/null || true; done
     if ((rc != 0)); then
+        # The BGP session events (peer up and down, connections closed
+        # unused) start at the top of a log, where the tail below cuts.
+        for log in "$work"/*.log; do echo "--- BGP peer events in $log"; grep -a 'Topic=Peer' "$log" || true; done
         for log in "$work"/*.log; do echo "--- $log"; tail -60 "$log"; done
     fi
     echo "Daemon logs and state: $work"

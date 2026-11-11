@@ -115,12 +115,15 @@ type PeerConfig struct {
 	Families     []Family
 	// Passive keeps this neighbor from initiating the TCP connection; the
 	// session is established only when the remote dials in. In an iBGP
-	// full mesh both ends would otherwise dial each other at once, and the
-	// resulting connection collision makes gobgp tear a freshly
-	// ESTABLISHED socket back down, flapping the session. Marking one end
-	// of every pair passive pins each pair to a single direction. Note both
-	// ends passive forms no session at all (nobody dials), and both ends
-	// active reintroduces the flap -- exactly one end of each pair must be set.
+	// full mesh both ends would otherwise dial each other, and when the two
+	// connections cross, gobgp's collision handling can tear the session
+	// back down, or leave each end on a different connection: one end then
+	// waits in OpenConfirm on a socket the other no longer reads, and since
+	// gobgp arms no OpenConfirm hold timer before a session has first been
+	// established, nothing ends the wait. Marking one end of every pair
+	// passive pins each pair to a single direction. Note both ends passive
+	// forms no session at all (nobody dials), and both ends active brings
+	// the collision back -- exactly one end of each pair must be set.
 	Passive bool
 	// ConnectRetrySec is the BGP ConnectRetry timer in seconds. gobgp's
 	// default is 120s; a smaller value reconnects faster after a startup or
