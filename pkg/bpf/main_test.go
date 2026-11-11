@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -48,7 +49,7 @@ func TestMain(m *testing.M) {
 		}
 		// Not isolated: the caller lacks CAP_SYS_ADMIN, so no test that
 		// needs the kernel's BPF test-run can run either.
-		fmt.Fprintln(os.Stderr, "pkg/bpf tests: cannot create a network namespace (not root); running in the caller's namespace")
+		fmt.Fprintln(os.Stderr, "pkg/bpf tests: cannot create a network namespace (no BPF privileges); running in the caller's namespace")
 		os.Exit(m.Run())
 	}
 	if err := prepareIsolatedNetns(); err != nil {
@@ -59,10 +60,11 @@ func TestMain(m *testing.M) {
 }
 
 // runInIsolatedNetns runs this binary again in a new network namespace and
-// returns its exit status. ok is false only when the caller is not root and
-// the kernel refused the namespace (EPERM); every other failure, and any
-// failure as root, ends the process, because carrying on in the host's
-// namespace is exactly what this exists to prevent.
+// returns its exit status. ok is false only when the kernel refused the
+// namespace (EPERM) to a caller that cannot run BPF programs anyway; every
+// other failure, and any failure of a caller that can, ends the process,
+// because carrying on in the host's namespace is exactly what this exists to
+// prevent.
 func runInIsolatedNetns() (code int, ok bool) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -86,7 +88,7 @@ func runInIsolatedNetns() (code int, ok bool) {
 	defer signal.Stop(sigs)
 
 	if err := cmd.Start(); err != nil {
-		if os.Geteuid() != 0 && errors.Is(err, syscall.EPERM) {
+		if errors.Is(err, syscall.EPERM) && !canRunBPF() {
 			return 0, false
 		}
 		fatalIsolation(err)
@@ -111,6 +113,31 @@ func runInIsolatedNetns() (code int, ok bool) {
 		fatalIsolation(err)
 		return 1, true
 	}
+}
+
+// canRunBPF reports whether this process may load BPF programs: it is root,
+// or holds CAP_BPF or CAP_SYS_ADMIN. Only a process that cannot has no test
+// to protect from the host's routes; one that can, and still cannot get a
+// namespace, must not go on.
+func canRunBPF() bool {
+	if os.Geteuid() == 0 {
+		return true
+	}
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return true // unknown: do not fall back
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if hex, ok := strings.CutPrefix(line, "CapEff:"); ok {
+			caps, err := strconv.ParseUint(strings.TrimSpace(hex), 16, 64)
+			if err != nil {
+				return true
+			}
+			const capSysAdmin, capBPF = 21, 39
+			return caps&(1<<capSysAdmin|1<<capBPF) != 0
+		}
+	}
+	return true
 }
 
 func fatalIsolation(err error) {

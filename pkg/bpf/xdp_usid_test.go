@@ -432,6 +432,10 @@ func TestXDPProgEndUt(t *testing.T) {
 // XDP_PASS and fails the test.
 func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
 	h := newXDPTestHelper(t)
+	// NO_NEIGH needs a lookup that gets as far as the neighbour: with IPv6
+	// forwarding off bpf_fib_lookup answers FWD_DISABLED first. Set before
+	// the VRF and the dummy exist, which inherit "default" at creation.
+	enableIPv6Forwarding(t)
 
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "utnn-vrf0"}, Table: 1042}
 	if err := netlink.LinkAdd(vrf); err != nil {

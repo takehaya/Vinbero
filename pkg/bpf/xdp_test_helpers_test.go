@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -1431,4 +1432,27 @@ func buildPlainIPv6To(t *testing.T, dst string) []byte {
 		t.Fatalf("serialize plain IPv6: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// enableIPv6Forwarding turns IPv6 forwarding on for the test's network
+// namespace ("default" for the devices created later, "all" for existing
+// ones) and restores both values when the test ends. bpf_fib_lookup answers
+// FWD_DISABLED, before it looks at any route or neighbour, while forwarding
+// is off.
+func enableIPv6Forwarding(t *testing.T) {
+	t.Helper()
+	for _, fwd := range []string{
+		"/proc/sys/net/ipv6/conf/default/forwarding",
+		"/proc/sys/net/ipv6/conf/all/forwarding",
+	} {
+		prev, err := os.ReadFile(fwd)
+		if err != nil {
+			t.Fatalf("read %s: %v", fwd, err)
+		}
+		if err := os.WriteFile(fwd, []byte("1"), 0); err != nil {
+			t.Fatalf("enable IPv6 forwarding (%s): %v", fwd, err)
+		}
+		fwd := fwd
+		t.Cleanup(func() { _ = os.WriteFile(fwd, prev, 0) })
+	}
 }
