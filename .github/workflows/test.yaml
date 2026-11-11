@@ -121,7 +121,34 @@ jobs:
         # aliasing tests landed); give it real headroom.
         # VINBERO_CPLANE_PARITY=1 makes a missing wasm artifact fail the
         # controller and parity tests instead of skipping them.
-        run: VINBERO_CPLANE_PARITY=1 go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m ./...
+        # sdk/go/cplaneharness runs in the "Unit Test (cplane harness)" job.
+        run: |
+          VINBERO_CPLANE_PARITY=1 go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m \
+            $(go list ./... | grep -v '/sdk/go/cplaneharness$')
+
+  # The harness package alone takes about 18 minutes, so it runs beside the
+  # rest of the unit tests instead of after them.
+  unit-test-cplane-harness:
+    name: Unit Test (cplane harness)
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      - name: Build the control-plane plugin example
+        run: make cplane-example
+
+      - name: Run the cplane harness tests
+        run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m ./sdk/go/cplaneharness
 
   sdk-archive-verify:
     name: SDK Archive Verify
