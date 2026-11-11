@@ -110,10 +110,10 @@ Vinbero の lookup は次のように分かれます。印が立った family �
 
 | lookup | 呼ぶ経路 | flags | rule をたどるか |
 |---|---|---|---|
-| encap の外側 (`srv6_fib_lookup_encap()`) で、入口の vrf_id が 0 | H.Encaps、H.Insert、L2 headend、GTP headend | 0 | たどる |
-| 同じ lookup で、入口の vrf_id が 0 以外 (tenant VRF の AC) | 同上と、service proxy の戻り (End.AS / End.AD / End.AM) | `DIRECT \| TBID` (main table) | たどらない |
+| encap の外側 (`srv6_fib_lookup_encap()`) で、入口の vrf_id が 0 | H.Encaps、H.Insert、L2 headend、GTP headend、service proxy の戻り (End.AS / End.AD / End.AM) | 0 | たどる |
+| 同じ lookup で、入口の vrf_id が 0 以外 (tenant VRF の AC) | 同上 | `DIRECT \| TBID` (main table) | たどらない |
 | 同じ lookup で、TBID を使えない場合 | 上の vrf_id が 0 以外の経路すべて | 0 | たどる |
-| IPv6 の転送 | End、End.T、uN、uT、End.B6、End.M.GTP6.D と .E、service proxy の転送、BUM の複製と uplink probe (XDP と tc) | 0 | たどる |
+| IPv6 の転送 | End、End.T、uN、uT、End.B6、End.M.GTP6.D と .E、IPv6 の decap 後の転送 (End.DT6 など)、service proxy の転送、BUM の複製と uplink probe (XDP と tc) | 0 | たどる |
 | IPv6 の隣接解決 (`endpoint_resolve_adjacency()`) | End.X、uA、End.X 系の USD | 0 | たどる |
 | IPv4 の転送 (`srv6_fib_lookup_and_update_v4()`) | End.DT4 など decap 後の IPv4、End.M.GTP4.E | 0 | たどる |
 
@@ -123,7 +123,7 @@ TBID を使えないのは、kernel が `BPF_FIB_LOOKUP_TBID` を受け付けな
 
 運用では次の点に注意してください。
 
-- 過去に VRF device か `ip rule` を作ったことのある node では、上の表で「たどる」経路が、一度も作ったことのない node より 1 packet あたり少し遅くなります。End.DT4 には VRF device が要るので、VRF device を避ける必要はありません
+- 過去に VRF device か `ip rule` を作ったことのある node では、上の表で「たどる」経路が、一度も作ったことのない node より 1 packet あたり少し遅くなります。End.DT4 でテナントの VRF へ decap するには VRF device が要るので、VRF device を避ける必要はありません
 - node 間や実行間で転送性能を比べるときは、rule の履歴をそろえてください
 - 履歴の無い状態に戻せるのは、reboot か新しい netns だけです
 
