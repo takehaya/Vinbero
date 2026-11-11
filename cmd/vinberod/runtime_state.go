@@ -7,6 +7,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/evpn"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/vinbero"
 	"github.com/takehaya/vinbero/pkg/vrf"
@@ -79,6 +80,11 @@ func resumeSegments(recs []netresource.ManagedEthernetSegment, reElect func([bpf
 		esi, _, err := vinbero.SegmentEntry(r)
 		if err != nil {
 			continue // InitResourceManager refused such a record
+		}
+		if err := evpn.ValidateESI(esi); err != nil {
+			lg.Warn("Ethernet Segment restored from the state file has an ESI that BGP peers would reject; it is not elected at start and not advertised (delete it with vbctl es delete and create it again with a valid ESI)",
+				zap.String("esi", r.ESI), zap.Error(err))
+			continue
 		}
 		if reElect != nil {
 			reElect(esi)

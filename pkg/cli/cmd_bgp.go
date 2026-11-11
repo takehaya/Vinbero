@@ -154,7 +154,7 @@ func bgpCommand() *cli.Command {
 					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
 					&cli.StringFlag{Name: "sid", Required: true, Usage: "Local End.DT2U SID (IPv6)"},
 					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop (IPv6)"},
-					&cli.StringFlag{Name: "esi", Usage: "Ethernet Segment Identifier (10-octet, optional)"},
+					&cli.StringFlag{Name: "esi", Usage: esiUsage + " Optional; empty is single-homed."},
 				},
 				Action: func(c *cli.Context) error {
 					m := &v1.BgpEvpnMac{
@@ -251,7 +251,7 @@ func bgpCommand() *cli.Command {
 				Usage: "Advertise a local EVPN RT4 (Ethernet Segment) with an ES-Import RT",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:1"},
-					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet, e.g. 00:11:...)"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: esiUsage},
 					&cli.StringFlag{Name: "es-import-rt", Required: true, Usage: "ES-Import route target as a MAC (aa:bb:cc:dd:ee:ff)"},
 					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop / originating PE source (IPv6)"},
 				},
@@ -298,7 +298,7 @@ func bgpCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
 					&cli.StringFlag{Name: "route-targets", Required: true, Usage: "Export route targets (comma-separated)"},
-					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet, e.g. 00:11:...)"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: esiUsage},
 					&cli.BoolFlag{Name: "per-es", Usage: "Emit the per-ES form (Ethernet Tag = MAX-ET)"},
 					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID (per-EVI form)"},
 					&cli.StringFlag{Name: "sid", Usage: "Local End.DT2U SID (IPv6); required for the per-EVI form"},

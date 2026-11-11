@@ -81,15 +81,23 @@ type BpfBumPlan struct {
 	Len        uint16
 	N_uplinks  uint8
 	Shared     uint8
-	Pad        [6]uint8
+	Hairpin    uint8
+	Pad        [5]uint8
 	Up         [8]struct {
 		_       structs.HostLayout
 		Ifindex uint32
-		Slots   uint8
+		Slots   uint32
 		N       uint8
 		NextIdx uint8
 		Local   uint8
+		_       [1]byte
 	}
+}
+
+type BpfBumSlots struct {
+	_    structs.HostLayout
+	Gen  uint32
+	Mask uint32
 }
 
 type BpfBumTestParams struct {
@@ -426,6 +434,7 @@ type BpfMapSpecs struct {
 	AdCacheMap             *ebpf.MapSpec `ebpf:"ad_cache_map"`
 	AuxOwnerMap            *ebpf.MapSpec `ebpf:"aux_owner_map"`
 	BdConfigMap            *ebpf.MapSpec `ebpf:"bd_config_map"`
+	BdFloodSlotsMap        *ebpf.MapSpec `ebpf:"bd_flood_slots_map"`
 	BdLocalEsiMap          *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap         *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap              *ebpf.MapSpec `ebpf:"bd_peer_map"`
@@ -435,6 +444,7 @@ type BpfMapSpecs struct {
 	BumLocalMap            *ebpf.MapSpec `ebpf:"bum_local_map"`
 	BumPlanRing            *ebpf.MapSpec `ebpf:"bum_plan_ring"`
 	BumSeq                 *ebpf.MapSpec `ebpf:"bum_seq"`
+	BumSlotsMap            *ebpf.MapSpec `ebpf:"bum_slots_map"`
 	BumTestParamsMap       *ebpf.MapSpec `ebpf:"bum_test_params_map"`
 	BumTxMap               *ebpf.MapSpec `ebpf:"bum_tx_map"`
 	BumUplinkResync        *ebpf.MapSpec `ebpf:"bum_uplink_resync"`
@@ -519,6 +529,7 @@ type BpfMaps struct {
 	AdCacheMap             *ebpf.Map `ebpf:"ad_cache_map"`
 	AuxOwnerMap            *ebpf.Map `ebpf:"aux_owner_map"`
 	BdConfigMap            *ebpf.Map `ebpf:"bd_config_map"`
+	BdFloodSlotsMap        *ebpf.Map `ebpf:"bd_flood_slots_map"`
 	BdLocalEsiMap          *ebpf.Map `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap         *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap              *ebpf.Map `ebpf:"bd_peer_map"`
@@ -528,6 +539,7 @@ type BpfMaps struct {
 	BumLocalMap            *ebpf.Map `ebpf:"bum_local_map"`
 	BumPlanRing            *ebpf.Map `ebpf:"bum_plan_ring"`
 	BumSeq                 *ebpf.Map `ebpf:"bum_seq"`
+	BumSlotsMap            *ebpf.Map `ebpf:"bum_slots_map"`
 	BumTestParamsMap       *ebpf.Map `ebpf:"bum_test_params_map"`
 	BumTxMap               *ebpf.Map `ebpf:"bum_tx_map"`
 	BumUplinkResync        *ebpf.Map `ebpf:"bum_uplink_resync"`
@@ -582,6 +594,7 @@ func (m *BpfMaps) Close() error {
 		m.AdCacheMap,
 		m.AuxOwnerMap,
 		m.BdConfigMap,
+		m.BdFloodSlotsMap,
 		m.BdLocalEsiMap,
 		m.BdPeerL2ExtMap,
 		m.BdPeerMap,
@@ -591,6 +604,7 @@ func (m *BpfMaps) Close() error {
 		m.BumLocalMap,
 		m.BumPlanRing,
 		m.BumSeq,
+		m.BumSlotsMap,
 		m.BumTestParamsMap,
 		m.BumTxMap,
 		m.BumUplinkResync,

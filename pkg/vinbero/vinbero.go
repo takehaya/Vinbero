@@ -73,6 +73,10 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 	if err := mapOps.RecoverAuxIndices(); err != nil {
 		logger.Warn("failed to recover aux indices, starting fresh", zap.Error(err))
 	}
+	if err := mapOps.RecoverBdFloodSlots(); err != nil {
+		_ = obj.Close()
+		return nil, fmt.Errorf("recover the flood slots of the bridge domains: %w", err)
+	}
 
 	var bumSync *bpf.BumDevmapSync
 	if l2 := &cfg.Setting.L2; l2.ConfiguresXDP() {

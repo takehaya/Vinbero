@@ -15,26 +15,27 @@ BD のリモート PE は `bd_peer_map` の `{bd_id, index}` に入ります。i
 
 | index | 役割 | 入るもの |
 |---|---|---|
-| 0〜7 | flood スロット（BUM のコピー先） | EVPN の RT3（End.DT2M）の peer、`vbctl peer create` の peer、plugin の flood peer |
-| 8〜31 | flood スロットを増やすときのために空けてある範囲 | なし |
+| 0〜31 | flood スロット（BUM のコピー先） | EVPN の RT3（End.DT2M）の peer、`vbctl peer create` の peer、plugin の flood peer |
 | 32〜63 | Ethernet Segment の peer（EVPN aliasing の合成 peer。[ecmp.md](ecmp.md)） | BGP applier が作る peer |
 | 64〜127 | 既知 unicast だけに使う peer | EVPN の RT2（End.DT2U）の peer、plugin の unicast 専用の peer |
 
-どちらのモードも、BUM の複製では flood スロット（0〜7）だけを見ます。RT2 の peer は flood スロットを使いません。そのため、1 つの BD に入る node 数は flood スロットの数で決まります。
+どちらのモードも、BUM の複製では flood スロット（0〜31）だけを見ます。RT2 の peer は flood スロットを使いません。そのため、1 つの BD に入る node 数は flood スロットの数で決まります。
 
-- 1 BD のリモート PE は 8 台まで、ローカルの PE を含めて 9 node までです。リモート PE は RT3 の peer ごとにスロットを 1 つ使います。
-- `vbctl peer create` の peer も同じ 8 スロットを使います。手動の peer を作ると、その数だけ入る PE が減ります。
+- 1 BD のリモート PE は 32 台まで、ローカルの PE を含めて 33 node までです。リモート PE は RT3 の peer ごとにスロットを 1 つ使います。
+- `vbctl peer create` の peer と plugin の flood peer も同じ 32 スロットを使います。手動の peer を作ると、その数だけ入る PE が減ります。
 - RT2 の peer は BD あたり 64 個までです（リモート PE の End.DT2U SID ごとに 1 個）。
 - 空きがないとき、`peer create` はエラーを返します。BGP の経路は書き込まず、警告をログに出します。その BD の同じ範囲で peer が消えて空きができると、vinberod は受信済みの EVPN 経路をすべて入れ直し、入らなかった経路を書き込みます。
 
-xdp モードの devmap は、ローカル AC のデバイスと flood スロットを合わせて 32 エントリーまでです（「要件と制約」）。
+複製は、BD の使っているスロットだけを回ります。TC モードは `bd_flood_slots_map`（BD ごとに、peer のあるスロットのビット集合）を、xdp モードは `bum_slots_map`（次節）を引きます。リモート PE が 2 台の BD は、32 スロットすべてではなく 2 スロットぶんの処理で済みます。`bd_flood_slots_map` は control plane が peer を書く前にビットを立て、消した後に下ろします。pin しない map なので、起動時に `bd_peer_map` から作り直します。
+
+xdp モードで 1 つの BD に入れられる数（ローカル AC のデバイス、flood スロットの uplink）は「要件と制約」を参照してください。
 
 ## xdp モードの経路
 
 送信側（AC から入った BUM）:
 
 1. XDP の L2 headend がいつもどおり送信元 MAC を学習し、宛先が multicast か FDB miss なら、BD の devmap（`bum_flood_map[bd_id]`）で broadcast します。
-2. devmap のメンバーはローカル AC（key は ifindex）と、リモートの flood スロット（key は `0x80000000 | index`）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。ローカル AC のエントリーは program を持ちません。ただし、AC のデバイスがその BD のスロットの uplink でもある場合（AC と uplink が同じポート）は、そのエントリーにも同じ egress program を付けます（後述）。native XDP では、すべてのエントリーに付けます（「native XDP」の節）。
+2. devmap のメンバーはローカル AC（key は ifindex）と、リモートの flood スロット（key は `0x80000000 | 組み立て番号 << 8 | index`。後述）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。ローカル AC のエントリーは program を持ちません。ただし、AC のデバイスがその BD のスロットの uplink でもある場合（AC と uplink が同じポート）は、そのエントリーにも同じ egress program を付けます（後述）。native XDP では、すべてのエントリーに付けます（「native XDP」の節）。
 3. ingress program は broadcast の直前に、そのフレームの複製計画（以下 plan）を CPU ごとのリングに書きます（次節）。
 4. `bpf_redirect_map(BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)` で broadcast します。入力ポートが、送るスロットの uplink でもある場合だけは `BPF_F_EXCLUDE_INGRESS` を付けません（付けると、そのポートへのリモートのコピーも除かれるため）。plan を書くときに引いた devmap をそのまま使うので、control plane が devmap を差し替えている最中でも、plan と broadcast が別々の版を見ることはありません。
 5. egress program はコピーごとに、plan から自分の uplink の項目を探して次のスロットを 1 つ取り、`bd_peer_map[{bd_id, スロット}]` の peer へ H.Encaps.L2（.Red）をかけて、FIB の結果で MAC を書き換えます。
@@ -43,12 +44,15 @@ xdp モードの devmap は、ローカル AC のデバイスと flood スロッ
 
 受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ。generic XDP では egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
 
-devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
+devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。内側の map の大きさは、入れるエントリー数（ローカル AC のデバイスとスロットの数）を 2 のべき乗に切り上げた値（最小 4）です。broadcast は DEVMAP_HASH のバケットをすべてたどるので、小さい BD は小さい devmap で済みます。
 
-xdp モードで正しく扱えない BD には、control plane は devmap を作りません。次の 3 つです。
+組み立てるたびに番号を振り、スロットの key にその番号を入れます。差し替えの前に、その組み立てで devmap に入れたスロットの集合と番号を `bum_slots_map[bd_id]` に書きます。組み立て直しの最中に読んだフレームは、番号と集合を別々の組み立てから読むことがあります。その場合も送り先を誤ることはありません。devmap にない番号なら key が見つからず tc モードの経路へ回り、集合が小さければ、入っていないスロットのコピーは plan に項目がなく、egress program が破棄します（次節の手順 3）。ingress program は、この集合のスロットだけを、その番号の key で devmap から引きます。1 つでも見つからなければ、引いた devmap は別の組み立てのもの（差し替えの最中や、デバイスの登録解除で kernel が消したエントリーがある場合）なので、そのフレームは tc モードの経路へ回します（`BUM_XDP_FALLBACK`）。plan の項目がないスロットのコピーを broadcast しないためです。集合が空の BD は、スロットのエントリーを持たない `bum_local_map[bd_id]` で broadcast します。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
+
+xdp モードで正しく扱えない BD には、control plane は devmap を作りません。次の 4 つです。
 
 - AC の VLAN ID が揃っていない BD。xdp モードはフレームを VLAN tag ごとそのまま送ります（後述）。
-- AC のデバイスとスロットの合計が、devmap の 32 エントリーに収まらない BD。
+- AC のデバイスとスロットの合計が 256 を超える BD。
+- flood スロットの peer の uplink が 9 個以上ある BD。plan は uplink を 8 個まで持ちます（次節）。
 - AC によって peer の uplink の答えが割れる BD（「ECMP の underlay」の節）。
 
 このような BD は、BUM も既知 unicast も TC モードと同じ経路（TC の複製と bridge）を通り、BUM は `BUM_XDP_FALLBACK` に数えます。理由は、状態が変わったときに 1 回、警告としてログに出します。構成が直れば、次の組み立てで xdp モードに戻ります。MAC 学習の通知（次段落）は、その間も XDP の学習から出ます。
@@ -62,21 +66,21 @@ xdp モードの BD では kernel の bridge が MAC を学習しないため、
 | map | 型 | 中身 |
 |---|---|---|
 | `bum_seq` | `PERCPU_ARRAY`（1 エントリー、u64） | CPU ごとの通し番号。AC から入った BUM フレーム 1 つごとに `seq = (*p)++` |
-| `bum_plan_ring` | `PERCPU_ARRAY`（1024 エントリー、各 96 バイト） | `seq & 1023` の位置に、そのフレームの plan |
+| `bum_plan_ring` | `PERCPU_ARRAY`（1024 エントリー、各 128 バイト） | `seq & 1023` の位置に、そのフレームの plan |
 
 plan の中身は次のとおりです。
 
 - `seq`（照合用）、送信元 AC の ifindex、`bd_id`、フレーム長
-- uplink ごと（最大 8 個）の項目: uplink の ifindex、送るスロットの集合（ビット i がスロット i、小さい順に割り当てる）、個数 `n`、割り当て済みの数 `next_idx`、そのデバイスがこの BD のローカル AC でもあるか（`local`。送信元 AC 自身なら 0）。項目は、devmap にスロットのエントリーがある uplink すべてに作ります（送るスロットが 0 個でも）
+- uplink ごと（最大 8 個）の項目: uplink の ifindex、送るスロットの集合（32 ビット。ビット i がスロット i、小さい順に割り当てる）、個数 `n`、割り当て済みの数 `next_idx`、そのデバイスがこの BD のローカル AC でもあるか（`local`。送信元 AC 自身なら 0）。項目は、devmap にスロットのエントリーがある uplink すべてに作ります（送るスロットが 0 個でも）
 - ingress 時点の `ctx->data`（共有バッファの検出用、後述）
 
-送るスロットは ingress で決めます。対象は、devmap にエントリーがあり（uplink にはそのエントリーの ifindex を使う）、`bd_peer_map` に peer があり、`flood_exclude` でなく、送信元 AC と同じ Ethernet Segment にない（RFC 9252 の split horizon）スロットです。判定の規則は TC モードの `tc_dispatch_bum_clones` と同じで、split horizon で除いたスロットは `SPLIT_HORIZON_TX` に数えます。encap のヘッダーは plan に入れず、egress program が `bd_peer_map` から引きます。ヘッダーまで入れると、CPU 数 × 1024 × 8 スロット分の容量が要るためです。
+送るスロットは ingress で決めます。対象は、`bum_slots_map` の集合にあって devmap にエントリーがあり（uplink にはそのエントリーの ifindex を使う）、`bd_peer_map` に peer があり、`flood_exclude` でなく、送信元 AC と同じ Ethernet Segment にない（RFC 9252 の split horizon）スロットです。判定の規則は TC モードの `tc_dispatch_bum_clones` と同じで、split horizon で除いたスロットは `SPLIT_HORIZON_TX` に数えます。encap のヘッダーは plan に入れず、egress program が `bd_peer_map` から引きます。ヘッダーまで入れると、CPU 数 × 1024 × 32 スロット分の容量が要るためです。
 
 egress program の手順は次のとおりです。
 
 1. 担当する `seq` と送信元 AC を決めます。generic XDP では、この CPU の最新の seq（`bum_seq` の値 − 1）と `ctx->ingress_ifindex` です。native XDP では、コピーが運ぶ metadata から読みます（後述）。
 2. `bum_plan_ring[seq & 1023]` を引き、plan の `seq`、送信元 AC、フレーム長がコピーと一致するか確かめます。一致しなければ破棄し、`BUM_PLAN_STALE` を数えます。
-3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。項目がなければ、スロットのエントリーがないデバイス、つまりローカル AC へのコピーなので、そのまま `XDP_PASS` で送ります（ローカル AC のエントリーにも program を付ける native XDP で起きます）。
+3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。項目がなければ、スロットのエントリーがないデバイス、つまりローカル AC へのコピーなので、そのまま `XDP_PASS` で送ります（ローカル AC のエントリーにも program を付ける native XDP で起きます）。ただし、そのデバイスが BD のローカル AC（flood の devmap の key）でなければ破棄し、`BUM_PLAN_SURPLUS` を数えます。plan が組み立て直しの最中に読んだスロットの集合から漏れたスロットのコピーで、encap せずに uplink へ出してはいけないためです。
 4. `idx < n` なら、集合の `idx` 番目のスロットの peer へ encap し、FIB の出力先がエントリーの uplink と一致することを確かめてから、`XDP_PASS` で送ります。
 5. `idx == n` で `local` が 1 なら、そのデバイスのローカル AC へのコピーとして、そのまま `XDP_PASS` で送ります。コピーはどれも同じなので、どのコピーをローカル用にしても結果は変わりません。
 6. それ以外は破棄し、`BUM_PLAN_SURPLUS` を数えます。devmap のエントリーは uplink の先の peer の数だけあるので、split horizon や `flood_exclude` で ingress が除いた分だけコピーが余ります。入力ポートを除かずに broadcast したときの、送信元 AC 自身へのコピーもここで破棄されます。
@@ -131,8 +135,8 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - native XDP では、同じホストの vinbero 以外の XDP program から、BD の devmap が送るデバイスへ `bpf_redirect` しないでください。`bum_tx_map` を通らない redirect は、上の決まりを破ります。vinbero の plugin は `bpf_redirect` を呼べない（読み込み時の検査で拒否されます）ので、この心配はありません。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
 - AC の VLAN tag は、ローカルへのコピーでも既知 unicast でもリモートへのコピーでも、そのまま運びます。BD のすべての AC が同じ VLAN ID なら、これは bridge と同じ結果です（bridge のメンバーがポートそのものでも、ポート上の VLAN デバイスでも）。VLAN ID の違う AC が混ざる BD では、フレームが他の AC でどう見えるべきかは bridge の構成で決まります（ポート上の VLAN デバイスをメンバーにすれば、bridge は tag を付け替えます）。同じポートの別の VLAN どうしも、bridge を通らなければ届きません。そこで、このような BD は tc モードで動かします（前述）。
-- devmap は 1 BD あたり 32 エントリー（ローカル AC のデバイスとリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
-- `bum_plan_ring` は CPU ごとに 96 KiB（96 バイト × 1024）を使います。
+- devmap は 1 BD あたり 256 エントリー（ローカル AC のデバイスとリモートのスロット 32 個までの合計）、flood スロットの uplink は 1 BD あたり 8 個、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
+- `bum_plan_ring` は CPU ごとに 128 KiB（128 バイト × 1024）を使います。`bum_slots_map`（512 KiB）と `bd_flood_slots_map`（256 KiB）は CPU 数によりません。
 - egress program は出力デバイスを変えられません。FIB の結果が devmap の uplink と違うコピーは破棄し、`BUM_UPLINK_MISMATCH` を数えます。control plane が uplink をどう決め、変化にどう追従するかは「ECMP の underlay」の節を参照してください。
 - egress program は、next hop の neighbor エントリーが解決していないコピーを kernel に渡して解決させることができません（メインの program は `XDP_PASS` で渡します）。そこで control plane は、devmap を組み立てるたびに、各スロットの uplink の next hop（経路の gateway、on-link なら peer 自身）を managed の neighbor エントリー（`NTF_EXT_MANAGED`、`ip neigh` の `managed extern_learn`）にします。kernel は、通信がなくてもこのエントリーを解決し、解決したまま保ちます。next hop が応答しない間も定期的に解決を試みます（`extern_learn` は、失敗中のエントリーを neighbor の GC に消させないために付けます）。静的なエントリー（permanent、noarp）はそのままにします。managed にしたエントリーは、vinberod が止まっても残ります。まだ解決していないコピーは破棄し、`BUM_EGRESS_NO_NEIGH` を数えます。
 - uplink の MTU は「内側フレーム + 外側 IPv6 + SRH」以上にしてください（devmap の MTU 確認は encap 前の長さで行われます）。
@@ -195,7 +199,7 @@ settings:
 |---|---|
 | `BUM_XDP_FLOOD` | AC から入った BUM を devmap で broadcast した |
 | `BUM_XDP_LOCAL_FLOOD` | decap 後の flood をローカル AC へ broadcast した |
-| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がない、xdp モードで扱えない構成の BD、またはこのカーネルで xdp モードを使えない） |
+| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がない、devmap が `bum_slots_map` と別の組み立てのもの、xdp モードで扱えない構成の BD、またはこのカーネルで xdp モードを使えない） |
 | `BUM_EGRESS_TX` | egress program がリモートへのコピーを encap した |
 | `BUM_EGRESS_DROP` | egress program がコピーを破棄した（plan の後で peer が消えた、encap や FIB の失敗） |
 | `BUM_UPLINK_MISMATCH` | FIB の出力先が devmap の uplink と違った（破棄して組み立て直す） |

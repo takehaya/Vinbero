@@ -204,7 +204,7 @@ RPC は、state.json への書き込みが成功したときだけ成功を返�
 ```json
 "runtime_ethernet_segments": [
   {
-    "esi": "01:00:00:00:00:00:00:00:00:01",
+    "esi": "01:00:00:00:00:00:00:00:01:00",
     "local_attached": true,
     "redundancy_mode": "ESI_REDUNDANCY_MODE_ALL_ACTIVE",
     "local_pe_src_addr": "fc00:1::1",
@@ -221,6 +221,7 @@ RPC は、state.json への書き込みが成功したときだけ成功を返�
 - 復元は state を読んだ直後、L2 headend の回線の復元の前に行います。VRF table の reconcile、EVPN の掃除、XDP attach、BGP より前です。ESI を持つ回線の最初のフレームから split horizon と DF の判定が効き、BGP の DF 選出は最初に受信した RT4 から local attach を見ます
 - Ethernet Segment の記録は interface を持たないので、照合せずにそのまま戻します。ESI を持つ回線は回線の規則 (ifindex、名前、hardware address の一致) で戻るかどうかが決まり、interface が消えた回線は戻りませんが Ethernet Segment は戻ります。稼働中に interface を消したときも、消えるのは回線だけで Ethernet Segment は残ります
 - BGP を有効にした起動では、session の起動の後に、local attach の Ethernet Segment の DF を選び直し、EVPN auto-advertise が有効で `rd` を持つものの RT4 を広告します (`es create` の後と同じです)
+- state.json の Ethernet Segment または L2 headend の回線の ESI が、受け付ける形 ([srv6_bgp.md](srv6_bgp.md) の ESI の type ごとの並び) を満たさないときも起動は止まりません。どちらも data plane に戻しますが、警告に ESI を示します。Ethernet Segment は起動時の DF の選出と RT4 の広告を行いません (ほかの PE の RT4 を受信したときの DF の選出は通常どおり走ります。type 6 以上の ESI は GoBGP の受信側が通すためです)。`vbctl es delete` (回線は `hl2 delete`) で消して、正しい ESI で作り直してください
 
 RPC は、`esi_map` と state.json の両方を書けたときだけ成功を返します。
 
@@ -340,16 +341,20 @@ pin dir を消すと、SID、headend、owner、SR Policy、ECMP group など、p
 
 ### BD peer の index
 
-`bd_peer_map` の index は範囲ごとに役割が決まっています (0〜7 が flood スロット、8〜31 は空けてある範囲、32〜63 が Ethernet Segment の peer、64〜127 が RT2 などの unicast だけの peer。[bum_mode.md](bum_mode.md#flood-スロットと-bd-の-node-数))。key と value の形は同じなので、[互換条件](#pin-の互換条件) では違いを検出できません。そこで起動時、XDP の attach の前に次を行います。
+`bd_peer_map` の index は範囲ごとに役割が決まっています (0〜31 が flood スロット、32〜63 が Ethernet Segment の peer、64〜127 が RT2 などの unicast だけの peer。[bum_mode.md](bum_mode.md#flood-スロットと-bd-の-node-数))。key と value の形は同じなので、[互換条件](#pin-の互換条件) では違いを検出できません。そこで起動時、XDP の attach の前に次を行います。
 
-1. BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消します (index に関係なく owner で判断します)。あわせて、Ethernet Segment の peer の範囲 (32〜63) と、flood スロットと RT2 の peer が 0〜7 を共有し Ethernet Segment の peer を 8〜39 に置く配置で書かれた範囲 (8〜39) から、owner の無い peer とそれを指す FDB を消します。消した peer を指していた学習済みの MAC (owner が無く static でない remote の FDB) も消します。残すと、同じ index に後から入る別の peer (別の PE の flood peer など) へ既知 unicast が届くためです。
-2. BGP の有無にかかわらず、空けてある範囲 (8〜31) に peer、owner の記録、reverse entry、remote の FDB の参照が残っていれば、起動を拒否します。どれも推測では消しません。エラーには BD、index、owner が並びます。
+flood スロットと RT2 の peer が 0〜7 を共有し、Ethernet Segment の peer を 8〜39 に置く配置で書かれた pin も、同じ手順で扱います。その配置の Ethernet Segment の peer は ECMP group を持ちます (`flood_exclude` も立っています)。flood スロットに ECMP group を持つ peer を書くものはほかにありません。
+
+1. BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消します (index に関係なく owner で判断します)。あわせて、Ethernet Segment の peer の範囲 (32〜63) から、owner の無い peer とそれを指す FDB を消します。8〜31 では、ECMP group を持つ peer (その配置の Ethernet Segment の peer) だけを同じ規則で消し、ほかの peer は flood スロットの peer として残します。消した peer を指していた学習済みの MAC (owner が無く static でない remote の FDB) も消します。残すと、同じ index に後から入る別の peer (別の PE の flood peer など) へ既知 unicast が届くためです。
+2. BGP の有無にかかわらず、flood スロット (0〜31) に ECMP group を持つ peer が残っていれば、起動を拒否します。別の ASN の applier がその配置で書いた Ethernet Segment の peer で、推測では消しません。エラーには BD、index、group、owner が並びます。
 
 ```
-the pinned bridge-domain maps use peer indices of the reserved flood [8, 32) range, which the peer index layout keeps free (1 in all): peer {bd 300, index 10} (bgp:v1:asn=65001:evpn). ...
+the pinned bridge-domain maps hold Ethernet Segment peers in the flood [0, 32) range (1 in all): peer {bd 300, index 10} with ECMP group 81 (bgp:v1:asn=65001:evpn). ...
 ```
 
-拒否されたときは、その owner の ASN で BGP を有効にして起動する (その applier が自分の entry を消します) か、daemon を止めて pin dir を消し、状態を入れ直してください。index 0〜7 の operator の peer (`vbctl peer create`) は flood スロットのまま使われ続けます。
+拒否されたときは、その owner の ASN で BGP を有効にして起動する (その applier が自分の entry を消します) か、daemon を止めて pin dir を消し、状態を入れ直してください。operator の peer (`vbctl peer create`) と plugin の flood peer は、どのスロットにあっても flood スロットのまま使われ続けます。
+
+flood スロットの集合を持つ map (`bd_flood_slots_map`、`bum_slots_map`) は pin しません。起動時に `bd_peer_map` と devmap の組み立てから作り直します。
 
 ### Aux index の allocator recovery
 

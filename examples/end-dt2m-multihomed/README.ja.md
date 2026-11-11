@@ -6,7 +6,7 @@ RFC 9252 の split-horizon フィルタリングと静的 DF 選出を、**host1
 ブリッジ経由で PE1 と PE2 にデュアルホームする** 5-namespace トポロジー上で
 検証します。
 
-- ESI: `01:00:00:00:00:00:00:00:00:01` (PE1/PE2 共に `local_attached`)
+- ESI: `01:00:00:00:00:00:00:00:01:00` (PE1/PE2 共に `local_attached`)
 - Bridge Domain: `bd_id = 100` / VLAN 100
 - host1 の MAC は MAC Pinning で `02:00:00:00:00:01` 固定
 - host1 側の veth は `ethtool -K <veth> txvlan off` で VLAN タグをパケット
@@ -69,11 +69,11 @@ sudo ./teardown.sh
    です。netns 内に `vbctl` という実バイナリはありません。`--esi` には冒頭の実
    ESI を渡します。
    - 初期状態は DF=PE1。両 PE で
-     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:1::1` を実行して DF を一致させる。
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:01:00 --pe fc00:1::1` を実行して DF を一致させる。
    - リモートからの `PE3 → BUM → host1` は PE1 経由でのみ host1 に届く
      (PE2 側は `NON_DF_DROP` で落ちる)。
    - DF を PE2 に切り替え:
-     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:01:00 --pe fc00:2::2`
      → 以降は PE2 経由で届く。
 3. **再起動 (Phase E)**: PE1 は map を pin して動かします。PE1 を kill し、
    pin した `headend_l2_map` を消してから、何も設定し直さずに起動し直します。

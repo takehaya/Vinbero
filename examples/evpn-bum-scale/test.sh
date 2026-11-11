@@ -1,7 +1,8 @@
 #!/bin/bash
 # examples/evpn-bum-scale/test.sh
-# NUM_PES Vinbero PEs (default 9: 8 remote PEs per PE, the most one bridge
-# domain floods to) in one EVPN bridge domain, over an iBGP full mesh. Each PE
+# NUM_PES Vinbero PEs (default 9; at most 33: 32 remote PEs per PE, the most
+# one bridge domain floods to) in one EVPN bridge domain, over an iBGP full
+# mesh. Each PE
 # advertises its host's MAC (RT2) and its flood SID (RT3), so every PE holds
 # one RT3 flood peer and one RT2 unicast peer per remote PE. The test checks:
 #
@@ -124,7 +125,7 @@ EOF
 
 settings:
   state_path: /tmp/vinbero_ebs_pe${i}_state.json
-  # Each daemon its own plugin store: the nine start at once.
+  # Each daemon its own plugin store: they all start at once.
   cplane_plugins:
     path: $TMP/pe$i-cplane-plugins
   enable_stats: true
@@ -247,7 +248,7 @@ for i in $(seq 1 "$NUM_PES"); do
     PIDS+=($!)
 done
 for i in $(seq 1 "$NUM_PES"); do
-    wait_vinbero_ready "ebs-pe$i" 127.0.0.1:8080 90
+    wait_vinbero_ready "ebs-pe$i" 127.0.0.1:8080 $((60 + 5 * NUM_PES))
 done
 BUM_EFFECTIVE=$(BUM_MODE="$BUM_MODE" bum_effective_mode "$(pe_log 1)")
 print_info "BUM replication runs in mode ${BUM_EFFECTIVE}"
@@ -261,7 +262,7 @@ print_info "Waiting for every PE to install $REMOTES RT3 and $REMOTES RT2 peers.
 want="$((2 * REMOTES)) $REMOTES"
 for i in $(seq 1 "$NUM_PES"); do
     got=""
-    for _ in $(seq 180); do
+    for _ in $(seq $((120 + 10 * NUM_PES))); do
         got=$(peer_counts "$i")
         [ "$got" = "$want" ] && break
         sleep 1
