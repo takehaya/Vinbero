@@ -142,7 +142,7 @@ VRF BGP binding has no access circuits; imported L3 routes are installed in this
 
 ### 起動時の BGP の entry の削除
 
-BGP を有効にして起動すると、vinberod は data plane を attach する前に、前回の起動でこの node の BGP applier が書いた headend の entry (VPN の trigger と MUP の downlink) を、すべての VRF から消します。pin した map では entry が再起動を越えて残り、binding が停止中に変わった場合などに、経路がもう import されない VRF に残るためです。残ると、その VRF のパケットが別の tenant の PE へ encap されます。経路は BGP から受信し直して書き直します。そのため `pin_maps` を有効にした再起動でも、BGP 由来の転送は経路を受信し直すまで止まります。operator、plugin、MUP gate の entry は消しません。消せない entry があれば起動を止めます。
+BGP を有効にして起動すると、vinberod は data plane を attach する前に、前回の起動でこの node の BGP applier が書いた headend の entry (VPN の trigger と MUP の downlink) と MUP uplink の F-TEID entry を、すべての VRF から消します。pin した map では entry が再起動を越えて残り、binding が停止中に変わった場合などに、経路がもう import されない VRF に残るためです。残ると、その VRF のパケットが別の tenant の PE へ encap されます。経路は BGP から受信し直して書き直します。そのため `pin_maps` を有効にした再起動でも、BGP 由来の転送は経路を受信し直すまで止まります。operator、plugin、MUP gate の entry は消しません (uplink の無い gate は何も転送しません)。消せない entry があれば起動を止めます。
 
 ## kernel device facet
 

@@ -40,6 +40,16 @@ func TestPurgeBGPHeadendsRemovesAnEarlierRunsEntries(t *testing.T) {
 	if err := m.CreateHeadendV6In(7, "2001:db8:2::/64", entry(), bpf.OwnerBGPVPN(asn, "")); err != nil {
 		t.Fatal(err)
 	}
+	// The F-TEID entries of an earlier run's T2ST sessions, in the global
+	// VRF and a tenant one, and a plugin's.
+	for _, inst := range []uint32{0, 7} {
+		if err := m.CreateMupUplinkV4Owned(inst, "192.0.2.1", 0x100, 32, entry(), bpf.OwnerBGPMUP(asn, "65100:1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.CreateMupUplinkV4Owned(7, "192.0.2.2", 0x100, 32, entry(), bpf.OwnerPluginBundle("p")); err != nil {
+		t.Fatal(err)
+	}
 	keep := map[bpf.HeadendID]bpf.OwnerTag{
 		{VRF: 0, Prefix: "10.9.0.0/24"}:  bpf.OwnerRPC,
 		{VRF: 7, Prefix: "10.9.0.0/24"}:  bpf.OwnerPluginBundle("p"),
@@ -73,6 +83,15 @@ func TestPurgeBGPHeadendsRemovesAnEarlierRunsEntries(t *testing.T) {
 	if ids, err := m.ListHeadendV4IDs(); err != nil || len(ids) != len(keep) {
 		t.Errorf("v4 entries left = %v %v", ids, err)
 	}
+	uplinks, err := m.ListMupUplinkV4Owners()
+	if err != nil || len(uplinks) != 1 {
+		t.Errorf("uplinks left = %v %v, want the plugin's only", uplinks, err)
+	}
+	for _, o := range uplinks {
+		if o != bpf.OwnerPluginBundle("p") {
+			t.Errorf("uplink of %s left", o)
+		}
+	}
 }
 
 type failingPurge struct{}
@@ -85,6 +104,18 @@ func (failingPurge) ListHeadendV6OwnerIDs() (map[bpf.HeadendID]bpf.OwnerTag, err
 }
 func (failingPurge) DeleteHeadendV4In(uint32, string, bpf.OwnerTag) error { return nil }
 func (failingPurge) DeleteHeadendV6In(uint32, string, bpf.OwnerTag) error { return nil }
+func (failingPurge) ListMupUplinkV4Owners() (map[bpf.MupUplinkV4Key]bpf.OwnerTag, error) {
+	return nil, nil
+}
+func (failingPurge) ListMupUplinkV6Owners() (map[bpf.MupUplinkV6Key]bpf.OwnerTag, error) {
+	return nil, nil
+}
+func (failingPurge) DeleteMupUplinkV4Owned(uint32, string, uint32, uint8, bpf.OwnerTag) error {
+	return nil
+}
+func (failingPurge) DeleteMupUplinkV6Owned(uint32, string, uint32, uint8, bpf.OwnerTag) error {
+	return nil
+}
 
 // A purge that cannot finish stops the boot: forwarding must not start over
 // entries that may belong to another VRF.

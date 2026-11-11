@@ -808,7 +808,9 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 // instances share the gate's VRF it is left alone, so the endpoint's last
 // session moving does not delete and recreate it -- a window where GTP-U
 // passes unprocessed.
-func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
+//
+// It reports false when a write failed and the session stayed where it was.
+func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) bool {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
@@ -817,7 +819,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	if err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-		return
+		return true
 	}
 	entry.ArgsOffset = bpf.MupArgsOffsetNone
 	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
@@ -827,8 +829,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		if err := a.acquireMUPGate(newGate, dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
 			a.logger.Error("re-key MUP T2ST gate (keeping old instance)",
 				zap.String("endpoint", r.Endpoint), zap.Uint32("vrf_id", newGate), zap.Error(err))
-			a.mupFailed()
-			return
+			return a.mupFailed()
 		}
 	}
 	if err := dp.uplinkCreate(inst, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
@@ -838,8 +839,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		if moveGate && !a.releaseMUPGate(newGate, dp.gatePrefix, gateOwner, dp.deleteGate) {
 			a.oweMUPGateRelease(mupGateKey{vrf: newGate, prefix: dp.gatePrefix})
 		}
-		a.mupFailed()
-		return
+		return a.mupFailed()
 	}
 	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		a.logger.Error("remove old-instance MUP T2ST uplink entry (retaining for retry)",
@@ -860,6 +860,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	a.logger.Info("MUP T2ST uplink re-keyed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 		zap.Uint32("from_vrf_id", old), zap.Uint32("vrf_id", inst))
+	return true
 }
 
 // mupVRFForRoute resolves the VRF a MUP session belongs to: the id of the
@@ -921,7 +922,7 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 			st.instance = id
 			continue
 		}
-		a.rekeyMUPT2ST(st, id)
+		a.rekeyMUPT2ST(st, id) // a failed move is retried by reconcileMUPT2ST
 	}
 	for key, st := range a.mupT1ST {
 		if _, accepted := a.mupVRFForRoute(st.fam, &st.route); !accepted {
@@ -1001,6 +1002,25 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated in applyMUPT2ST
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
 	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
+	// A move to another VRF that failed earlier is retried here, so the
+	// tracked pass converges on the VRF the bindings name.
+	if id, accepted := a.mupVRFForRoute(st.fam, r); accepted && id != st.instance {
+		if st.installedSID != "" {
+			if !a.rekeyMUPT2ST(st, id) {
+				return false
+			}
+		} else {
+			st.instance = id
+		}
+	}
+	// A gate kept after a failed rollback may be in the VRF the session
+	// was in before: the session's gate is the one of its current VRF.
+	if st.installedSID == "" && st.gateHeld && st.gateVRF != a.mupHeadendVRF(st.instance) {
+		if !a.releaseMUPGate(st.gateVRF, dp.gatePrefix, gateOwner, dp.deleteGate) {
+			return a.mupFailed()
+		}
+		st.gateHeld = false
+	}
 
 	sid := a.resolveDirectSID(r)
 	if sid == "" {

@@ -253,8 +253,10 @@ func (l *vpnLab) programmed(prefix string, wantSrc netip.Addr) bool {
 	if !l.bindings.EmptyForFamily(bgp.FamilyVPNv4) {
 		targets, _ := l.bindings.ImportTargetsForFamily(importedRTs(prefix), bgp.FamilyVPNv4)
 		if len(targets) == 0 {
-			if _, ok := l.dp.HeadendV4(0, prefix); ok {
-				l.t.Errorf("%s is in the global VRF although bindings declare vpnv4 and none imports it", prefix)
+			// No VRF imports it: it must be gone from every VRF, the one it
+			// was imported into before included.
+			if l.dp.HeadendV4Anywhere(prefix) {
+				l.t.Errorf("%s is still installed although no VRF imports it", prefix)
 			}
 			return false
 		}
