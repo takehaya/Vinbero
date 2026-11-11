@@ -182,6 +182,13 @@ func TestDecide(t *testing.T) {
 		{"VRF table with a throw route", Snapshot{Rules: append(defaultRules(), l3mdevRules()...), VRFs: vrf,
 			Routes: append(append(baseRoutes(), vrfRoutes(100)...), route(100, unix.RTN_THROW, "10.2.0.0/24"), route(100, unix.RTN_THROW, "2001:db8:2::/48"))},
 			want{v4: "throw"}},
+		{"VRF table closed through a nexthop object only", Snapshot{Rules: append(defaultRules(), l3mdevRules()...), VRFs: vrf,
+			Routes: append(baseRoutes(), Route{Family: unix.AF_INET, Table: 100, Type: unix.RTN_BLACKHOLE, Dst: netip.MustParsePrefix("0.0.0.0/0"), NH: true},
+				Route{Family: unix.AF_INET6, Table: 100, Type: unix.RTN_BLACKHOLE, Dst: netip.MustParsePrefix("::/0"), NH: true})},
+			want{v4: "blackhole nexthop", v6: "unreachable default"}},
+		{"IPv4 VRF route through a blackhole nexthop (may be a throw)", Snapshot{Rules: append(defaultRules(), l3mdevRules()...), VRFs: vrf,
+			Routes: append(append(baseRoutes(), vrfRoutes(100)...), Route{Family: unix.AF_INET, Table: 100, Type: unix.RTN_BLACKHOLE, Dst: netip.MustParsePrefix("10.3.0.0/24"), NH: true})},
+			want{v4: "blackhole nexthop"}},
 		{"VRF table with a TOS default only", Snapshot{Rules: append(defaultRules(), l3mdevRules()...), VRFs: vrf,
 			Routes: append(baseRoutes(), Route{Family: unix.AF_INET, Table: 100, Type: unix.RTN_UNREACHABLE, Dst: netip.MustParsePrefix("0.0.0.0/0"), Tos: 0x10},
 				route(100, unix.RTN_PROHIBIT, "::/0"))},
@@ -245,6 +252,10 @@ func TestParseRoute(t *testing.T) {
 	b = append(b, nl.NewRtAttr(unix.RTA_DST, []byte{192, 0, 2, 1}).Serialize()...)
 	if r, ok, err = parseRoute(b); err != nil || !ok || r.Dst != netip.MustParsePrefix("192.0.2.1/32") || r.Table != 255 {
 		t.Errorf("parsed %+v ok=%v err=%v", r, ok, err)
+	}
+	nh := append(append([]byte(nil), b...), u32(rtaNHID, 7).Serialize()...)
+	if r, ok, err = parseRoute(nh); err != nil || !ok || !r.NH {
+		t.Errorf("route through a nexthop object: parsed %+v ok=%v err=%v", r, ok, err)
 	}
 	binary.NativeEndian.PutUint32(b[8:], unix.RTM_F_CLONED)
 	if _, ok, _ = parseRoute(b); ok {

@@ -102,6 +102,8 @@ func newFibEqEnv(t *testing.T, history string, withVRF bool) *fibEqEnv {
 	} {
 		ipCmd(t, r...)
 	}
+	// An IPv4-mapped IPv6 address in the local table.
+	ipCmd(t, "-6", "route", "add", "local", "::ffff:198.18.0.1/128", "dev", "lo", "table", "local")
 	// Source-specific IPv6 routes need CONFIG_IPV6_SUBTREES.
 	e.srcSubtrees = ipTry("-6", "route", "add", "fc00:e30::/48", "from", "2001:db8:5::/48", "via", "fd00:e::3", "dev", "feq-up") &&
 		ipTry("-6", "route", "add", "fc00:e30::/48", "via", "fd00:e::2", "dev", "feq-up")
@@ -264,6 +266,7 @@ var (
 		"fd00:e::1",          // the node's own address
 		"fd00:e::",           // subnet-router anycast (local table)
 		"2001:db8:ff::1",     // a /128 on lo
+		"::ffff:198.18.0.1",  // IPv4-mapped, in the local table
 		"::1",                // loopback
 		"ff02::1",            // multicast, link scope
 		"ff0e::5",            // multicast, global scope: the default route covers it
@@ -540,6 +543,15 @@ func TestFibGlobalDirectExcludedSetups(t *testing.T) {
 				{"route", "add", "throw", "10.97.0.0/24", "table", "103"},
 			},
 			reason: "throw route",
+		},
+		{
+			name: "VRF table closed through a nexthop object", setup: [][]string{
+				{"link", "add", "feq-vrf5", "type", "vrf", "table", "105"},
+				{"nexthop", "add", "id", "51", "blackhole"},
+				{"route", "add", "default", "nhid", "51", "table", "105"},
+				{"-6", "route", "add", "default", "nhid", "51", "table", "105"},
+			},
+			reason: "blackhole nexthop",
 		},
 		{
 			name: "VRF device without the l3mdev rule", v6: true, setup: [][]string{

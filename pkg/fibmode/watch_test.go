@@ -57,6 +57,8 @@ type fakeNS struct {
 	readErr  error
 	reads    int
 	subs     []chan []syscall.NetlinkMessage
+	down     bool // the current subscription has failed
+	onRead   func()
 	closed   int
 	failSubs int
 }
@@ -65,6 +67,9 @@ func (f *fakeNS) read() (*Snapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
+	if f.onRead != nil {
+		f.onRead()
+	}
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -72,20 +77,25 @@ func (f *fakeNS) read() (*Snapshot, error) {
 	return &s, nil
 }
 
-func (f *fakeNS) subscribe(*netlinksub.State) (<-chan []syscall.NetlinkMessage, func(), error) {
+func (f *fakeNS) subscribe(*netlinksub.State) (*subscription, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failSubs > 0 {
 		f.failSubs--
-		return nil, nil, errors.New("subscribe refused")
+		return nil, errors.New("subscribe refused")
 	}
 	ch := make(chan []syscall.NetlinkMessage, 16)
 	f.subs = append(f.subs, ch)
-	return ch, func() {
+	f.down = false
+	return &subscription{events: ch, stop: func() {
 		f.mu.Lock()
 		f.closed++
 		f.mu.Unlock()
-	}, nil
+	}, down: func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.down
+	}}, nil
 }
 
 func (f *fakeNS) readCount() int {
@@ -284,6 +294,36 @@ func TestWatcherLocalChangeLeavesDirectFirst(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// The stream fails while the namespace is read (an overrun after the rule
+// dump): the read cannot vouch for what happened after the failure, so the
+// direct mode stays off until the stream is back and read again.
+func TestWatcherStreamFailsDuringRead(t *testing.T) {
+	f := &fakeNS{snap: eligible()}
+	m := &fakeMaps{}
+	startWatcher(t, f, m)
+	waitMode(t, m, true, true, "eligible namespace")
+	var ch chan []syscall.NetlinkMessage
+	f.mu.Lock()
+	ch = f.subs[len(f.subs)-1]
+	f.failSubs = 1 << 30                // no new stream for now
+	f.onRead = func() { f.down = true } // called with f.mu held
+	f.mu.Unlock()
+	ch <- ruleEvent(unix.AF_INET)
+	waitMode(t, m, false, true, "IPv4 rule event")
+	time.Sleep(10 * Settle)
+	if a, b := m.mode(); a || b {
+		t.Fatalf("stream failed during the read: IPv4=%v IPv6=%v, want the full lookup", a, b)
+	}
+	// The stream ends (its channel closes after the batches it read) and
+	// comes back: direct again after a read on the new stream.
+	f.mu.Lock()
+	f.onRead = nil
+	f.failSubs = 0
+	f.mu.Unlock()
+	close(ch)
+	waitMode(t, m, true, true, "stream back")
 }
 
 func TestWatcherMapWriteFails(t *testing.T) {

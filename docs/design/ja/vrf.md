@@ -139,7 +139,7 @@ vinberod が family ごとに direct lookup を使うのは、次の条件をす
 - その family の rule がすべて kernel 自身の入れる形をしている: すべての packet に一致し (送信元・宛先・`iif`・`oif`・`fwmark`・`uidrange`・`ipproto`・port・TOS などの selector が無く、`not` も無い)、動作が table の lookup で、`suppress_prefixlength` などが無い。table は local、main、(IPv4 のみ) default、または VRF device が足す l3mdev rule。main を引く rule があり、l3mdev rule は main の rule より前にある。local の rule の位置は問いません (VRF で local の rule を 32765 に移した構成も対象です)。vinberod が知らない属性を持つ rule は、この形ではないものとして扱います
 - local table (255) の経路が、1 つの address への経路 (自分の address、broadcast、anycast) と、kernel が入れる `127.0.0.0/8` (IPv4) と `ff00::/8` (IPv6) だけで、1 つの address への経路が 8192 本以下である。`local 10.0.0.0/8` のような prefix の経路 (AnyIP) があると、その family は対象外です
 - (IPv4) default table (253) に経路が無い
-- VRF device があるときは、その family の l3mdev rule があり、すべての VRF の table が送信元も TOS も無い unreachable、blackhole、prohibit の default 経路を持ち、(IPv4) throw の経路を持たない。Vinbero が作るか adopt して閉じた table はこの形です。`no_unreachable_default` の VRF があると、その family は対象外です
+- VRF device があるときは、その family の l3mdev rule があり、すべての VRF の table が送信元も TOS も nexthop object も無い unreachable、blackhole、prohibit の default 経路を持ち、(IPv4) throw の経路と blackhole の nexthop object を通る経路 (dump では throw と区別できません) を持たない。Vinbero が作るか adopt して閉じた table はこの形です。`no_unreachable_default` の VRF があると、その family は対象外です
 
 data plane は、宛先が local table の経路 (上の 1 つの address、`127.0.0.0/8`、`ff00::/8`) に当たる packet を direct mode でも full lookup で引きます。vinberod は local table の 1 つの address への経路を data plane の map (`fib_local_v4_map`、`fib_local_v6_map`) に写します。
 
@@ -151,7 +151,7 @@ vinberod は、netns の rule、経路、link の変化を netlink で見張り�
 
 制限は次のとおりです。
 
-- 切り替えには窓があります。rule を足してから data plane が full lookup に戻るまでの間 (vinberod が netlink の通知を読んで map を書くまで) は、新しい rule は効きません。`ip rule add` が戻ってから map が書かれるまでを VM で 40 回測ると、中央値 0.3 µs、最大 1.7 µs でした。vinberod が CPU を得られなければ長くなり、上限は保証されません。policy routing を使う node では `"rules"` のままにしてください
+- 切り替えには窓があります。rule を足してから data plane が full lookup に戻るまでの間 (vinberod が netlink の通知を読んで map を書くまで) は、新しい rule は効きません。`ip rule add` が戻ってから map が書かれるまでを VM (kernel 7.0、6.12、6.6) で 40 回ずつ測ると、中央値 0.3〜1.2 µs、最大 1.9 µs でした。vinberod が CPU を得られなければ長くなり、上限は保証されません。policy routing を使う node では `"rules"` のままにしてください
 - direct lookup の間は、上の条件で読んだもの以外は見ていません。条件を外れる変化は通知で full lookup に戻すので、direct lookup が rule を無視したまま続くことはありませんが、rule を足した直後の窓の間だけは無視されます
 - 条件を満たさない family は、全体が full lookup です。開いた VRF の table が 1 つでもあれば、その family はほかの device の lookup も含めて full lookup になります
 - VRF の table の default 経路と throw の経路が変わるたびに、その table を読み直します。大きな VRF の table では読み直しに時間がかかり、その間は full lookup です

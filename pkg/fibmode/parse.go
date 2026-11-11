@@ -71,6 +71,10 @@ func parseRule(m []byte) (Rule, error) {
 	return r, nil
 }
 
+// rtaNHID is RTA_NH_ID (include/uapi/linux/rtnetlink.h), the attribute of a
+// route through a nexthop object; x/sys/unix does not name it.
+const rtaNHID = unix.RTA_DPORT + 1
+
 // rtMsgLen is sizeof(struct rtmsg).
 const rtMsgLen = 12
 
@@ -91,6 +95,7 @@ func parseRoute(m []byte) (r Route, ok bool, err error) {
 		return Route{}, false, fmt.Errorf("route attributes: %w", err)
 	}
 	var dst []byte
+	nh := false
 	for _, a := range attrs {
 		switch a.Attr.Type {
 		case unix.RTA_TABLE:
@@ -99,6 +104,8 @@ func parseRoute(m []byte) (r Route, ok bool, err error) {
 			}
 		case unix.RTA_DST:
 			dst = a.Value
+		case rtaNHID:
+			nh = true
 		}
 	}
 	var addr netip.Addr
@@ -120,5 +127,5 @@ func parseRoute(m []byte) (r Route, ok bool, err error) {
 	if err != nil {
 		return Route{}, false, fmt.Errorf("route prefix /%d: %w", dstLen, err)
 	}
-	return Route{Family: family, Table: table, Type: typ, Dst: p, Src: srcLen != 0, Tos: tos}, true, nil
+	return Route{Family: family, Table: table, Type: typ, Dst: p, Src: srcLen != 0, Tos: tos, NH: nh}, true, nil
 }

@@ -26,8 +26,8 @@
 //   - The IPv4 default table (253) is empty, so the default rule never
 //     changes an answer.
 //   - When a VRF device exists, an l3mdev rule exists, and each VRF table
-//     ends in an unreachable, blackhole or prohibit default with no source
-//     or TOS, and (IPv4) holds no throw route. The rule walk of a lookup on
+//     ends in an unreachable, blackhole or prohibit default with no source,
+//     TOS or nexthop object, and (IPv4) holds no throw route. The rule walk of a lookup on
 //     a VRF device or an enslaved port then always stops in the VRF table,
 //     which is the table the direct lookup reads.
 //
@@ -82,6 +82,11 @@ type Route struct {
 	// route with a TOS: such a route covers only part of the flows.
 	Src bool
 	Tos uint8
+	// NH is set for a route through a nexthop object. Its type in a dump
+	// says what the nexthop does now (a blackhole nexthop makes the route
+	// RTN_BLACKHOLE, whatever its own type), and deleting or replacing the
+	// nexthop changes the route without a route event.
+	NH bool
 }
 
 // VRF is a VRF device of the namespace.
@@ -228,10 +233,12 @@ func checkVRFTables(s *Snapshot, family int) string {
 			if r.Family != family || r.Table != v.Table {
 				continue
 			}
-			if family == unix.AF_INET && r.Type == unix.RTN_THROW {
-				return fmt.Sprintf("VRF %s (table %d) has a throw route (%s)", v.Name, v.Table, r.Dst)
+			if family == unix.AF_INET && (r.Type == unix.RTN_THROW || r.NH && r.Type == unix.RTN_BLACKHOLE) {
+				// A throw route through a blackhole nexthop dumps as a
+				// blackhole route, so such a route may be a throw.
+				return fmt.Sprintf("VRF %s (table %d) has a throw route, or a route through a blackhole nexthop (%s)", v.Name, v.Table, r.Dst)
 			}
-			if r.Dst.Bits() == 0 && rejectType(r.Type) && !r.Src && r.Tos == 0 {
+			if r.Dst.Bits() == 0 && rejectType(r.Type) && !r.Src && r.Tos == 0 && !r.NH {
 				closed = true
 			}
 		}

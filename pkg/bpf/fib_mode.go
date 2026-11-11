@@ -47,7 +47,9 @@ func (m *MapOperations) SyncFibLocal(v4, v6 []netip.Addr) error {
 	}
 	want6 := make(map[[16]byte]struct{}, len(v6))
 	for _, a := range v6 {
-		if a.Is6() && !a.Is4In6() {
+		// An IPv4-mapped address (::ffff:a.b.c.d) is an IPv6 destination
+		// of its own; keep it in its 16-byte form.
+		if a.Is6() {
 			want6[a.As16()] = struct{}{}
 		}
 	}

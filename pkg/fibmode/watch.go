@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,9 +48,10 @@ type Watcher struct {
 	// read lists the namespace's state and subscribe opens the event
 	// stream; tests replace them.
 	read      func() (*Snapshot, error)
-	subscribe func(st *netlinksub.State) (<-chan []syscall.NetlinkMessage, func(), error)
+	subscribe func(st *netlinksub.State) (*subscription, error)
 
-	st *netlinksub.State
+	st  *netlinksub.State
+	sub *subscription // the open event stream, nil while there is none
 
 	// What the maps hold (written: once at least), and what was logged
 	// last.
@@ -98,21 +100,34 @@ func (w *Watcher) Start(ctx context.Context) error {
 	return nil
 }
 
+// subscription is an open event stream.
+type subscription struct {
+	events <-chan []syscall.NetlinkMessage
+	stop   func()
+	// down reports that the stream failed; its channel may still hold the
+	// batches read before the failure, and is closed after them.
+	down func() bool
+}
+
 func (w *Watcher) run(quit <-chan struct{}) {
 	defer func() {
+		if w.sub != nil {
+			w.sub.stop()
+		}
 		if err := w.setMode(false, false); err != nil {
 			w.logger.Warn("global FIB lookup mode: cannot write the full lookup on stop", zap.Error(err))
 		}
 	}()
-	events, closeSub, err := w.subscribe(w.st)
+	sub, err := w.subscribe(w.st)
 	for err != nil {
 		if !netlinksub.Wait(quit, w.st.Failed(err)) {
 			return
 		}
-		if events, closeSub, err = w.subscribe(w.st); err == nil {
+		if sub, err = w.subscribe(w.st); err == nil {
 			w.st.Restored()
 		}
 	}
+	w.sub = sub
 	listing := netlinksub.NewListing(w.logger, "global FIB lookup mode")
 	retry := listing.Result(w.resync())
 	settle := time.NewTimer(Settle)
@@ -120,25 +135,27 @@ func (w *Watcher) run(quit <-chan struct{}) {
 	for {
 		select {
 		case <-quit:
-			closeSub()
 			return
 		case <-retry:
 			retry = listing.Result(w.resync())
 		case <-settle.C:
 			retry = listing.Result(w.resync())
-		case msgs, ok := <-events:
+		case msgs, ok := <-w.sub.events:
 			if ok {
 				if w.handle(msgs) {
 					settle.Reset(Settle)
 				}
 				continue
 			}
-			closeSub()
+			w.sub.stop()
+			w.sub = nil
 			w.fallBack("the event subscription ended")
 			settle.Stop()
 			if !w.st.Again(quit, func() error {
-				var err error
-				events, closeSub, err = w.subscribe(w.st)
+				sub, err := w.subscribe(w.st)
+				if err == nil {
+					w.sub = sub
+				}
 				return err
 			}) {
 				return
@@ -163,10 +180,20 @@ func (w *Watcher) resync() error {
 		w.vrfTables[v.Table] = true
 		w.vrfLinks[int32(v.Index)] = true
 	}
+	// The read is only good if no event was lost while it ran: a stream
+	// that failed meanwhile is resubscribed and read again by the loop.
+	if w.sub == nil || w.sub.down() {
+		w.fallBack("the event subscription failed")
+		return nil
+	}
 	d := Decide(s)
 	if err := w.apply(d); err != nil {
 		w.fallBack("the data-plane maps could not be written")
 		return err
+	}
+	if w.sub.down() {
+		w.fallBack("the event subscription failed")
+		return nil
 	}
 	w.log(d)
 	return nil
@@ -276,7 +303,7 @@ func (w *Watcher) affects(m syscall.NetlinkMessage) (v4, v6 bool) {
 		switch {
 		case r.Table == tableLocal,
 			r.Table == tableDefault && r.Family == unix.AF_INET,
-			w.vrfTables[r.Table] && (r.Dst.Bits() == 0 || r.Type == unix.RTN_THROW):
+			w.vrfTables[r.Table] && (r.Dst.Bits() == 0 || r.Type == unix.RTN_THROW || r.NH && r.Type == unix.RTN_BLACKHOLE):
 			return family(r.Family)
 		}
 		return false, false
@@ -324,24 +351,26 @@ func linkKind(b []byte) (string, error) {
 // channel carries each batch the socket reads and is closed when a read
 // fails (an overrun, ENOBUFS, among others), which ends the subscription;
 // the error goes to st. The returned func closes the socket.
-func subscribeEvents(st *netlinksub.State) (<-chan []syscall.NetlinkMessage, func(), error) {
+func subscribeEvents(st *netlinksub.State) (*subscription, error) {
 	s, err := nl.Subscribe(unix.NETLINK_ROUTE,
 		unix.RTNLGRP_IPV4_RULE, unix.RTNLGRP_IPV6_RULE,
 		unix.RTNLGRP_IPV4_ROUTE, unix.RTNLGRP_IPV6_ROUTE,
 		unix.RTNLGRP_LINK)
 	if err != nil {
-		return nil, nil, fmt.Errorf("subscribe to rule, route and link events: %w", err)
+		return nil, fmt.Errorf("subscribe to rule, route and link events: %w", err)
 	}
 	// Route groups carry every route change of the namespace; a larger
 	// buffer makes an overrun during a burst less likely.
 	_ = s.SetReceiveBufferSize(1<<22, false)
 	ch := make(chan []syscall.NetlinkMessage, 256)
 	done := make(chan struct{})
+	var down atomic.Bool
 	go func() {
 		defer close(ch)
 		for {
 			msgs, _, err := s.Receive()
 			if err != nil {
+				down.Store(true)
 				select {
 				case <-done:
 				default:
@@ -357,7 +386,7 @@ func subscribeEvents(st *netlinksub.State) (<-chan []syscall.NetlinkMessage, fun
 		}
 	}()
 	closed := false
-	return ch, func() {
+	return &subscription{events: ch, down: down.Load, stop: func() {
 		if closed {
 			return
 		}
@@ -368,5 +397,5 @@ func subscribeEvents(st *netlinksub.State) (<-chan []syscall.NetlinkMessage, fun
 			for range ch {
 			}
 		}()
-	}, nil
+	}}, nil
 }
