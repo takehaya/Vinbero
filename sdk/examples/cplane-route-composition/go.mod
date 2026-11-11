@@ -9,4 +9,4 @@ require github.com/osrg/gobgp/v4 v4.11.0 // indirect
 replace github.com/takehaya/vinbero => ../../..
 
 // Dependency-module replacements are not inherited by this guest module.
-replace github.com/osrg/gobgp/v4 => github.com/takehaya/gobgp/v4 v4.0.0-20261111065903-a0d320ba8166
+replace github.com/osrg/gobgp/v4 => github.com/takehaya/gobgp/v4 v4.0.0-20261111072819-9bc1c17ec7bf
