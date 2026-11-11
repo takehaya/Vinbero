@@ -93,10 +93,10 @@ jobs:
             sudo modprobe vrf
           fi
 
-      - name: Build and test shared control-plane controllers
-        run: |
-          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet cplane-custom-cdplane-behavior
-          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/cdplanecontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./sdk/go/cplane/evpncontroller ./pkg/cplane/native
+      # The wasm artifacts the controller and parity tests load. Those
+      # packages are tested once, with -race, in "Run unit tests" below.
+      - name: Build shared control-plane controllers
+        run: make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet cplane-custom-cdplane-behavior
 
       - name: Build the dedicated Cplane/Dplane packet fixture
         run: |
@@ -119,7 +119,41 @@ jobs:
         # go test's per-package timeout under -race (the run takes ~15m on a
         # fast local machine and crossed 20m on the runner once the EVPN
         # aliasing tests landed); give it real headroom.
-        run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m ./...
+        # VINBERO_CPLANE_PARITY=1 makes a missing wasm artifact fail the
+        # controller and parity tests instead of skipping them.
+        # sdk/go/cplaneharness runs in the "Unit Test (cplane harness)" job.
+        run: |
+          set -o pipefail
+          # pipefail makes a failing go list fail the step (otherwise the
+          # pipeline takes grep's status and go test runs a partial list);
+          # test -n catches an empty list.
+          pkgs=$(go list ./... | grep -v '/sdk/go/cplaneharness$')
+          test -n "$pkgs"
+          VINBERO_CPLANE_PARITY=1 go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m $pkgs
+
+  # The harness package alone takes about 18 minutes, so it runs beside the
+  # rest of the unit tests instead of after them.
+  unit-test-cplane-harness:
+    name: Unit Test (cplane harness)
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      - name: Build the control-plane plugin example
+        run: make cplane-example
+
+      - name: Run the cplane harness tests
+        run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 35m ./sdk/go/cplaneharness
 
   sdk-archive-verify:
     name: SDK Archive Verify
