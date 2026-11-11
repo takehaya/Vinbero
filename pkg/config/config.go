@@ -104,11 +104,16 @@ func (c *VRFsConfig) UnmarshalYAML(n *yaml.Node) error {
 		return err
 	}
 	*c = VRFsConfig(p)
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if k := n.Content[i].Value; k == "default_deny" || k == "deny_action" {
-			c.policyKeys = true
-		}
+	// Decoded again into pointers, so a key given through a merge (<<) or
+	// an alias counts the same as one written in place.
+	var keys struct {
+		DefaultDeny *bool   `yaml:"default_deny"`
+		DenyAction  *string `yaml:"deny_action"`
 	}
+	if err := n.Decode(&keys); err != nil {
+		return err
+	}
+	c.policyKeys = keys.DefaultDeny != nil || keys.DenyAction != nil
 	return nil
 }
 
