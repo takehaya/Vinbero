@@ -109,7 +109,7 @@ sudo ip netns exec p2m-host2 ping -c 3 -I p2m-h2rt3.100 172.16.100.3
 
 ### 再起動
 
-`test.sh` は PE1 を map の pin (`/sys/fs/bpf/vinbero_p2mp_pe1`) と専用の state ファイルで動かします。最後に PE1 の vinberod を kill して起動し直します。実行時に attach した AC と HeadendL2 エントリは state ファイルから、BD peer は pin した map から戻り、何も設定し直さずに BUM のコピーと ping が通ります。
+`test.sh` は PE1 を map の pin (専用の bpffs の `/run/vinbero_p2mp_bpffs/pe1`) と専用の state ファイルで動かします。最後に PE1 の vinberod を kill して起動し直します。実行時に attach した AC と HeadendL2 エントリは state ファイルから、BD peer は pin した map から戻り、何も設定し直さずに BUM のコピーと ping が通ります。
 
 ### 5. クリーンアップ
 ```bash

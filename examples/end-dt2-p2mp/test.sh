@@ -40,6 +40,8 @@ cleanup() {
     rm -f /tmp/vinbero_p2mp_pe*_bum.yaml /tmp/vinbero_p2mp_bum_*.pcap* \
         /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_state.json
     rm -rf "$PE1_PIN_DIR"
+    umount "$PE1_BPFFS" 2>/dev/null || true
+    rmdir "$PE1_BPFFS" 2>/dev/null || true
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
@@ -51,8 +53,12 @@ cleanup() {
 trap cleanup EXIT
 
 # PE1 pins its maps, so its peers outlive the daemon; the restart at the end
-# kills it and brings the rest back from its state file.
-PE1_PIN_DIR=/sys/fs/bpf/vinbero_p2mp_pe1
+# kills it and brings the rest back from its state file. `ip netns exec`
+# mounts a fresh /sys, so the pins go on a bpffs of their own.
+PE1_BPFFS=/run/vinbero_p2mp_bpffs
+PE1_PIN_DIR=$PE1_BPFFS/pe1
+mkdir -p "$PE1_BPFFS"
+mountpoint -q "$PE1_BPFFS" || mount -t bpf bpf "$PE1_BPFFS"
 rm -rf "$PE1_PIN_DIR" /tmp/vinbero_p2mp_pe1_state.json
 
 # CLI helpers
