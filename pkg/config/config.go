@@ -366,6 +366,11 @@ func (c *Config) BpfConstants() map[string]any {
 	if c.InternalConfig.BpfOptions.FibLookupTBIDOff {
 		consts["fib_lookup_tbid"] = uint8(0)
 	}
+	// Likewise fib_lookup_global_auto is 0 in the program and set only for
+	// internal.bpf.fib_lookup_global "auto".
+	if c.InternalConfig.BpfOptions.FibLookupGlobalAuto {
+		consts["fib_lookup_global_auto"] = uint8(1)
+	}
 	return consts
 }
 

@@ -161,6 +161,13 @@ static __noinline int tc_do_single_pe_encap_impl(
         struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
         if ((void *)srh + 8 > data_end)
             return TC_ACT_SHOT;
+        // srh_len is bounded where it is computed, but the compiler may
+        // keep it in a stack slot as an unbounded 64-bit value, which the
+        // 6.6 verifier then refuses to add to a packet pointer. Check it
+        // again where it is used; the barrier keeps the check.
+        asm volatile("" : "+r"(srh_len));
+        if (srh_len < 8 || srh_len > 8 + 16 * MAX_SEGMENTS)
+            return TC_ACT_SHOT;
         if ((void *)srh + 8 + srh_len - 8 > data_end)
             return TC_ACT_SHOT;
 

@@ -30,6 +30,83 @@
 // ingress-device one, and the daemon does not close the VRF tables.
 const volatile __u8 fib_lookup_tbid = 1;
 
+// internal.bpf.fib_lookup_global: 0 ("rules") runs every vrf 0 lookup as
+// the full lookup (flags 0, ip rules included); 1 ("auto") lets the daemon
+// switch each address family to a direct lookup (BPF_FIB_LOOKUP_DIRECT)
+// while that gives the full lookup's answer (pkg/fibmode). Set at load.
+const volatile __u8 fib_lookup_global_auto = 0;
+
+// What the daemon decided for the vrf 0 lookups of each family: 1 runs them
+// as a direct lookup, 0 as the full lookup. Zero (the state of a new map, and
+// what the daemon writes whenever it cannot tell) is the full lookup.
+struct fib_global_mode {
+    __u8 v4;
+    __u8 v6;
+    __u8 pad[2];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct fib_global_mode);
+    __uint(max_entries, 1);
+} fib_global_mode_map SEC(".maps");
+
+// The host routes of the kernel's local table (table 255), by family: the
+// node's own addresses, broadcast and anycast addresses. A destination
+// listed here takes the full lookup even in the direct mode, because the
+// full lookup reads the local table first and stops at these routes, which a
+// direct lookup in the main or VRF table would not see. The daemon keeps the
+// maps in step with the table and turns the family's direct mode off when
+// the table holds a route these maps cannot express.
+#define FIB_LOCAL_MAX_ENTRIES 8192
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __be32);
+    __type(value, __u8);
+    __uint(max_entries, FIB_LOCAL_MAX_ENTRIES);
+} fib_local_v4_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct in6_addr);
+    __type(value, __u8);
+    __uint(max_entries, FIB_LOCAL_MAX_ENTRIES);
+} fib_local_v6_map SEC(".maps");
+
+// The flags for a vrf 0 lookup of dst (params->ipv4_dst or ipv6_dst, on the
+// stack): 0 for the full lookup, or BPF_FIB_LOOKUP_DIRECT. A direct lookup
+// without a table ID reads one table: the VRF table when the lookup's device
+// is a VRF device or a port enslaved to one, the main table otherwise. The
+// daemon enables it for a family only while the ip rules of the namespace,
+// the local table, the IPv4 default table and the VRF tables are such that
+// the full lookup of any destination not in the local table ends in that
+// same table with the same answer (docs/design/ja/vrf.md). The rest of the
+// local table is checked here: 127.0.0.0/8 and ff00::/8, the prefixes the
+// kernel itself puts there, and the host routes in fib_local_v4/v6_map.
+static __always_inline __u32 srv6_fib_global_flags(__u8 family, const void *dst)
+{
+    if (!fib_lookup_global_auto)
+        return 0;
+    __u32 key = 0;
+    struct fib_global_mode *mode = bpf_map_lookup_elem(&fib_global_mode_map, &key);
+    if (!mode)
+        return 0;
+    if (family == AF_INET6) {
+        if (!mode->v6 || *(const __u8 *)dst == 0xff)
+            return 0;
+        if (bpf_map_lookup_elem(&fib_local_v6_map, dst))
+            return 0;
+    } else {
+        if (!mode->v4 || *(const __u8 *)dst == 127)
+            return 0;
+        if (bpf_map_lookup_elem(&fib_local_v4_map, dst))
+            return 0;
+    }
+    return BPF_FIB_LOOKUP_DIRECT;
+}
+
 // Fill zeroed params for the IPv6 FIB lookup the data plane makes and return
 // the flags to run it with. Family, the device the lookup runs on, source and
 // destination are set; flowinfo and L4 stay 0. vrf_id is the ingress VRF of
@@ -37,7 +114,8 @@ const volatile __u8 fib_lookup_tbid = 1;
 // an encapsulation's outer header.
 //
 // vrf_id 0 runs the lookup on the device as an ingress lookup, ip rules
-// included. A non-zero vrf_id (a tenant AC's encapsulation) looks the outer
+// included, or as the direct lookup that gives the same answer
+// (srv6_fib_global_flags). A non-zero vrf_id (a tenant AC's encapsulation) looks the outer
 // header up in the main table directly (BPF_FIB_LOOKUP_DIRECT |
 // BPF_FIB_LOOKUP_TBID): the outer header is underlay traffic, and on a port
 // enslaved to a VRF device the l3mdev rule would take the lookup to the
@@ -50,7 +128,8 @@ const volatile __u8 fib_lookup_tbid = 1;
 // srv6_fib_lookup_encap), the tc path's encap and the control plane's uplink
 // probe (bum_uplink_probe), so a change to the inputs reaches each of them.
 // End.X adjacency resolution does not: it looks up the configured next hop
-// with the exposed inner source (endpoint_resolve_adjacency).
+// with the exposed inner source (endpoint_resolve_adjacency), and takes its
+// flags from srv6_fib_global_flags itself.
 static __always_inline __u32 srv6_fib_v6_params_set(
     struct bpf_fib_lookup *params,
     const void *src,
@@ -63,7 +142,7 @@ static __always_inline __u32 srv6_fib_v6_params_set(
     __builtin_memcpy(params->ipv6_src, src, sizeof(params->ipv6_src));
     __builtin_memcpy(params->ipv6_dst, dst, sizeof(params->ipv6_dst));
     if (vrf_id == 0 || !fib_lookup_tbid)
-        return 0;
+        return srv6_fib_global_flags(AF_INET6, params->ipv6_dst);
     params->tbid = SRV6_FIB_MAIN_TABLE;
     return BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID;
 }
@@ -210,7 +289,8 @@ static __always_inline int srv6_fib_lookup_and_update_v4(
     fib_params.ipv4_src = iph->saddr;
     fib_params.ipv4_dst = iph->daddr;
 
-    int ret = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
+    int ret = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params),
+                             srv6_fib_global_flags(AF_INET, &fib_params.ipv4_dst));
 
     switch (ret) {
     case BPF_FIB_LKUP_RET_SUCCESS:
