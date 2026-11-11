@@ -215,6 +215,25 @@ func (m *ResourceManager) SaveVrfObjects(objs ManagedVrfObjects) error {
 	return nil
 }
 
+// DropRuntimeVrfBindings records the VRF bindings with some dropped and
+// writes the state file. Unlike SaveRuntimeVrfBindings, a failed write keeps
+// the new record: the boot uses it to drop bindings nothing uses any more,
+// and keeping the dropped ones would let a later write by another record put
+// them back on disk. The next successful write of any record carries it.
+func (m *ResourceManager) DropRuntimeVrfBindings(bindings []ManagedVrfBinding) error {
+	c := cloneVrfBindings(bindings)
+	if len(c) == 0 {
+		c = nil
+	}
+	m.mu.Lock()
+	m.state.RuntimeVrfBindings = c
+	m.mu.Unlock()
+	if err := m.persist(); err != nil {
+		return fmt.Errorf("persist state after dropping VRF bindings: %w", err)
+	}
+	return nil
+}
+
 // RuntimeVrfBindings returns a copy of the saved VRF bindings.
 func (m *ResourceManager) RuntimeVrfBindings() []ManagedVrfBinding {
 	m.mu.RLock()

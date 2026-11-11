@@ -360,6 +360,33 @@ func TestVrfBgpPersist_ConfigDeclaredIsNotSaved(t *testing.T) {
 	}
 }
 
+// A binding without a VRF name is refused before it can create a VRF: an
+// unnamed VRF would be saved by the next VRF save and refuse the next start.
+func TestVrfBgpPersist_EmptyNameCreatesNoVRF(t *testing.T) {
+	s, mgr, store, exp := newPersistServer(t)
+	resp, err := s.VrfBgpBind(context.Background(), bindReq(
+		&v1.VrfBgpBinding{Rd: "65000:1", DefaultLocator: "LOC1", Redistribute: []string{"static"}},
+		&v1.VrfBgpBinding{VrfName: "t1", Rd: "65000:2"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.GetErrors()) != 1 || len(resp.Msg.GetBound()) != 1 {
+		t.Fatalf("bound %v, errors %v", resp.Msg.GetBound(), resp.Msg.GetErrors())
+	}
+	for _, v := range mgr.VRF().List() {
+		if v.Name == "" {
+			t.Fatal("an unnamed VRF was created")
+		}
+	}
+	if _, ok := exp.enabled[""]; ok {
+		t.Error("the exporter enabled an unnamed VRF")
+	}
+	if got := store.last(); len(got) != 1 || got[0].VRFName != "t1" {
+		t.Errorf("saved %+v, want only t1", got)
+	}
+}
+
 func unbindOne(t *testing.T, s *VrfBgpServer, name string) *v1.VrfBgpUnbindResponse {
 	t.Helper()
 	resp, err := s.VrfBgpUnbind(context.Background(), connect.NewRequest(&v1.VrfBgpUnbindRequest{VrfNames: []string{name}}))

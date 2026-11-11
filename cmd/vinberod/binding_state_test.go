@@ -229,6 +229,50 @@ func TestBindingRestart_ConfigWins(t *testing.T) {
 	}
 }
 
+// A boot that cannot write the drop of a config-shadowed binding still drops
+// it from the record, so the next write of the state file by anything else
+// removes it, and it does not come back once the config stops binding the VRF.
+func TestBindingRestart_FailedDropIsWrittenLater(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	n := mustBoot(t, path)
+	n.bind(t, &v1.VrfBgpBinding{VrfName: "x", Rd: "65000:1"})
+	n.bind(t, &v1.VrfBgpBinding{VrfName: "y", Rd: "65000:2"})
+
+	// The next boot binds x from the config, and the file cannot be written.
+	res, err := netresource.NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := savedBindings(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := vrfbgp.NewManager()
+	if err := restoreVRFs(config.VRFsConfig{}, []string{"x"}, true, mgr.VRF(), &recordingProg{}, nil, res, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreBindings(mgr, saved, []string{"x"}, bindingStateStore{res: res}, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	// Writable again; another record's save writes the file.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := res.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// The config stops binding x: only y comes back.
+	if got := boundNames(mustBoot(t, path)); len(got) != 1 || got[0] != "y" {
+		t.Fatalf("after the config dropped x: %v, want [y]", got)
+	}
+}
+
 // A bind or unbind whose state file cannot be written changes nothing, and
 // what a restart then finds is what the RPCs reported; repeating them once
 // the file is writable succeeds.

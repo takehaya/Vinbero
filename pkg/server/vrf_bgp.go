@@ -183,6 +183,12 @@ func bindingFamiliesToProto(in map[bgp.Family]vrfbgp.FamilyPolicy) map[string]*v
 // Families: a caller that set only Families (or only the legacy lists)
 // would otherwise hand the exporter a half-populated binding.
 func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
+	// Refused before anything below can act on it: the Ensure further
+	// down would otherwise create a VRF without a name, which the next
+	// VRF save writes and the next start refuses.
+	if updated.VRFName == "" {
+		return vrfbgp.ErrEmptyVRFName
+	}
 	updated = updated.Normalize()
 	prev, existed := s.mgr.Get(updated.VRFName)
 	if s.exporter != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"slices"
+	"sort"
 
 	"go.uber.org/zap"
 
@@ -24,6 +25,16 @@ func (s bindingStateStore) SaveBindings(bindings []vrfbgp.Binding) error {
 		out = append(out, bindingToRecord(b))
 	}
 	return s.res.SaveRuntimeVrfBindings(out)
+}
+
+// drop records bindings, the saved ones minus some the boot dropped, and
+// keeps that record in memory if the write fails (DropRuntimeVrfBindings).
+func (s bindingStateStore) drop(bindings []vrfbgp.Binding) error {
+	out := make([]netresource.ManagedVrfBinding, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, bindingToRecord(b))
+	}
+	return s.res.DropRuntimeVrfBindings(out)
 }
 
 func bindingToRecord(b vrfbgp.Binding) netresource.ManagedVrfBinding {
@@ -120,11 +131,13 @@ func savedBindingVRFs(res *netresource.ResourceManager) []string {
 // restoreBindings brings the bindings made over the API back and starts
 // saving them. The config file wins: a saved binding of a VRF the config
 // binds is dropped, from memory and from the state file, so it does not come
-// back once the config stops binding that VRF. A failed save of that drop is
-// a warning, like the other boot-time saves. The bindings are restored
-// whether BGP is enabled or not, as VrfBgpService runs either way; the
-// config's own are bound later, with BGP.
-func restoreBindings(mgr *vrfbgp.Manager, saved []vrfbgp.Binding, configNames []string, store vrfbgp.BindingStore, lg *zap.Logger) error {
+// back once the config stops binding that VRF. A failed write of that drop
+// is a warning, like the other boot-time saves; the dropped bindings are gone
+// from the record in memory all the same, so the next successful write of
+// the state file, whatever it saves, removes them from disk. The bindings
+// are restored whether BGP is enabled or not, as VrfBgpService runs either
+// way; the config's own are bound later, with BGP.
+func restoreBindings(mgr *vrfbgp.Manager, saved []vrfbgp.Binding, configNames []string, store bindingStateStore, lg *zap.Logger) error {
 	kept := make([]vrfbgp.Binding, 0, len(saved))
 	dropped := 0
 	for _, b := range saved {
@@ -142,8 +155,10 @@ func restoreBindings(mgr *vrfbgp.Manager, saved []vrfbgp.Binding, configNames []
 	mgr.SetConfigDeclared(configNames)
 	mgr.SetStore(store)
 	if dropped > 0 {
-		if err := mgr.Save(); err != nil {
-			lg.Warn("the dropped bindings stay in the state file until a save succeeds; one comes back if the config stops binding its VRF before that",
+		restored := mgr.List()
+		sort.Slice(restored, func(i, j int) bool { return restored[i].VRFName < restored[j].VRFName })
+		if err := store.drop(restored); err != nil {
+			lg.Warn("the dropped bindings stay in the state file until the next successful write of it; one comes back if the config stops binding its VRF before that",
 				zap.Error(err))
 		}
 	}

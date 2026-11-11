@@ -97,7 +97,7 @@ state.json フォーマットは内部実装扱いで、手編集は非推奨で
 - binding が名前を挙げる VRF は、config が宣言しなくなっても、その vrf_id のまま残ります
 - 保存した binding の auto-advertise を有効にできない場合 (API で登録した locator は再起動で消えるので、その locator を使う binding がこれにあたります) は、warning を出して起動を続けます。binding は残り、auto-advertise だけが止まります。locator を登録し直してから、同じ内容で `vbctl vrf-bgp bind` を実行すると広告を始めます。config の binding では、これまでどおり起動を止めます
 
-binding の RPC は、state.json への書き込みが成功したときだけ成功を返します。書き込みに失敗した RPC は binding を変えません。メモリ、data plane、state.json は直前の状態のままで、エラーには state file を書けなかったことが出ます (`vrf-bgp bind` / `unbind` は VRF ごとの `errors`、それ以外は `internal`)。同じ RPC を繰り返せばやり直せます。bind では、state.json に書いてから経路の import と広告に使い始めます。unbind では、state.json から消してから外します。どちらも、成功を返していない変更が再起動で現れることはありません。bind が新しく作った VRF は、書き込みに失敗しても VRF として残ります。
+binding の RPC は、state.json への書き込みが成功したときだけ成功を返します。書き込みに失敗した RPC は binding を変えません。メモリ、data plane、state.json は直前の状態のままで、エラーには state file を書けなかったことが出ます (`vrf-bgp bind` / `unbind` は VRF ごとの `errors`、それ以外は `internal`)。同じ RPC を繰り返せばやり直せます。bind では、state.json に書いてから経路の import と広告に使い始めます。unbind では、state.json から消してから外します。どちらも、成功を返していない変更が再起動で現れることはありません。bind が新しく作った VRF は、書き込みに失敗しても VRF として残ります。例外として、state.json の rename が済んだ後に directory の fsync だけが失敗した場合は、エラーを返しても file が新しい内容を持つことがあります。次に state.json を書いたときに、メモリの内容にそろいます。
 
 - `runtime_vrf_bindings` が無い state.json は、保存した binding が無いものとして読みます
 - この版が知らない field を binding の record に持つ state.json は、起動を拒否します。新しい版が書いた import の制限を黙って捨てると、別の tenant の経路を取り込むおそれがあるためです。field を消すか、書いた版で起動してください
