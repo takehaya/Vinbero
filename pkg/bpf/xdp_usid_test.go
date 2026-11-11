@@ -468,6 +468,29 @@ func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
 		t.Fatalf("route add: %v", err)
 	}
 
+	// The main table (the ingress context) holds on-link routes of its own
+	// for the destinations looked up below, so a lookup that ignored the VRF
+	// would end differently: this route has no neighbour (NO_NEIGH, which
+	// the ingress context hands to the kernel) and the USD subtest adds a
+	// resolved one. The VRF lookups must stay fail-closed.
+	macMain, _ := net.ParseMAC("02:ad:00:00:02:0a")
+	mainDum := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "utnn-dum1", HardwareAddr: macMain}}
+	if err := netlink.LinkAdd(mainDum); err != nil {
+		t.Fatalf("main-table dummy add: %v", err)
+	}
+	defer func() { _ = netlink.LinkDel(mainDum) }()
+	if err := netlink.LinkSetUp(mainDum); err != nil {
+		t.Fatalf("main-table dummy up: %v", err)
+	}
+	mainAddr, _ := netlink.ParseAddr("fd00:feee::1/64")
+	if err := netlink.AddrAdd(mainDum, mainAddr); err != nil {
+		t.Fatalf("main-table addr add: %v", err)
+	}
+	_, mainNN, _ := net.ParseCIDR("fd00:aaaa:dddd::/48")
+	if err := netlink.RouteAdd(&netlink.Route{LinkIndex: mainDum.Attrs().Index, Dst: mainNN}); err != nil {
+		t.Fatalf("main-table route add: %v", err)
+	}
+
 	h.createSidFunctionUsidVrf("fd00:aaaa:cccc::/48", 0, uint32(vrf.Attrs().Index), usidBlockLenBytes)
 
 	pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:cccc:dddd::"), 64)
@@ -504,6 +527,36 @@ func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
 		// SL=0 USD on a uT: the inner FIB lookup runs in the bound VRF
 		// (endpoint_handle_usd now takes the fib ifindex); the VRF route's
 		// unresolvable gateway keeps it fail-closed.
+		//
+		// The main table (the ingress context) holds a RESOLVED route for
+		// the same inner destination, so a lookup that ignored the VRF
+		// would redirect instead of dropping: a control SID bound to no
+		// VRF must redirect, the one bound to the VRF must drop.
+		_, mainDst, _ := net.ParseCIDR("2001:db8:42::/48")
+		if err := netlink.RouteAdd(&netlink.Route{LinkIndex: mainDum.Attrs().Index, Dst: mainDst}); err != nil {
+			t.Fatalf("main-table route add: %v", err)
+		}
+		macInner, _ := net.ParseMAC("02:ad:00:00:02:0c")
+		if err := netlink.NeighAdd(&netlink.Neigh{
+			LinkIndex:    mainDum.Attrs().Index,
+			Family:       netlink.FAMILY_V6,
+			State:        netlink.NUD_PERMANENT,
+			IP:           net.ParseIP("2001:db8:42::1"),
+			HardwareAddr: macInner,
+		}); err != nil {
+			t.Fatalf("main-table neigh add: %v", err)
+		}
+		h.createSidFunctionUsidVrf("fd00:aaaa:ffff::/48", flavorUSD, 0, usidBlockLenBytes)
+		ctrlSegs := []net.IP{net.ParseIP("fd00:aaaa:ffff::")}
+		ctrl, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff::"), ctrlSegs, 0,
+			net.ParseIP("2001:db8:41::1"), net.ParseIP("2001:db8:42::1"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ret, _ := h.run(ctrl); ret != XDP_REDIRECT {
+			t.Fatalf("control: USD bound to no VRF must redirect over the resolved main-table route, got %d", ret)
+		}
 		h.createSidFunctionUsidVrf("fd00:aaaa:eeee::/48", flavorUSD, uint32(vrf.Attrs().Index), usidBlockLenBytes)
 		_, innerDst, _ := net.ParseCIDR("2001:db8:42::/48")
 		if err := netlink.RouteAdd(&netlink.Route{
