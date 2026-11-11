@@ -243,12 +243,14 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 	}
 }
 
-// TestXDPProgHeadendKeyVRF checks the {vrf_id, prefix} headend key while
-// every writer and the data plane use vrf_id 0. Longest-prefix match still
-// picks the longer prefix with the VRF in front; an entry written directly
-// under a non-zero vrf_id is never matched, not even for a packet from an
-// AC classified to that VRF, and it neither shadows nor shows up in the
-// vrf 0 entries the prefix-keyed API reads and writes.
+// TestXDPProgHeadendKeyVRF checks the {vrf_id, prefix} headend key: a
+// packet is matched in the VRF its ingress AC classifies it to, and only
+// there. Longest-prefix match picks the longer prefix with the VRF in front;
+// an entry of a non-zero vrf_id is matched for packets of that VRF and no
+// other, a tenant packet with no entry of its VRF misses (it is not looked
+// up in the global VRF, not even past a global default route), and tenant
+// entries neither shadow nor show up in the vrf 0 entries the prefix-keyed
+// API reads and writes.
 func TestXDPProgHeadendKeyVRF(t *testing.T) {
 	h := newXDPTestHelper(t)
 	const ifidx = 1 // loopback; BPF_PROG_TEST_RUN backs the buffer with it
@@ -327,8 +329,9 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			expectEncap(t, f.toLonger, 0, segLonger)
 			expectEncap(t, f.toCover, 0, segCover)
 
-			// A packet from a tenant AC is matched in vrf 0 as well.
-			expectEncap(t, f.toLonger, 7, segLonger)
+			// A packet from a tenant AC is matched in its VRF only, which
+			// has no entry yet.
+			expectMiss(t, f.toLonger, 7)
 
 			// Entries under a non-zero vrf_id, written directly: a prefix
 			// nothing in vrf 0 covers, and the vrf 0 longer prefix again.
@@ -340,10 +343,12 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			if n := f.rawCount(t); n != 4 {
 				t.Fatalf("raw map holds %d entries, want 4", n)
 			}
-			for _, vrf := range []uint32{0, 7} {
-				expectMiss(t, f.toOther, vrf)
-				expectEncap(t, f.toLonger, vrf, segLonger)
-			}
+			expectMiss(t, f.toOther, 0)
+			expectEncap(t, f.toLonger, 0, segLonger)
+			expectEncap(t, f.toOther, 7, segTenant)
+			expectEncap(t, f.toLonger, 7, segTenant)
+			// A VRF id with its high bit set is its own VRF too.
+			expectMiss(t, f.toLonger, 0x80000007)
 
 			// The prefix-keyed API sees vrf 0 only, in plain CIDR form.
 			entries, err := f.list()
@@ -378,7 +383,8 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			if err := f.create(f.other, entryTo(t, segCover), OwnerPluginBundle("global")); err != nil {
 				t.Fatalf("vrf 0 create next to a tenant owner: %v", err)
 			}
-			expectEncap(t, f.toOther, 7, segCover)
+			expectEncap(t, f.toOther, 0, segCover)
+			expectEncap(t, f.toOther, 7, segTenant)
 			if err := f.remove(f.other, OwnerPluginBundle("global")); err != nil {
 				t.Fatal(err)
 			}
@@ -387,8 +393,9 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 				t.Errorf("raw map holds %d entries after the vrf 0 delete, want 4", n)
 			}
 
-			// A vrf 0 default route catches what nothing longer covers,
-			// with the tenant entry for the same destination still present.
+			// A vrf 0 default route catches what nothing longer covers in
+			// vrf 0, and nothing of another VRF: vrf 7 keeps its own entry,
+			// and vrf 8, which has none, misses.
 			if err := f.create(f.deflt, entryTo(t, segDefault), OwnerRPC); err != nil {
 				t.Fatal(err)
 			}
@@ -396,7 +403,8 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 				t.Errorf("raw prefixlen of %s = %d, want %d", f.deflt, got, headendKeyVRFBits)
 			}
 			expectEncap(t, f.toOther, 0, segDefault)
-			expectEncap(t, f.toOther, 7, segDefault)
+			expectEncap(t, f.toOther, 7, segTenant)
+			expectMiss(t, f.toOther, 8)
 			expectEncap(t, f.toLonger, 0, segLonger)
 
 			// The per-VRF owner inventory names what an owner holds outside
@@ -543,8 +551,8 @@ func TestPluginHeadendKeyABI(t *testing.T) {
 // global VRF and in two named ones through the per-VRF MapOperations
 // methods. The three are separate entries with their own owners: each is
 // read, listed and removed alone, the VRF-scoped flush takes one VRF's,
-// and the data plane, which looks up vrf_id 0 only, keeps encapsulating
-// with the global entry whatever VRF the packet came from.
+// and the data plane encapsulates a packet with the entry of the VRF it came
+// from, and leaves a packet of a VRF with no entry alone.
 func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 	h := newXDPTestHelper(t)
 	const ifidx = 1
@@ -655,11 +663,14 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 				t.Errorf("highest vrf_id in use = %d %v, want 8", id, err)
 			}
 
-			// The lookup is vrf_id 0 for every packet.
+			// Each packet is looked up in its ingress VRF.
 			for _, vrf := range []uint32{0, 7, 8} {
-				if got := outerTo(t, vrf); !got.Equal(net.ParseIP(seg[0])) {
-					t.Errorf("packet from vrf %d: outer DA %v, want the vrf 0 segment %s", vrf, got, seg[0])
+				if got := outerTo(t, vrf); !got.Equal(net.ParseIP(seg[vrf])) {
+					t.Errorf("packet from vrf %d: outer DA %v, want that VRF's segment %s", vrf, got, seg[vrf])
 				}
+			}
+			if got := outerTo(t, 9); got != nil {
+				t.Errorf("packet from vrf 9, which has no entry: outer DA %v, want no encapsulation", got)
 			}
 
 			// Each is owned and removed alone.
@@ -671,6 +682,9 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 			}
 			if _, err := f.getIn(7, f.longer); err == nil {
 				t.Error("vrf 7 entry still there after its delete")
+			}
+			if got := outerTo(t, 7); got != nil {
+				t.Errorf("packet from vrf 7 after its entry was deleted: outer DA %v, want no encapsulation (no fallback to vrf 0)", got)
 			}
 			for _, vrf := range []uint32{0, 8} {
 				if _, err := f.getIn(vrf, f.longer); err != nil {

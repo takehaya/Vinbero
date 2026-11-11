@@ -51,8 +51,11 @@ func TestQuietVPNDenialsReplayEndsDefaultAllow(t *testing.T) {
 	if _, ok := fh.v4created["10.2.0.0/24"]; ok {
 		t.Error("replay left a route no VRF imports in the data plane")
 	}
-	if _, ok := fh.v4created["10.1.0.0/24"]; !ok {
-		t.Error("replay removed an imported route")
+	if _, ok := fh.v4created[vrfKey(t, vm, "vrf-a", "10.1.0.0/24")]; !ok {
+		t.Error("replay did not move the imported route into the VRF that imports it")
+	}
+	if _, ok := fh.v4created["10.1.0.0/24"]; ok {
+		t.Error("replay left the imported route in the global VRF")
 	}
 	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != 0 {
 		t.Errorf("replay logged %d warnings, want 0", n)

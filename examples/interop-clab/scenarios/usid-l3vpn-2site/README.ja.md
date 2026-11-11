@@ -37,6 +37,10 @@ graph LR
 
 コンテナイメージは interop-clab ライブラリ共有で `../../images/` にある。
 
+## global VRF
+
+このシナリオには import route target を持つ VRF binding が無いので、受信した VPN 経路はすべて受け入れられ (default-allow)、global VRF に入る。CE 側の口 (`eth2`) にも access circuit が無いので、そのパケットも global VRF で引かれる。`test.sh` はその経路を global VRF で確認する (`headend-v4 list --vrf global`)。テナントの VRF として動かすには、CE 側の口をその VRF の access circuit にし (`vbctl vrf ac-add`)、経路の route target を import する binding を VRF に置く。経路はその VRF にだけ入り、global VRF のパケットからは届かなくなる。
+
 ## 実行
 
 Docker・`containerlab`・`sudo` が必要。`examples/interop-clab/` から:

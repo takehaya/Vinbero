@@ -247,7 +247,23 @@ func (l *vpnLab) eventually(what string, cond func() bool) {
 
 func (l *vpnLab) programmed(prefix string, wantSrc netip.Addr) bool {
 	l.t.Helper()
-	trigger, ok := l.dp.HeadendV4(prefix)
+	// A route is placed in the VRFs that import it, or in the global VRF
+	// while no binding declares vpnv4. The labs bind one VRF at a time.
+	vrfID := uint32(0)
+	if !l.bindings.EmptyForFamily(bgp.FamilyVPNv4) {
+		targets, _ := l.bindings.ImportTargetsForFamily(importedRTs(prefix), bgp.FamilyVPNv4)
+		if len(targets) == 0 {
+			if _, ok := l.dp.HeadendV4(0, prefix); ok {
+				l.t.Errorf("%s is in the global VRF although bindings declare vpnv4 and none imports it", prefix)
+			}
+			return false
+		}
+		vrfID = targets[0].ID
+		if _, ok := l.dp.HeadendV4(0, prefix); ok {
+			l.t.Errorf("%s is in the global VRF as well as vrf %d", prefix, vrfID)
+		}
+	}
+	trigger, ok := l.dp.HeadendV4(vrfID, prefix)
 	if !ok {
 		return false
 	}
@@ -267,6 +283,16 @@ func (l *vpnLab) programmed(prefix string, wantSrc netip.Addr) bool {
 }
 
 var loc2Src = netip.MustParseAddr("fd00:200::")
+
+// importedRTs is the route targets the lab's route for prefix carries.
+func importedRTs(prefix string) []string {
+	for _, r := range []bgp.RouteEvent{importedRoute, otherRoute} {
+		if r.VPN.Prefix == prefix {
+			return r.VPN.RTs
+		}
+	}
+	return nil
+}
 
 // The route a peer sends before the source locator is registered cannot be
 // programmed: every headend entry takes its encapsulation source from that

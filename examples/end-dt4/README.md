@@ -64,8 +64,10 @@ phase of `test.sh` shows the difference once Vinbero manages the VRF:
   packets now stop in the VRF table
 - the kernel seg6 route in table 100 that carried host2 to host1 needs the
   main table for its outer header too, so Vinbero takes over:
-  `vbctl hv4 create` encapsulates the packets from the vrf100 AC, and
-  their outer header is looked up in the main table
+  `vbctl hv4 create --vrf vrf100` encapsulates the packets from the
+  vrf100 AC (a packet is looked up in the headend entries of its ingress
+  VRF, so the entry is made in vrf100), and their outer header is looked
+  up in the main table
 - host1 to host2 (End.DT4 into vrf100) keeps working
 - router3 keeps the encapsulation's underlay next hop (router2, reached
   through a static route) as a managed neighbour. The test deletes that

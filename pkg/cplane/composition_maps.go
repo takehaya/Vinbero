@@ -106,10 +106,9 @@ type gateKey struct {
 	endpoint string
 }
 
-// mupGateVRF is the VRF of the gate in front of uplinks of instance. Gates
-// are global VRF entries, because the headend lookup matches every packet in
-// the global VRF whatever its ingress VRF.
-func mupGateVRF(instance uint32) uint32 { return 0 }
+// mupGateVRF is the VRF of the gate in front of uplinks of instance: the
+// uplinks' own VRF, where the GTP-U they serve is looked up.
+func mupGateVRF(instance uint32) uint32 { return instance }
 
 // gate is the gate in front of the uplink.
 func (u uplinkDesired) gate() gateKey {

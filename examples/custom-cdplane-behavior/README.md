@@ -12,9 +12,10 @@ host1                 PE1                     PE2                  host2
 ```
 
 PE2 allocates a service SID and advertises `10.2.0.0/24` with endpoint behavior `0xFE01`.
-PE1 receives the route and installs a headend entry pointing at that SID.
+PE1 receives the route and installs a headend entry pointing at that SID, in `vrf-cust`.
+PE1's `eth2` is an access circuit of `vrf-cust`, so the CE's packets are looked up in that VRF; `pe1.json` sets `routing.headend_vrf` and the registration grants `--vrf vrf-cust` for it.
 PE2's endpoint permits outer IPv6 source `fd00:100::/128`, then uses the host's VRF grant to call End.DT4.
-This is PE1's headend source derived from `LOC1`, as shown by `headend-v4 list`; it differs from the BGP next hop `2001:db8:ff::1`.
+This is PE1's headend source derived from `LOC1`, as shown by `headend-v4 list --vrf vrf-cust`; it differs from the BGP next hop `2001:db8:ff::1`.
 The customer route exists only in `vrf-cust`, so successful pings also verify decapsulation and delivery.
 The return path uses an ordinary VPN route and built-in End.DT4.
 The source-prefix policy is local to PE2; it is not advertised over BGP and is not cryptographic authentication.
@@ -115,12 +116,12 @@ Run these commands from this example directory while the interactive lab is open
 sudo ip netns exec cpdp-pe2 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
   plugin cplane stats --name custom-cdplane-behavior
 sudo ip netns exec cpdp-pe2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid list
-sudo ip netns exec cpdp-pe1 ../../out/bin/vinbero -s http://127.0.0.1:8082 headend-v4 list
+sudo ip netns exec cpdp-pe1 ../../out/bin/vinbero -s http://127.0.0.1:8082 headend-v4 list --vrf vrf-cust
 ```
 
 The stats report the backend, running state, pending declarations and owned SID/advertisement counts.
 PE2 should own one SID and one advertisement after convergence.
-PE1's headend should contain `10.2.0.0/24` pointing at that SID.
+PE1's `vrf-cust` headend entries should contain `10.2.0.0/24` pointing at that SID.
 These observations establish readiness; packet probes establish the configured behavior.
 If registration fails, first check the field named in the error and the native/WASM artifact version.
 If registration succeeds but traffic fails, check the SID, headend, BGP session, underlay source and the daemon logs printed by the lab.
@@ -149,7 +150,7 @@ PE1:
 ```sh
 vinbero plugin cplane register --name custom-cdplane-behavior \
   --config pe1.json --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
-  --capability headend --headend-prefix 10.2.0.0/24
+  --capability headend --headend-prefix 10.2.0.0/24 --vrf vrf-cust
 ```
 
 PE2, after loading the Dplane ELF:
@@ -179,7 +180,7 @@ In an existing deployment, unregister the advertising Cplane first and wait unti
 vinbero plugin cplane unregister --name custom-cdplane-behavior
 vinbero sid list
 # PE1: verify the service headend has disappeared, then remove the receiver.
-vinbero headend-v4 list
+vinbero headend-v4 list --vrf vrf-cust
 vinbero plugin cplane unregister --name custom-cdplane-behavior
 # PE2: after withdrawal is confirmed.
 vinbero plugin unregister --type endpoint --index 32

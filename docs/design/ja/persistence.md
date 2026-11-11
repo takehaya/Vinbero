@@ -10,7 +10,7 @@
 | XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` と、`state.json` に記録された実行時 attach の device に attach し直す |
 | SID function / aux | **消える** | **残る** (bpffs pin)。SID owner も保存 | RPC / CLI で再投入。cplane plugin の SID は保存済み割り当てと再宣言で復旧 |
 | cplane plugin の SID 名と割り当て | cplane store 有効なら残る | 同左 | locator 登録より前に予約を復元。dispatch と grant は再宣言で作り直す |
-| Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
+| Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin)。ただし BGP を有効にした起動では、BGP の applier が書いた L3 の entry を全 VRF から消す | default: RPC / CLI で再投入。BGP の entry は経路の受信で書き直す ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除)) |
 | BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin) | default: RPC / CLI (FDB は学習でも埋まる) |
 | Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
 | VRF の vrf_id と実行時 AC (`vrf ac-add`) | `state.json` に残る | 同左 | 起動時に XDP attach より前に復元 |

@@ -245,7 +245,7 @@ ip netns exec "$ns_host2" ip route del 172.0.1.1/32
 # packet comes from the vrf100 AC, and its outer header is looked up in the
 # main table.
 print_info "Encapsulating host2 -> host1 with Vinbero (hv4 create)..."
-ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create --vrf vrf100 \
   --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::1 > /dev/null
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero H.Encaps from the vrf100 AC)"
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into the managed vrf100)"
@@ -315,7 +315,7 @@ done
 # The maps start empty: the SID and the headend entry come back over the API.
 ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 sid create \
   --trigger-prefix fc00:3::3/128 --action END_DT4 --vrf-name vrf100 > /dev/null
-ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
+ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create --vrf vrf100 \
   --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::1 > /dev/null
 eventually_ping "host2 -> host1 (H.Encaps from the vrf100 AC, ingress lookup through the open table)"
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into vrf100)"

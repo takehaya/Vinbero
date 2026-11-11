@@ -7,7 +7,7 @@
 # which keys the F-TEID lookup; the PE's per-VPN End.DT4 delivers into separate
 # kernel VRFs. It proves, end to end:
 #   1. control plane: the GW installs BOTH T2STs — identical {endpoint, TEID}
-#      — under distinct vrf_ids, behind one shared gate;
+#      — under distinct vrf_ids, each behind a gate of its own VRF;
 #   2. uplink isolation A: a GTP-U burst from gnb-a reaches dn-a and ONLY
 #      dn-a, even though dn-b would accept the byte-identical inner packet;
 #   3. uplink isolation B: the mirror case from gnb-b.
@@ -49,10 +49,17 @@ else
     ng "mup-gw did not install both T2STs under distinct vrf_ids"
     dexec "$GW" grep 'MUP T2ST' /var/log/vinberod.log | sed 's/^/      /' || true
 fi
-if retry bash -c "docker exec $GW vbctl headend-v4 list 2>/dev/null | grep -c '$N3' | grep -q '^1$'"; then
-    ok "the F-TEID gate on $N3/32 is shared (installed once across VRFs)"
+# The gate is a headend entry, looked up in the ingress VRF like any other:
+# one in vpn-a, one in vpn-b, none in the global VRF.
+gate_count() {
+    docker exec "$GW" vbctl headend-v4 list --vrf "$1" 2>/dev/null | grep -c "$N3/32"
+}
+if retry bash -c "[ \"\$(docker exec $GW vbctl headend-v4 list --vrf vpn-a 2>/dev/null | grep -c '$N3/32')\" = 1 ] && [ \"\$(docker exec $GW vbctl headend-v4 list --vrf vpn-b 2>/dev/null | grep -c '$N3/32')\" = 1 ]" \
+   && [ "$(gate_count global)" = 0 ]; then
+    ok "the F-TEID gate on $N3/32 is installed once in vpn-a and once in vpn-b, not in the global VRF"
 else
-    ng "unexpected gate state for $N3"; dexec "$GW" vbctl headend-v4 list || true
+    ng "unexpected gate state for $N3 (vpn-a $(gate_count vpn-a), vpn-b $(gate_count vpn-b), global $(gate_count global))"
+    dexec "$GW" vbctl headend-v4 list --all-vrfs || true
 fi
 
 # run_isolation SENDER WANT_DN OTHER_DN LABEL_WANT LABEL_OTHER
@@ -79,7 +86,7 @@ run_isolation() {
         sed 's/^/      /' "$wcap" | head -2
     else
         ng "$lwant did not receive the uplink inner packet"
-        echo "      mup-gw uplink state:"; dexec "$GW" vbctl headend-v4 list 2>/dev/null | sed 's/^/      /' || true
+        echo "      mup-gw uplink state:"; dexec "$GW" vbctl headend-v4 list --all-vrfs 2>/dev/null | sed 's/^/      /' || true
     fi
     if grep -q "$UE > $DNHOST" "$ocap"; then
         ng "$lother received traffic that belongs to the other VPN (VRF leak)"

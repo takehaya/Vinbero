@@ -10,6 +10,7 @@
 
 - **vinbero/vinbero.yml**: `bgp.locators` が `LOC1` を静的に宣言する (exporter は起動時、RPC より前に binding の `default_locator` を解決する)。`bgp.global.auto_advertise: true`。`bgp.global.next_hop` は PE の loopback (BGP next hop は通常のノードアドレスである必要がある。locator base は subnet-router anycast アドレスで、受信側 PE が local 扱いして転送が壊れる)。`vrf_bindings` が `rd` / `import_rts` / `export_rts` / `default_locator` / `redistribute` を持つ。
 - **vinbero/start.sh**: `vbctl sid create` / `bgp advertise-vpn` がない。顧客経路は `proto static` で追加し、`redistribute: [static]` allowlist が転送するようにする (素の `ip route` は `RTPROT_BOOT` で、casual な経路が VPN に漏れるのを避けるため除外される)。
+- **vinbero/start.sh** は `eth2` (ce-tokyo 側の口) を `vrf-cust` の access circuit にもする (`vbctl vrf ac-add`)。受信した VPN 経路は import する VRF に入り、パケットは入ってきた AC の VRF で引かれるので、AC が無いと ce-tokyo のパケットは global VRF で引かれて miss する。`eth2` は `vrf-cust` に enslave していないので、`vrf-cust` に経路が無いパケットは kernel に渡され、main table で引かれる。`test.sh` は `10.2.0.0/24` を `headend-v4 list --vrf vrf-cust` で確認し、global VRF に無いことも確認する。
 - **frr/start.sh**: /128 glue 経路の向き先が、手動の `fd00:100:0:1::` でなく auto 採番された SID `fd00:100:0:10::` (function `0x10`、最初に auto 割り当てされる End.DT4) になる。
 
 広告される SID は動的なので、`test.sh` は SID をハードコードせず Vinbero の End.DT4 SID を discover する。

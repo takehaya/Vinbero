@@ -106,7 +106,8 @@ func TestApplier_RTMismatchUpdateReplacesInstalledPath(t *testing.T) {
 		RTs: []string{"65000:30"}, SRv6SID: "fd00:aaaa:b002:d004::", NextHop: "2001:db8::2",
 	}
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &route})
-	if _, ok := fh.v4created["10.31.0.0/24"]; !ok {
+	key := vrfKey(t, vb, "vrf-a", "10.31.0.0/24")
+	if _, ok := fh.v4created[key]; !ok {
 		t.Fatal("route was not installed")
 	}
 
@@ -115,7 +116,7 @@ func TestApplier_RTMismatchUpdateReplacesInstalledPath(t *testing.T) {
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &replaced})
 	found := false
 	for _, p := range fh.v4deleted {
-		if p == "10.31.0.0/24" {
+		if p == key {
 			found = true
 		}
 	}

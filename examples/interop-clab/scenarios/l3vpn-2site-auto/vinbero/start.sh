@@ -87,6 +87,13 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# eth2 (the ce-tokyo port) is vrf-cust's access circuit: its packets are
+# looked up in vrf-cust, where the VPN routes vrf-cust imports are installed.
+# Without it they would be looked up in the global VRF, which holds none. eth2
+# is not enslaved to vrf-cust, so a packet that misses there goes on to the
+# kernel's main table.
+/usr/local/bin/vbctl vrf ac-add --vrf vrf-cust --interface eth2 || true
+
 # Bind vrf-cust to its BGP route-target policy. vpnv4 + vpnv6 are listed
 # explicitly so the exporter advertises VPNv4/VPNv6 of 10.1.0.0/24 with RT
 # 65000:200 and the applier accepts FRR's 10.2.0.0/24 under the same RT.

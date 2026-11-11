@@ -36,6 +36,10 @@ graph LR
 
 両方向とも最短路 (pe-tokyo ↔ core ↔ pe-osaka) ではなく waypoint を経由するので、BGP で配った SR Policy による SR-TE 経路を通ります。
 
+## global VRF
+
+このシナリオには import route target を持つ VRF binding が無いので、受信した VPN 経路はすべて受け入れられ (default-allow)、global VRF に入ります。CE 側の口 (`eth2`) にも access circuit が無いので、そのパケットも global VRF で引かれます。`test.sh` はその経路を global VRF で確認します (両 PE で `headend-v4 list --vrf global`)。テナントの VRF として動かすには、CE 側の口をその VRF の access circuit にし (`vbctl vrf ac-add`)、経路の route target を import する binding を VRF に置きます。経路はその VRF にだけ入り、global VRF のパケットからは届かなくなります。
+
 ## 実行
 
 Docker・`containerlab`・`sudo` が必要です。`examples/interop-clab/` から実行します。

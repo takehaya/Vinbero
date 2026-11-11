@@ -16,11 +16,6 @@ import (
 // prefixlen headendKeyVRFBits + p.
 const headendKeyVRFBits = 32
 
-// HeadendLookupVRF is the VRF the data plane matches every packet in
-// (headend_vrf in process_l3). Entries of any other VRF are stored, listed
-// and removable, but no packet looks them up.
-const HeadendLookupVRF uint32 = 0
-
 // globalVRF is the vrf_id of the global VRF (vrf.GlobalVRFID; pkg/vrf
 // imports this package). The MapOperations methods that take a trigger
 // prefix alone read and write this VRF; the ...In methods name the VRF.

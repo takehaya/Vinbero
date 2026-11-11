@@ -490,8 +490,9 @@ plugin (composition) の宣言と公開前の宣言は、ほかの失敗と同�
 宣言し直します。名前の解決から map への
 書き込みまでの間は VRF の削除を始めさせないので、削除された VRF の id に entry が
 残ることはありません。composition でも、この間に BGP や service の処理を挟みません。同じ prefix を global VRF と別の VRF に宣言すると、2 つの entry に
-なります。data plane は vrf_id 0 で引くので、global VRF 以外の entry は転送に
-使われません ([vrf.md](vrf.md#headend-entry-の-vrf))。
+なります。data plane はパケットを入口の AC の VRF で引くので、tenant の口から来る
+パケットを encap する entry はその VRF に宣言します ([vrf.md](vrf.md#headend-entry-の-vrf))。
+MUP composition の uplink の gate も、uplink の instance の VRF に置きます。
 
 host は headend の VRF に対応していることを `input_features` の bit
 (`FeatureHeadendVRF`、4) で示します。field を知らない古い host は VRF を無視して

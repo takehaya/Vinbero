@@ -46,11 +46,19 @@ if retry bash -c "docker exec $PD grep -q 'MUP ISD segment discovery' /var/log/v
 else
     ng "mup-pe never received the ISD (full-mesh iBGP or advertise failed)"
 fi
-if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -q '$UE'" \
+if retry bash -c "docker exec $PD vbctl headend-v4 list --vrf vrf-cust 2>/dev/null | grep -q '$UE'" \
    && retry bash -c "docker exec $PD grep -q 'MUP T1ST downlink installed' /var/log/vinberod.log"; then
     ok "mup-pe resolved the T1ST against the ISD and installed the downlink H.Encaps for $UE/32"
 else
-    ng "mup-pe did not resolve/install the T1ST downlink"; dexec "$PD" vbctl headend-v4 list || true
+    ng "mup-pe did not resolve/install the T1ST downlink"; dexec "$PD" vbctl headend-v4 list --vrf vrf-cust || true
+fi
+# The session belongs to vrf-cust (its binding imports 100:2000): the
+# downlink is an entry of vrf-cust, where the DN's packets (eth2 is
+# vrf-cust's AC) are looked up, and not of the global VRF.
+if dexec "$PD" vbctl headend-v4 list --vrf global 2>/dev/null | grep -qF "$UE/32"; then
+    ng "mup-pe installed the downlink for $UE/32 in the global VRF too"
+else
+    ok "mup-pe's downlink for $UE/32 is in vrf-cust only"
 fi
 # RFC 9433 §6.6 source embed: the binding for RD 65100:1 carries
 # mup_gtp4_source_prefix fd00:d::/64 and the same-RD T2ST endpoint
@@ -58,22 +66,22 @@ fi
 # read exactly fd00:d::ac10:fe:0:0 -- not the plain locator-derived encap
 # source.
 EMBED_SRC="fd00:d::ac10:fe:0:0"
-if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -F '$UE/32' | grep -qF '$EMBED_SRC'"; then
+if retry bash -c "docker exec $PD vbctl headend-v4 list --vrf vrf-cust 2>/dev/null | grep -F '$UE/32' | grep -qF '$EMBED_SRC'"; then
     ok "mup-pe downlink outer source embeds the UPF N3 anchor ($N3 at v4src position 64: $EMBED_SRC)"
 else
     ng "mup-pe downlink outer source does not embed the UPF anchor (expected SRC ADDR $EMBED_SRC)"
-    dexec "$PD" vbctl headend-v4 list || true
+    dexec "$PD" vbctl headend-v4 list --vrf vrf-cust || true
 fi
 if retry bash -c "docker exec $PA grep -q 'MUP DSD segment discovery' /var/log/vinberod.log"; then
     ok "mup-gw received mup-pe's DSD (direct segment discovery)"
 else
     ng "mup-gw never received the DSD (full-mesh iBGP or advertise failed)"
 fi
-if retry bash -c "docker exec $PA vbctl headend-v4 list 2>/dev/null | grep -q '$N3'" \
+if retry bash -c "docker exec $PA vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$N3'" \
    && retry bash -c "docker exec $PA grep -q 'MUP T2ST uplink installed' /var/log/vinberod.log"; then
     ok "mup-gw resolved the T2ST against the DSD and installed the uplink F-TEID gate for $N3/32"
 else
-    ng "mup-gw did not resolve/install the T2ST uplink gate"; dexec "$PA" vbctl headend-v4 list || true
+    ng "mup-gw did not resolve/install the T2ST uplink gate"; dexec "$PA" vbctl headend-v4 list --vrf global || true
 fi
 
 # --- 2. Uplink: gNB GTP-U -> ... -> DN receives the inner packet ------------
@@ -93,7 +101,7 @@ if grep -q "$UE > $DNHOST" "$ucap" || grep -qi "$UE" "$ucap"; then
     sed 's/^/      /' "$ucap" | head -2
 else
     ng "DN did not receive the uplink inner packet"
-    echo "      mup-gw uplink entries:"; dexec "$PA" vbctl headend-v4 list 2>/dev/null | sed 's/^/      /' || true
+    echo "      mup-gw uplink entries:"; dexec "$PA" vbctl headend-v4 list --vrf global 2>/dev/null | sed 's/^/      /' || true
 fi
 rm -f "$ucap"
 
@@ -120,7 +128,7 @@ if grep -qE "$N3_RE\.[0-9]+ > $GNB_RE\.2152" "$dcap"; then
 else
     ng "gNB did not receive downlink GTP-U sourced from the UPF anchor $N3"
     sed 's/^/      /' "$dcap" | head -4
-    echo "      mup-pe headend entries:"; dexec "$PD" vbctl headend-v4 list 2>/dev/null | sed 's/^/      /' || true
+    echo "      mup-pe headend entries:"; dexec "$PD" vbctl headend-v4 list --vrf vrf-cust 2>/dev/null | sed 's/^/      /' || true
 fi
 rm -f "$dcap"
 

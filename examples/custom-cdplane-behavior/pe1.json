@@ -1,4 +1,6 @@
 {
   "schema_version": 1,
-  "routing": {}
+  "routing": {
+    "headend_vrf": "vrf-cust"
+  }
 }

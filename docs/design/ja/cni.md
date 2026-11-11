@@ -207,8 +207,8 @@ pod は `k8s.v1.cni.cncf.io/networks: tenant-a` の annotation で接続しま�
 
 - IPv4 だけです。IPAM が IPv6 を返すと ADD は失敗します
 - L3 mode だけです。EVPN L2 mode は未実装です
-- `headend_v4_map` の key は `{vrf_id, prefix}` ですが、entry の登録も packet の lookup も vrf_id 0 (global VRF) で行うので、VRF 間で pod の subnet が重なると encap の LPM が衝突します。plugin は同じ node の記録 (veth が残っているもの) どうしで subnet の重なりを拒否しますが、別 node で別の VRF が同じ subnet を使う場合は検出できません。NAD 間で subnet を重ねないでください
-- 同じ理由で、VRF の分離は pod の経路表に頼っています。NET_ADMIN を持つ pod が net1 経由の経路を足すと、別の node にいる別の VRF の pod の /32 宛の packet が encap されて相手の pod に届きます。信頼できない pod に、この network で NET_ADMIN を与えないでください
+- plugin は同じ node の記録 (veth が残っているもの) どうしで subnet の重なりを拒否します。NAD 間で subnet を重ねないでください
+- 別の node の pod の /32 は、受信した PE がその VRF の headend entry として入れ、pod の packet は pod の VRF の entry で引かれます。NET_ADMIN を持つ pod が net1 経由の経路を足しても、別の VRF の pod の /32 へは encap されません
 - vinberod を再起動すると、network configuration から作った binding は消えます。binding は config で宣言してください。plugin が足した AC と VRF の vrf_id は state file から戻るので、pod は再起動後も同じ VRF に分類されます
 - node を再起動すると、Multus が CNI の設定を書き直す前に kubelet が pod の sandbox を作り直すことがあります。その pod は primary network だけで Running になり、net1 がありません。`k8s.v1.cni.cncf.io/network-status` annotation は古い値のままなので、再起動後は pod の中で net1 を確認し、無ければ pod を作り直してください
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します

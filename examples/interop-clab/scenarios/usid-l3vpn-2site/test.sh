@@ -122,12 +122,12 @@ frr_has_export() {
 retry frr_has_export || true
 
 # 2a. FRR's VPNv4 route (ce-osaka subnet) lands in Vinbero's headend-v4 map.
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list --vrf global 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
     ok "FRR VPNv4 route $OSAKA_PREFIX installed in Vinbero headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list | sed 's/^/      /'
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global | sed 's/^/      /'
 else
     ng "FRR VPNv4 route $OSAKA_PREFIX missing from Vinbero headend-v4 map"
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
 fi
 
 # frr_route_sid digs the first path's remoteSid out of vtysh JSON
@@ -162,7 +162,7 @@ if [ "$frr_wire_sid" = "$FRR_WIRE_SID" ]; then
 else
     ng "unexpected wire SID: '$frr_wire_sid' want '$FRR_WIRE_SID' (did FRR stop transposing?)"
 fi
-vin_seg=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
+vin_seg=$(dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global 2>/dev/null \
   | awk -v p="$OSAKA_PREFIX" '$1==p {print $NF}')
 if [ "$vin_seg" = "$FRR_FULL_SID" ]; then
     ok "uSID folded and installed in full: wire=$frr_wire_sid -> $vin_seg"
@@ -172,12 +172,12 @@ fi
 
 # 2d. The uSID-shaped SID Structure makes Vinbero install the route with
 #     H.Encaps.Red (reduced encapsulation).
-if dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
+if dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global 2>/dev/null \
   | awk -v p="$OSAKA_PREFIX" '$1==p' | grep -q "H_ENCAPS_RED"; then
     ok "Vinbero installed $OSAKA_PREFIX with H.Encaps.Red"
 else
     ng "Vinbero did not use H.Encaps.Red for the uSID route"
-    dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global || true
 fi
 
 # --- 3. Vinbero -> FRR: SRv6 Service TLV encode ----------------------------
@@ -278,7 +278,7 @@ fi
 
 # (b) the learned VPN routes are installed on both PEs.
 gate_vin_headend() {
-    dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null | grep -q "$OSAKA_PREFIX"
+    dexec "$PE_TOKYO" vbctl headend-v4 list --vrf global 2>/dev/null | grep -q "$OSAKA_PREFIX"
 }
 gate_frr_rib() {
     dexec "$PE_OSAKA" ip route show vrf vrf-cust "$TOKYO_PREFIX" 2>/dev/null \

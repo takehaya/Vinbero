@@ -17,12 +17,14 @@ Values the registration already decides (the claimed behavior, the headend scope
 A configured value that disagrees with the registration fails registration with an error naming both values.
 Configuration values grant nothing: the host checks every declaration against the registration.
 
-Receiver, registered with `--behavior 0xFE01 --headend-prefix 10.2.0.0/24`:
+Receiver, registered with `--behavior 0xFE01 --headend-prefix 10.2.0.0/24 --vrf vrf-cust`, whose customer port is an access circuit of `vrf-cust`:
 
 ```json
 {
   "schema_version": 1,
-  "routing": {}
+  "routing": {
+    "headend_vrf": "vrf-cust"
+  }
 }
 ```
 
@@ -52,6 +54,7 @@ Advertiser and local endpoint, registered with `--locator LOC2 --vrf vrf-cust --
 | `routing.decap_vrf` | Required with SID allocation, and requests one; selects a host-authorized VRF grant, separate from endpoint aux bytes |
 | `routing.prefix`, `routing.next_hop` | Both required to advertise an IPv4 VPN prefix; next hop must be a usable native IPv6 address |
 | `routing.vrf` | VRF to advertise into; defaults to the scope's only VRF |
+| `routing.headend_vrf` | VRF of the headend entries for received routes; the global VRF when omitted |
 | `endpoint.allowed_underlay_prefix` | Required with SID allocation; allowed outer IPv6 source prefix, including `::/0` to permit all sources |
 
 Prefixes are masked to their network address.

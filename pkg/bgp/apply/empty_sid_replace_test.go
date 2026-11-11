@@ -81,12 +81,14 @@ func TestApplyMUP_T1STRTMismatchUpdateReplaces(t *testing.T) {
 	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
 	a.Apply(mupISD(rd, isdP, isid))
 	a.Apply(mupT1ST(rd, ue, "172.16.0.1", 256, 9, ""))
-	assertT1STBase(t, fh, ue, isid)
+	// The downlink is an entry of the session's VRF.
+	key := vrfKey(t, vm, "vrf-mup", ue)
+	assertT1STBase(t, fh, key, isid)
 
 	replaced := mupT1ST(rd, ue, "172.16.0.1", 256, 9, "")
 	replaced.MUP.RTs = []string{"100:9999"}
 	a.Apply(replaced)
-	if len(fh.v4deleted) != 1 || fh.v4deleted[0] != ue {
+	if len(fh.v4deleted) != 1 || fh.v4deleted[0] != key {
 		t.Errorf("RT-mismatch T1ST update left the downlink installed; deleted=%v", fh.v4deleted)
 	}
 }
@@ -266,8 +268,9 @@ func TestApplyMUP_T2STRTMismatchUpdateReplaces(t *testing.T) {
 	if uplinks() != 1 {
 		t.Fatal("uplink was not installed")
 	}
-	if _, ok := fh.v4created[endpoint+"/32"]; !ok {
-		t.Fatal("endpoint gate was not installed")
+	gate := vrfKey(t, vm, "vrf-mup", endpoint+"/32")
+	if _, ok := fh.v4created[gate]; !ok {
+		t.Fatal("endpoint gate was not installed in the session's VRF")
 	}
 
 	replaced := mupT2ST("65100:1", endpoint, 0x100, 32, 0, 0, "fd00:3:3:c::")
@@ -276,7 +279,7 @@ func TestApplyMUP_T2STRTMismatchUpdateReplaces(t *testing.T) {
 	if uplinks() != 0 {
 		t.Error("RT-mismatch T2ST update left the uplink installed")
 	}
-	if len(fh.v4deleted) != 1 || fh.v4deleted[0] != endpoint+"/32" {
+	if len(fh.v4deleted) != 1 || fh.v4deleted[0] != gate {
 		t.Errorf("RT-mismatch T2ST update left the gate installed; deleted=%v", fh.v4deleted)
 	}
 }

@@ -59,8 +59,9 @@
  *       struct headend_v4_key (12 bytes) and struct headend_v6_key
  *       (24 bytes) replace struct lpm_key_v4 / lpm_key_v6 there. The
  *       key is {prefixlen = 32 + prefix length, instance = vrf_id
- *       big-endian, addr}; entries live in vrf_id 0, so a full-address
- *       lookup sets prefixlen 64 (v4) or 160 (v6) and instance to 0.
+ *       big-endian, addr}. The data plane matches a packet in its
+ *       ingress VRF (tailcall_ctx.vrf_id), so a full-address lookup
+ *       sets prefixlen 64 (v4) or 160 (v6) and instance to that vrf_id.
  *       struct lpm_key_v4 is gone; lpm_key_v6 stays the sid_function_map
  *       key. BREAKING: plugin ELFs compiled against v4 or older headers
  *       declare the old key sizes and fail PluginRegister (BTF key type

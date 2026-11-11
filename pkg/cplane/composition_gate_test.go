@@ -61,7 +61,7 @@ func TestCompositionBackendSharedGateArbitration(t *testing.T) {
 				t.Fatal("recovery idle")
 			}
 			st, _ = m.StatsFor("composition")
-			if st.OutputFailure != "" || len(f.uplinks) != 1 || f.v4["192.0.2.1/32"] == nil {
+			if st.OutputFailure != "" || len(f.uplinks) != 1 || f.v4["vrf 7 192.0.2.1/32"] == nil {
 				t.Fatalf("removing headend claimant did not recover uplink: %+v", st)
 			}
 

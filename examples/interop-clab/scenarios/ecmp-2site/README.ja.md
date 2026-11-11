@@ -35,6 +35,10 @@ graph LR
 4. fast reroute を確認します。`core` が pe-osaka-b 向けの経路を削除すると (admin link down は veth 両端の IPv6 address を flush してラボを path 障害以上に壊すため使いません)、prober が path をマスクし (100ms probe を 3 回喪失)、BGP がまだ両 path を信じている間に全 flow が pe-osaka-a 経由で流れ続けます
 5. 復旧を確認します。経路を戻すと path が復帰し (3 回連続応答)、分散が再開します
 
+## global VRF
+
+このシナリオには import route target を持つ VRF binding が無いので、受信した VPN 経路はすべて受け入れられ (default-allow)、global VRF に入ります。CE 側の口 (`eth2`) にも access circuit が無いので、そのパケットも global VRF で引かれます。`test.sh` はその経路を global VRF で確認します (group の trigger が素の prefix、つまり global VRF の trigger であること。テナントの VRF の trigger は `<prefix> vrf <名前>` と表示されます)。テナントの VRF として動かすには、CE 側の口をその VRF の access circuit にし (`vbctl vrf ac-add`)、経路の route target を import する binding を VRF に置きます。経路はその VRF にだけ入り、global VRF のパケットからは届かなくなります。
+
 ## 実行方法
 
 ```bash

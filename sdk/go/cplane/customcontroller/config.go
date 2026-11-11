@@ -17,13 +17,18 @@ const DefaultBehavior = 0xFE01
 // Config describes routing and opaque endpoint data. Registration separately
 // grants capabilities and scope; AuxRaw has meaning only to the Dplane plugin.
 type Config struct {
-	Behavior        uint32
-	Locator         string
-	Prefix          string
-	VRF             string
-	Slot            uint32
-	NextHop         string
-	DecapVRF        string
+	Behavior uint32
+	Locator  string
+	Prefix   string
+	VRF      string
+	Slot     uint32
+	NextHop  string
+	DecapVRF string
+	// HeadendVRF is the VRF the received routes' headend entries are
+	// declared in: empty is the global VRF. Packets are looked up in the
+	// VRF of the access circuit they enter on, so a receiver serving a
+	// tenant names the tenant's VRF.
+	HeadendVRF      string
 	HeadendPrefixes []netip.Prefix
 	// ReceiveNone accepts no routes. Resolve sets it when the headend scope
 	// has no IPv4 prefix, where the host would refuse every IPv4 entry.
@@ -48,6 +53,7 @@ type Routing struct {
 	Slot            *uint32   `json:"slot"`
 	NextHop         *string   `json:"next_hop"`
 	DecapVRF        *string   `json:"decap_vrf"`
+	HeadendVRF      *string   `json:"headend_vrf"`
 	HeadendPrefixes *[]string `json:"headend_prefixes"`
 }
 
@@ -83,7 +89,11 @@ func DecodeConfig(data []byte, grants cplane.Grants) (Config, error) {
 //     advertisement key is present, and locator and slot default to the only
 //     granted locator and endpoint slot;
 //   - an advertisement is made when prefix, vrf or next_hop is present, and
-//     vrf defaults to the only granted VRF.
+//     vrf defaults to the only granted VRF;
+//   - headend_vrf names the VRF of the headend entries; absent is the global
+//     VRF. It does not default to a granted VRF: the grant also serves
+//     advertisements and decapsulation, which say nothing about where the
+//     received routes' packets enter.
 //
 // A value the configuration gives must lie within the grant on its axis
 // whenever the registration grants anything there. The check is advisory:
@@ -97,6 +107,15 @@ func (r Routing) Resolve(g cplane.Grants) (Config, error) {
 	}
 	if c.HeadendPrefixes, c.ReceiveNone, err = headendPrefixes(r.HeadendPrefixes, g.HeadendPrefixes); err != nil {
 		return Config{}, err
+	}
+	if r.HeadendVRF != nil {
+		if *r.HeadendVRF == "" {
+			return Config{}, fmt.Errorf("routing.headend_vrf must not be empty; omit it for the global VRF")
+		}
+		if *r.HeadendVRF != "global" && len(g.VRFs) > 0 && !slices.Contains(g.VRFs, *r.HeadendVRF) {
+			return Config{}, fmt.Errorf("routing.headend_vrf %s is outside the registration's VRFs (%s)", *r.HeadendVRF, strings.Join(g.VRFs, ", "))
+		}
+		c.HeadendVRF = *r.HeadendVRF
 	}
 	advertises := r.Prefix != nil || r.VRF != nil || r.NextHop != nil
 	if !advertises && r.Locator == nil && r.Slot == nil && r.DecapVRF == nil {

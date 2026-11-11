@@ -27,6 +27,14 @@ of `pkg/bgp/apply`.
   customer route is added with `proto static` so the `redistribute: [static]`
   allowlist forwards it (a bare `ip route` is `RTPROT_BOOT`, excluded to avoid
   leaking casual routes into the VPN).
+- **vinbero/start.sh** also makes `eth2` (the ce-tokyo port) an access circuit
+  of `vrf-cust` (`vbctl vrf ac-add`). A received VPN route is installed in the
+  VRF that imports it, and a packet is looked up in the VRF of the AC it
+  enters on, so without the AC ce-tokyo's packets would be looked up in the
+  global VRF and miss. `eth2` is not enslaved to `vrf-cust`: a packet with no
+  route in `vrf-cust` is passed to the kernel, which looks it up in the main
+  table. `test.sh` checks `10.2.0.0/24` with `headend-v4 list --vrf vrf-cust`
+  and that the global VRF does not have it.
 - **frr/start.sh**: the /128 glue route targets the auto-minted SID
   `fd00:100:0:10::` (function `0x10`, the first auto-allocated End.DT4) instead
   of the manual `fd00:100:0:1::`.

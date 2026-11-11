@@ -91,11 +91,13 @@ peer 設定の `add_paths_receive` で ADD-PATH の receive を negotiate しま
 
 集約前は prefix をそのまま headend map に書き、owner を RD 込みにしていました。このため 2 台目の PE の書き込みは cross-owner チェックに掛かって失敗し、経路は単に捨てられていました。さらに 1 台目が withdraw すると、生き残っている PE の経路は再広告されるまで復活せず、その prefix は blackhole していました。集約と RD 非依存の owner でこの両方が解消します。
 
+group は {VRF, family, prefix} ごとに 1 つです。受信経路を import する VRF が複数あれば、VRF ごとに別の group と trigger を持ち、同じ path 集合でも共有しません。別の VRF に入る PE の path が 1 つの group に混ざることはありません。group id はノード全体で一意で、VRF ごとに採番し直しません。追跡する宛先の上限 (4096) も、すべての VRF の合計です。
+
 path の識別は `{rd, PathSource}` です。RD が PE を、`PathSource` が peer 内の path を区別するので、2 台の PE からの広告も、ADD-PATH で 1 peer から届く複数 path も、別々の path として保持できます。
 
 program する member は SID で dedupe して SID 順に並べ、8 本で打ち切ります。並び順を固定するのは見た目のためではありません。data plane は member 数の剰余で path を選ぶので、Go の map 反復順に依存すると同じ path 集合でも reconcile のたびに flow の分散先が変わってしまいます。同じ SID に解決する path は転送結果が同じなので dedupe します。両方 program すると、その PE の取り分だけが黙って倍になります。
 
-trigger エントリには group_id に加えて先頭 member の segments も入れます。data plane は group を解決できないとき trigger 自身の segments に fallback するので、reconcile の途中や再起動直後の窓で drop でなく単一 path 転送に degrade します。
+trigger エントリには group_id に加えて先頭 member の segments も入れます。data plane は group を解決できないとき trigger 自身の segments に fallback するので、reconcile の途中の窓で drop でなく単一 path 転送に degrade します。前回の起動の trigger は、pin した map に残っていても起動時に消します ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除))。
 
 group id は再起動を跨げません。owner tag は 64 バイトに収まる必要があり、prefix を入れると IPv6 で溢れるため、どの group がどの prefix のものだったかを記録できないからです。そこで起動時に自分が owner の group を sweep して世代ごとの orphan が積み上がるのを防ぎ、他の owner が持つ group と衝突しないよう、残っている id の上から採番を再開します。
 

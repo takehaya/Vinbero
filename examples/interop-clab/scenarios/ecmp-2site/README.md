@@ -55,6 +55,17 @@ shared site LAN under its own RD (`65200:200` / `65300:200`) and locator
 5. **Recovery.** Restoring the routes brings the path back (three
    answered probes) and traffic spreads again.
 
+## The global VRF
+
+This scenario has no VRF binding with import route targets, so every
+received VPN route is accepted (default-allow) and installed in the global
+VRF. The CE port (`eth2`) has no access circuit, so its packets are looked up
+in the global VRF too. `test.sh` checks the routes there: the group's trigger is the bare prefix, which is a trigger of the global VRF (a tenant VRF's is shown as `<prefix> vrf <name>`). To run it
+as a tenant VRF instead, the CE port needs an access circuit of the VRF
+(`vbctl vrf ac-add`) and the VRF a binding that imports the routes' route
+targets; the routes are then installed in that VRF only, and no packet of
+the global VRF reaches them.
+
 ## Running
 
 ```bash

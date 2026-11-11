@@ -136,7 +136,10 @@ func TestXDPProgSIDGateTenantIngress(t *testing.T) {
 		srcAddr, _ := ParseIPv6("fc00::1")
 		dstAddr, _ := ParseIPv6("fc00::100")
 		segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
+		// In the tenant's VRF, where its packet is looked up, and in vrf 0.
+		h.headendVRFs = []uint32{0, 1}
 		h.createHeadendEntry("fd00:5a1::/64", srcAddr, dstAddr, segments, numSegments, false)
+		h.headendVRFs = nil
 
 		setAC(t, 0, 1)
 		ret, out, runs := runSlot(t, dt4Pkt, actionEndDT4)

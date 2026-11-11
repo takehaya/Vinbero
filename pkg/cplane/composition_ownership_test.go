@@ -149,6 +149,12 @@ func (f *ownerDeleteFailureOps) DeleteHeadendV6(prefix string, owner bpf.OwnerTa
 	}
 	return f.serviceFake.DeleteHeadendV6(prefix, owner)
 }
+func (f *ownerDeleteFailureOps) DeleteHeadendV4In(v uint32, prefix string, owner bpf.OwnerTag) error {
+	return f.DeleteHeadendV4(serviceVRFKey(v, prefix), owner)
+}
+func (f *ownerDeleteFailureOps) DeleteHeadendV6In(v uint32, prefix string, owner bpf.OwnerTag) error {
+	return f.DeleteHeadendV6(serviceVRFKey(v, prefix), owner)
+}
 func TestColdOrdinaryReservationStatsAndCleanup(t *testing.T) {
 	for _, prefix := range []string{"10.0.0.1/32", "fd00:10::1/128"} {
 		t.Run(prefix, func(t *testing.T) {

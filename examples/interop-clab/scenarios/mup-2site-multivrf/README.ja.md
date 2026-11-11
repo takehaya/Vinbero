@@ -67,8 +67,10 @@ mup-2site を参照)。
 - `gnb-b → dn-b`: byte 単位で同一のパケットが eth2 に入る → vrf_id 2 →
   direct SID `fd00:d:0:2::` → vrf-b → dn-b。
 
-`test.sh` は control plane (同一 {endpoint, TEID} の T2ST 2 本が共有 gate の
-下で別 vrf_id に install されること) と、VPN ごとに自分の DN へ届き、
+`test.sh` は control plane (同一 {endpoint, TEID} の T2ST 2 本が別 vrf_id に
+install され、それぞれ自分の VRF の gate を持つこと。gate は headend エントリで、
+パケットは AC が分類した VRF の headend エントリで引かれるので、vpn-a と vpn-b
+に 1 本ずつあり、global VRF には無い) と、VPN ごとに自分の DN へ届き、
 byte 単位で同一の inner を受け入れてしまうはずのもう一方の DN には何も
 届かないこと (cross-VRF leak なし) を検証します。
 

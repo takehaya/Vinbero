@@ -127,17 +127,22 @@ pod_ip() {
     jq -r '.ips[0].address | split("/")[0]' "$work/$1.json"
 }
 
-# headend_to <node> <ip>: the PE has an encap entry for ip/32 whose service
-# SID is in the other PE's locator, i.e. it imported the VPNv4 route.
+# headend_to <node> <ip>: the PE has an encap entry for ip/32 in tenant-a
+# whose service SID is in the other PE's locator, i.e. it imported the VPNv4
+# route into the VRF its pods' ports classify to, and nothing for it in the
+# global VRF.
 headend_to() {
     local node=$1 ip=$2 other=$((3 - $1))
-    ctl "cnil3-pe$node" --json headend-v4 list |
+    ctl "cnil3-pe$node" --json headend-v4 list --vrf tenant-a |
         jq -e --arg p "$ip/32" --arg loc "fd00:$other:" \
-            'any(.[]?; .trigger_prefix == $p and (.segments[0] | startswith($loc)))'
+            'any(.[]?; .trigger_prefix == $p and (.segments[0] | startswith($loc)))' &&
+        ctl "cnil3-pe$node" --json headend-v4 list --vrf global |
+        jq -e --arg p "$ip/32" 'all(.[]?; .trigger_prefix != $p)'
 }
 
+# no_headend_to <node> <ip>: no VRF has an encap entry for ip/32.
 no_headend_to() {
-    ctl "cnil3-pe$1" --json headend-v4 list | jq -e --arg p "$2/32" 'all(.[]?; .trigger_prefix != $p)'
+    ctl "cnil3-pe$1" --json headend-v4 list --all-vrfs | jq -e --arg p "$2/32" 'all(.[]?; .trigger_prefix != $p)'
 }
 
 device_attached() {
