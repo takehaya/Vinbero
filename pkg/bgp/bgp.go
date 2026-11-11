@@ -298,6 +298,12 @@ type RouteEvent struct {
 	// BGPPath retains the complete NLRI and attributes for plugin readers.
 	// It is immutable after delivery and independent of GoBGP's RIB objects.
 	BGPPath *EncodedBGPPath
+	// ExcludedVRFs lists VRFs a VPN path is not placed in even though they
+	// import it. The demux sets it on what it hands the built-in appliers
+	// when a plugin claimed another path of the same prefix that those VRFs
+	// import: there the plugin, not the built-in, programs the prefix. It is
+	// nil on every other event, and plugins never see it.
+	ExcludedVRFs []uint32
 }
 
 // BGPPathCodec identifies the packet codec, including the MUP framing fork.

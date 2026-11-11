@@ -76,6 +76,9 @@ type Demux struct {
 	// behavior, so a withdraw -- which carries no attributes to decide
 	// from -- inherits the decision its advertise made.
 	ledger *claimLedger
+	// importVRFs names the VRFs the built-in applier places a VPN path in.
+	// Nil until SetVPNImportResolver is called; see builtinDeliveryState.
+	importVRFs func(*bgp.VPNRoute) []uint32
 
 	// lifecycleMu serializes subscription publication with Stop and restart.
 	lifecycleMu sync.Mutex
@@ -104,6 +107,17 @@ func (d *Demux) SetClaimRegistry(claims *ClaimRegistry) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.claims = claims
+}
+
+// SetVPNImportResolver installs the function that names the VRFs the
+// built-in applier places a VPN path in. With it, a claimed VPN path keeps
+// the other paths of its prefix out of those VRFs only, and they still
+// reach the applier for every other VRF that imports them. Without it, a
+// claimed path withholds every path of its prefix. Call before Start.
+func (d *Demux) SetVPNImportResolver(resolve func(*bgp.VPNRoute) []uint32) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.importVRFs = resolve
 }
 
 // Register adds a plugin consumer. See RegisterBuiltin for Vinbero's own
