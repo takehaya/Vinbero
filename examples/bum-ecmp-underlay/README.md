@@ -6,8 +6,8 @@ Checks xdp-mode BUM replication when the peers of a bridge domain are reached
 through a multipath route. The PE has two uplinks to a transit router; the
 peers are locators under `fc00:100::/32`, routed over both uplinks.
 
-The test creates 8 peers with `peer create`, which fills the bridge domain's
-8 flood slots: a bridge domain floods to at most 8 remote PEs (9 nodes), and
+The test creates 8 peers with `peer create`, 8 of the bridge domain's 32
+flood slots: a bridge domain floods to at most 32 remote PEs (33 nodes), and
 the slots are shared with the EVPN RT3 peers BGP installs (see
 [bum_mode.md](../../docs/design/ja/bum_mode.md)).
 

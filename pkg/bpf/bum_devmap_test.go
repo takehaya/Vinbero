@@ -53,6 +53,11 @@ func devmapEntries(t *testing.T, outer *ebpf.Map, bd uint16) map[uint32]devmapVa
 	)
 	it := inner.Iterate()
 	for it.Next(&k, &v) {
+		// Slot keys carry the build number (BumSlotKey); the tests name
+		// them by slot, BumSlotKeyBase|index.
+		if slot, ok := BumSlotIndex(k); ok {
+			k = BumSlotKeyBase | uint32(slot)
+		}
 		out[k] = v
 	}
 	if err := it.Err(); err != nil {

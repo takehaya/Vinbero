@@ -31,8 +31,9 @@ func rangeTestSrc(n int) [IPv6AddrLen]byte {
 }
 
 // A flood peer takes a flood slot and a FloodExclude (RT2) peer an index of
-// the unicast range, so eight of each fit one bridge domain; each range
-// fails on its own with ErrBdPeerRangeFull once full.
+// the unicast range, so 32 of each fit one bridge domain; each range fails
+// on its own with ErrBdPeerRangeFull once full: the 33rd flood peer and the
+// 65th unicast peer.
 func TestBdPeerAllocationByRange(t *testing.T) {
 	m := newXDPTestHelper(t).mapOps
 	var noESI [ESILen]byte
@@ -47,7 +48,7 @@ func TestBdPeerAllocationByRange(t *testing.T) {
 		}
 	}
 	if _, err := m.CreateBdPeerAtFreeIndex(100, rangeTestPeer(t, 50, false), noESI, rangeTestSrc(50), true); !errors.Is(err, ErrBdPeerRangeFull) {
-		t.Fatalf("ninth flood peer: %v, want ErrBdPeerRangeFull", err)
+		t.Fatalf("flood peer %d: %v, want ErrBdPeerRangeFull", MaxBumNexthops+1, err)
 	}
 	for n := MaxBumNexthops; n < MaxUnicastPeersPerBd; n++ {
 		if _, err := m.CreateBdPeerAtFreeIndexOwned(100, rangeTestPeer(t, 100+n, true), noESI, rangeTestSrc(100+n), true, OwnerBGPEVPN(65000)); err != nil {
@@ -63,9 +64,9 @@ func TestBdPeerAllocationByRange(t *testing.T) {
 	}
 }
 
-// An index written explicitly must be in the layout: never in the reserved
-// part of the flood range or past the unicast range, and a flood peer never
-// in the unicast range.
+// An index written explicitly must be in the layout: never past the unicast
+// range, and a flood peer never in the unicast range. Every flood slot,
+// 8 to 31 included, takes a flood peer.
 func TestBdPeerExplicitIndexChecked(t *testing.T) {
 	m := newXDPTestHelper(t).mapOps
 	var noESI [ESILen]byte
@@ -74,13 +75,16 @@ func TestBdPeerExplicitIndexChecked(t *testing.T) {
 		index        uint16
 		floodExclude bool
 	}{
-		{MaxBumNexthops, true},          // reserved flood range
-		{BdPeerFloodReserved - 1, true}, // reserved flood range
-		{UnicastPeerIndexBase, false},   // a flood peer in the unicast range
-		{UnicastPeerRange.End(), true},  // past the unicast range
+		{UnicastPeerIndexBase, false},  // a flood peer in the unicast range
+		{UnicastPeerRange.End(), true}, // past the unicast range
 	} {
 		if err := m.CreateBdPeer(100, c.index, rangeTestPeer(t, 1, c.floodExclude), noESI, noSrc, false); err == nil {
 			t.Errorf("index %d (FloodExclude=%v) was accepted", c.index, c.floodExclude)
+		}
+	}
+	for _, i := range []uint16{7, 8, MaxBumNexthops - 1} {
+		if err := m.CreateBdPeer(100, i, rangeTestPeer(t, int(i)+10, false), noESI, noSrc, false); err != nil {
+			t.Errorf("flood slot %d: %v", i, err)
 		}
 	}
 	if err := m.CreateBdPeer(100, EsPeerIndexBase, rangeTestPeer(t, 1, true), noESI, noSrc, false); err != nil {
@@ -146,7 +150,8 @@ func TestBdPeerFreedHook(t *testing.T) {
 func TestBdPeerConcurrentAllocation(t *testing.T) {
 	m := newXDPTestHelper(t).mapOps
 	var noESI [ESILen]byte
-	const tries = 24
+	// More flood peers than slots, fewer unicast peers than indices.
+	const tries = MaxBumNexthops + 8
 	type result struct {
 		index uint16
 		err   error
@@ -203,9 +208,10 @@ func TestBdPeerConcurrentAllocation(t *testing.T) {
 	}
 }
 
-// The layout check names every peer, owner record, reverse entry and remote
-// FDB pointer at an index of the reserved flood range, and passes once they
-// are gone.
+// The layout check names every flood-range peer that carries an ECMP group
+// (an Ethernet Segment peer of the layout in which they took [8, 40)),
+// whatever its owner, and passes once they are gone. Flood peers at any
+// slot, the ES peers in their range and the unicast peers pass.
 func TestCheckBdPeerLayout(t *testing.T) {
 	h := newXDPTestHelper(t)
 	m := h.mapOps
@@ -213,63 +219,126 @@ func TestCheckBdPeerLayout(t *testing.T) {
 		t.Fatalf("empty maps: %v", err)
 	}
 	var noESI [ESILen]byte
-	// Entries the layout allows.
-	if _, err := m.CreateBdPeerAtFreeIndex(100, rangeTestPeer(t, 1, false), noESI, rangeTestSrc(1), true); err != nil {
+	// Entries the layout allows: flood peers in slots 0 to 31, an RT2 peer,
+	// an ES peer with its group in the ES range.
+	for n := 0; n < MaxBumNexthops; n++ {
+		if _, err := m.CreateBdPeerAtFreeIndex(100, rangeTestPeer(t, n, false), noESI, rangeTestSrc(n), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.CreateBdPeerAtFreeIndexOwned(100, rangeTestPeer(t, 50, true), noESI, rangeTestSrc(50), true, OwnerBGPEVPN(65000)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateBdPeerAtFreeIndexOwned(100, rangeTestPeer(t, 2, true), noESI, rangeTestSrc(2), true, OwnerBGPEVPN(65000)); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.CreateBdPeer(100, EsPeerIndexBase, rangeTestPeer(t, 3, true), noESI, [IPv6AddrLen]byte{}, false); err != nil {
+	es := rangeTestPeer(t, 51, true)
+	es.GroupId = 77
+	if err := m.CreateBdPeer(100, EsPeerIndexBase, es, noESI, [IPv6AddrLen]byte{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.CheckBdPeerLayout(); err != nil {
 		t.Fatalf("layout entries only: %v", err)
 	}
 
-	peerKey := BdPeerKey{BdId: 100, Index: 9}
-	if err := h.objs.BdPeerMap.Put(&peerKey, rangeTestPeer(t, 9, true)); err != nil {
+	// ES peers of the earlier layout at 9 (no owner) and 31 (another ASN),
+	// written past the index check as that version did.
+	old9 := rangeTestPeer(t, 60, true)
+	old9.GroupId = 78
+	old31 := rangeTestPeer(t, 61, true)
+	old31.GroupId = 79
+	k9, k31 := BdPeerKey{BdId: 101, Index: 9}, BdPeerKey{BdId: 101, Index: 31}
+	if err := h.objs.BdPeerMap.Put(&k9, old9); err != nil {
 		t.Fatal(err)
 	}
-	ownerKey := BdPeerKey{BdId: 101, Index: 10}
-	if err := m.bdPeerOwners.Put(&ownerKey, OwnerBGPEVPN(65001)); err != nil {
+	if err := h.objs.BdPeerMap.Put(&k31, old31); err != nil {
 		t.Fatal(err)
 	}
-	revKey := BdPeerReverseKey{BdId: 102, SrcAddr: rangeTestSrc(11)}
-	if err := h.objs.BdPeerReverseMap.Put(&revKey, &BdPeerReverseVal{Index: 11}); err != nil {
-		t.Fatal(err)
-	}
-	mac := net.HardwareAddr{2, 0, 0, 0, 0, 1}
-	fdbKey := buildFdbKey(103, mac)
-	if err := h.objs.FdbMap.Put(fdbKey, &FdbEntry{IsRemote: 1, PeerIndex: 12, BdId: 103}); err != nil {
+	if err := m.bdPeerOwners.Put(&k31, OwnerBGPEVPN(65001)); err != nil {
 		t.Fatal(err)
 	}
 	err := m.CheckBdPeerLayout()
 	if err == nil {
-		t.Fatal("entries in the reserved flood range passed")
+		t.Fatal("ES peers in the flood range passed")
 	}
 	for _, want := range []string{
-		"peer {bd 100, index 9} (no owner)",
-		"owner record {bd 101, index 10} (" + string(OwnerBGPEVPN(65001)) + ") without a peer",
-		"reverse entry {bd 102, source fd00:ff::c} -> index 11",
-		"FDB entry {bd 103, 02:00:00:00:00:01} -> peer index 12 (no owner)",
+		"peer {bd 101, index 9} with ECMP group 78 (no owner)",
+		"peer {bd 101, index 31} with ECMP group 79 (" + string(OwnerBGPEVPN(65001)) + ")",
+		"(2 in all)",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal does not name %q: %v", want, err)
 		}
 	}
-	for _, del := range []func() error{
-		func() error { return h.objs.BdPeerMap.Delete(&peerKey) },
-		func() error { return m.bdPeerOwners.Delete(&ownerKey) },
-		func() error { return h.objs.BdPeerReverseMap.Delete(&revKey) },
-		func() error { return h.objs.FdbMap.Delete(fdbKey) },
-	} {
-		if err := del(); err != nil {
+	for _, k := range []BdPeerKey{k9, k31} {
+		if err := h.objs.BdPeerMap.Delete(&k); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := m.CheckBdPeerLayout(); err != nil {
 		t.Errorf("after removing them: %v", err)
+	}
+}
+
+// bd_flood_slots_map follows the flood peers: a bit per occupied slot, set
+// by every create, cleared by every delete, the rollback of a failed create
+// included, and rebuilt from bd_peer_map by RecoverBdFloodSlots.
+func TestBdFloodSlots(t *testing.T) {
+	h := newXDPTestHelper(t)
+	m := h.mapOps
+	slots := func(bd uint16) uint32 {
+		t.Helper()
+		var v uint32
+		if err := h.objs.BdFloodSlotsMap.Lookup(uint32(bd), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	var noESI [ESILen]byte
+	for n := 0; n < MaxBumNexthops; n++ {
+		if _, err := m.CreateBdPeerAtFreeIndex(100, rangeTestPeer(t, n, false), noESI, rangeTestSrc(n), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := slots(100); got != 0xffffffff {
+		t.Fatalf("32 flood peers: slots %#x", got)
+	}
+	// Unicast and ES peers take no bit.
+	if _, err := m.CreateBdPeerAtFreeIndexOwned(100, rangeTestPeer(t, 40, true), noESI, rangeTestSrc(40), true, OwnerBGPEVPN(65000)); err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range []uint16{7, 8, 31} {
+		if _, err := m.DeleteBdPeer(100, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := slots(100), uint32(0xffffffff&^(1<<7|1<<8|1<<31)); got != want {
+		t.Fatalf("after deleting 7, 8, 31: slots %#x, want %#x", got, want)
+	}
+	if got := slots(200); got != 0 {
+		t.Fatalf("bd 200: slots %#x", got)
+	}
+	// The allocator refills the lowest free slot first, and its bit.
+	if i, err := m.CreateBdPeerAtFreeIndex(100, rangeTestPeer(t, 41, false), noESI, rangeTestSrc(41), true); err != nil || i != 7 {
+		t.Fatalf("refill: index %d, %v", i, err)
+	}
+	if slots(100)&(1<<7) == 0 {
+		t.Fatal("slot 7 refilled without its bit")
+	}
+
+	// A start over pinned maps: the slots map is not pinned and comes up
+	// empty, or stale.
+	if err := h.objs.BdFloodSlotsMap.Put(uint32(100), uint32(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.objs.BdFloodSlotsMap.Put(uint32(300), uint32(0x5)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RecoverBdFloodSlots(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := slots(100), uint32(0xffffffff&^(1<<8|1<<31)); got != want {
+		t.Errorf("recovered bd 100: slots %#x, want %#x", got, want)
+	}
+	if got := slots(300); got != 0 {
+		t.Errorf("recovered bd 300 (no peers): slots %#x", got)
 	}
 }
 

@@ -35,6 +35,12 @@ func newOwnedTestMaps(t *testing.T) *MapOperations {
 	o.BdPeerOwnerMap = newMap(ebpf.Hash, uint32(binary.Size(BdPeerKey{})), auxOwnerTagBytes)
 	o.BdPeerReverseMap = newMap(ebpf.Hash, uint32(binary.Size(BdPeerReverseKey{})), uint32(binary.Size(BdPeerReverseVal{})))
 	o.BdPeerL2ExtMap = newMap(ebpf.Hash, uint32(binary.Size(BpfBdPeerL2ExtKey{})), uint32(binary.Size(BpfBdPeerL2ExtVal{})))
+	slots, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 4, MaxEntries: 1 << 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = slots.Close() })
+	o.BdFloodSlotsMap = slots
 	return reopenOwnedTestMaps(o)
 }
 func reopenOwnedTestMaps(o *BpfObjects) *MapOperations {

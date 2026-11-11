@@ -5,9 +5,10 @@
 Nine Vinbero PEs form one EVPN bridge domain (bd 100) over an iBGP full mesh.
 Each PE advertises its host's MAC as an RT2 (End.DT2U SID) and its flood SID
 as an RT3 (End.DT2M SID), so every PE installs, per remote PE, one RT3 flood
-peer and one RT2 unicast peer. The RT2 peers take no flood slot: the 8 flood
-slots of a bridge domain hold the 8 RT3 peers, which is the most a bridge
-domain floods to (8 remote PEs, 9 nodes). See
+peer and one RT2 unicast peer. The RT2 peers take no flood slot: the 8 RT3
+peers take 8 of the bridge domain's 32 flood slots. A bridge domain floods to
+at most 32 remote PEs (33 nodes); [evpn-bum-scale-33](../evpn-bum-scale-33/)
+runs the same test at that size. See
 [bum_mode.md](../../docs/design/ja/bum_mode.md) for the peer index ranges.
 
 ```mermaid
@@ -55,8 +56,8 @@ sudo BUM_MODE=tc ./test.sh
 sudo ./teardown.sh
 ```
 
-`NUM_PES=<n>` (the same for `setup.sh` and `test.sh`) runs the topology with
-another number of PEs. With more than 9, the PEs cannot install every
-remote PE's RT3 peer and the first check fails: that is the limit of 8
-flood slots per bridge domain. The daemons log to
-`/tmp/vinbero_ebs_pe<N>.log`.
+`NUM_PES=<n>` (the same for `setup.sh` and `test.sh`, at most 33) runs the
+topology with another number of PEs; the checks scale with it. With more than
+33, the PEs cannot install every remote PE's RT3 peer and the first check
+fails: that is the limit of 32 flood slots per bridge domain. The daemons log
+to `/tmp/vinbero_ebs_pe<N>.log`.
