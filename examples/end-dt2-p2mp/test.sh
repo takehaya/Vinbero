@@ -369,14 +369,20 @@ fi
 # Phase 6: PE1 crashes and comes back
 # ==========================================
 # The runtime-attached AC and the L2 headend circuit come back from the state
-# file, the BD peers from the pinned maps; nothing is configured again.
+# file, the BD peers from the pinned maps; nothing is configured again. The
+# pinned headend_l2_map goes while PE1 is down, so the circuit can only come
+# from the state file.
 echo ""
 echo "=========================================="
 echo "Phase 6: PE1 killed and started again"
 echo "=========================================="
-restart_vinbero "$ns_router1" "$(bum_mode_config /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_bum.yaml)" \
-    /tmp/vinbero_p2mp_pe1_restart.log 127.0.0.1:8082 "$VINBERO_PID_PE1" KILL
+kill -KILL "$VINBERO_PID_PE1" 2>/dev/null || true
+wait "$VINBERO_PID_PE1" 2>/dev/null || true
+rm -f "$PE1_PIN_DIR/headend_l2_map"
+start_vinbero "$ns_router1" "$(bum_mode_config /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_bum.yaml)" \
+    /tmp/vinbero_p2mp_pe1_restart.log
 VINBERO_PID_PE1=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 15
 if vbctl_pe1 --json hl2 list | grep -q '"vlan_id": 100'; then
     print_success "PE1 restored its L2 headend circuit"
     TESTS_PASSED=$((TESTS_PASSED + 1))
