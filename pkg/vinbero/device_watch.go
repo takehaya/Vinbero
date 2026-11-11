@@ -19,7 +19,9 @@ var linkSweepInterval = time.Minute
 // soon as its interface is deleted, removing it from the state file, so a
 // pod veth deleted without a detach does not linger. The headend_l2 entries
 // of a deleted interface go with it: they are keyed by an ifindex nothing
-// can name any more, so no RPC could remove them. It watches the network
+// can name any more, so no RPC could remove them, and their saved circuits
+// with them. A rename or a new hardware address of an interface with saved
+// circuits is recorded, so the next start still restores them. It watches the network
 // namespace of the calling thread. A subscription that fails (e.g. a
 // receive buffer overflow) is opened again, and every (re)subscription
 // starts with a sweep over the current interfaces, so a deletion missed in
@@ -84,10 +86,23 @@ func (v *Vinbero) watchOnce(ns netns.NsHandle, h *netlink.Handle, done <-chan st
 			if !ok {
 				return // the subscription failed; resubscribe
 			}
-			// A port leaving a bridge also sends RTM_DELLINK (family
-			// AF_BRIDGE) while the interface lives on, so the deletion is
-			// confirmed with a lookup before the attachment goes.
-			if u.Header.Type != unix.RTM_DELLINK || u.Family == unix.AF_BRIDGE {
+			if u.Family == unix.AF_BRIDGE {
+				// A port leaving a bridge also sends RTM_DELLINK (family
+				// AF_BRIDGE) while the interface lives on.
+				continue
+			}
+			if u.Header.Type == unix.RTM_NEWLINK {
+				// A rename or a new hardware address of an interface
+				// with L2 headend circuits.
+				if v.l2 != nil {
+					a := u.Attrs()
+					v.l2.follow(LinkID{Name: a.Name, Ifindex: uint32(a.Index), MAC: a.HardwareAddr})
+				}
+				continue
+			}
+			// The deletion is confirmed with a lookup before the
+			// attachment goes.
+			if u.Header.Type != unix.RTM_DELLINK {
 				continue
 			}
 			name, ifindex := u.Attrs().Name, u.Attrs().Index
@@ -151,10 +166,17 @@ func (v *Vinbero) pruneHeadendL2(h *netlink.Handle, present map[string]int) {
 }
 
 func (v *Vinbero) deleteHeadendL2(match func(ifindex uint32) bool) {
-	if v.mapOps == nil {
+	var n int
+	var err error
+	switch {
+	case v.l2 != nil:
+		// The saved circuits of the interface go with its entries.
+		n, err = v.l2.deleteWhere(match)
+	case v.mapOps != nil:
+		n, err = v.mapOps.DeleteHeadendL2Where(match)
+	default:
 		return
 	}
-	n, err := v.mapOps.DeleteHeadendL2Where(match)
 	if err != nil {
 		v.logger.Warn("device watch: remove headend_l2 entries of a deleted interface", zap.Error(err))
 	}

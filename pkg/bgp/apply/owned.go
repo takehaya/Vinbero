@@ -15,13 +15,15 @@ import (
 
 // Owner inventories include cleanup remnants whose forward entry is gone.
 // Drain FDB references before freeing peers; replay recreates the current RIB.
-func (a *Applier) sweepOwnedEVPNEntries() bool {
+// It returns how many entries it removed and whether it removed them all.
+func (a *Applier) sweepOwnedEVPNEntries() (int, bool) {
 	owner := bpf.OwnerBGPEVPN(a.localASN)
 	fdbs, err := a.fdbBd.ListFdbOwners()
 	if err != nil {
 		a.logger.Error("list EVPN FDB owners", zap.Error(err))
-		return false
+		return 0, false
 	}
+	removed := 0
 	complete := true
 	for key, tag := range fdbs {
 		if tag != owner {
@@ -30,15 +32,17 @@ func (a *Applier) sweepOwnedEVPNEntries() bool {
 		if err := a.fdbBd.DeleteFdbOwned(key.BdId, net.HardwareAddr(key.Mac[:]), owner); err != nil {
 			a.logger.Error("sweep owned EVPN FDB", zap.Error(err))
 			complete = false
+			continue
 		}
+		removed++
 	}
 	if !complete {
-		return false
+		return removed, false
 	}
 	peers, err := a.fdbBd.ListBdPeerOwners()
 	if err != nil {
 		a.logger.Error("list EVPN peer owners", zap.Error(err))
-		return false
+		return removed, false
 	}
 	for key, tag := range peers {
 		if tag != owner {
@@ -47,9 +51,11 @@ func (a *Applier) sweepOwnedEVPNEntries() bool {
 		if _, err := a.fdbBd.DeleteBdPeerOwned(key.BdId, key.Index, owner); err != nil {
 			a.logger.Error("sweep owned EVPN peer", zap.Error(err))
 			complete = false
+			continue
 		}
+		removed++
 	}
-	return complete
+	return removed, complete
 }
 
 // Startup remnants are distinct from replayed session state. A replay must not

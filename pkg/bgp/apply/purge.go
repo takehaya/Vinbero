@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"go.uber.org/zap"
 )
 
 // HeadendPurgeOps is what PurgeBuiltinHeadends reads and removes: the
@@ -71,6 +72,32 @@ func PurgeBuiltinHeadends(ops HeadendPurgeOps, localASN uint32) (int, error) {
 		}
 	}
 	return removed, errors.Join(errs...)
+}
+
+// EVPNPurgeOps is what PurgeBuiltinEVPN reads and removes: the FDB, the
+// bridge-domain peers and the ECMP groups. *bpf.MapOperations satisfies it.
+type EVPNPurgeOps interface {
+	fdbBdOps
+	ecmpOps
+}
+
+// PurgeBuiltinEVPN removes, before the data plane is attached, the EVPN
+// state the BGP applier of localASN wrote in an earlier run and pinned maps
+// kept: its FDB entries (remote MACs) and bridge-domain peers (RT2 and RT3),
+// the FDB pointers and synthetic peers in the Ethernet Segment peer range,
+// which only the applier allocates, and its segment ECMP groups. FDB entries
+// go before the peers they point at, and the groups only once both are gone.
+// Entries other owners wrote (the operator's, a plugin's, another ASN's)
+// stay. Routes are rebuilt from BGP. It returns how many entries it removed;
+// on any failure (each is logged) it returns an error, and the start stops:
+// a stale MAC would forward to a peer index another remote PE may get.
+func PurgeBuiltinEVPN(ops EVPNPurgeOps, localASN uint32, logger *zap.Logger) (int, error) {
+	a := &Applier{fdbBd: ops, ecmp: ops, localASN: localASN, evpn: newEVPNTable(), logger: logger.Named("bgp.apply")}
+	n, ok := a.sweepEVPNState()
+	if !ok {
+		return n, errors.New("the EVPN entries an earlier run's BGP applier wrote could not all be removed (each failure is logged above)")
+	}
+	return n, nil
 }
 
 // purgeBuiltinMUPUplinks removes the MUP uplink entries the applier of

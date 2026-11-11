@@ -153,6 +153,18 @@ func (a *Applier) esGroupOwner() bpf.OwnerTag {
 // the VPN table's own high-water seed is not inflated by EVPN ids this sweep
 // is about to remove.
 func (a *Applier) resetEVPNGroups() {
+	if _, ok := a.sweepEVPNState(); !ok {
+		a.logger.Error("EVPN startup sweep incomplete; what could not be removed is logged above")
+	}
+	a.seedEVPNGroupIDs()
+}
+
+// sweepEVPNState removes the EVPN state the applier of localASN left in the
+// pinned maps: its FDB entries and peers, the FDB pointers and synthetic
+// peers in the ES range, and its segment groups. It reports how many entries
+// it removed and whether it removed all it should; each failure is logged.
+func (a *Applier) sweepEVPNState() (int, bool) {
+	removed := 0
 	// The synthetic ES peers live in an applier-exclusive index range (the
 	// operator RPC allocates below EsPeerIndexBase), so every entry found
 	// there is a previous run's leftover. Sweep them: under pinned maps a
@@ -163,7 +175,8 @@ func (a *Applier) resetEVPNGroups() {
 	// they too survive a restart, and a MAC that the replayed rib no
 	// longer carries would keep aiming at an index a different segment may
 	// be handed later.
-	sweepOK := a.sweepOwnedEVPNEntries()
+	n, sweepOK := a.sweepOwnedEVPNEntries()
+	removed += n
 	if fdbs, err := a.fdbBd.ListFdb(); err != nil {
 		a.logger.Error("list fdb; stale EVPN aliasing pointers may be left behind", zap.Error(err))
 		sweepOK = false
@@ -186,6 +199,8 @@ func (a *Applier) resetEVPNGroups() {
 				a.logger.Error("sweep stale EVPN aliasing FDB entry",
 					zap.Uint16("bd_id", k.BdId), zap.Error(derr))
 				sweepOK = false
+			} else {
+				removed++
 			}
 		}
 	}
@@ -232,13 +247,14 @@ func (a *Applier) resetEVPNGroups() {
 			}
 			a.logger.Info("swept EVPN ES peer left by a previous run",
 				zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index))
+			removed++
 		}
 	}
 
 	owners, err := a.ecmp.ListEcmpGroupOwners()
 	if err != nil {
 		a.logger.Error("list ecmp group owners; stale EVPN groups may be left behind", zap.Error(err))
-		owners = nil
+		return removed, false
 	}
 	mine := a.esGroupOwner()
 	for id, owner := range owners {
@@ -247,11 +263,18 @@ func (a *Applier) resetEVPNGroups() {
 		}
 		if err := a.ecmp.DeleteEcmpGroup(id, mine); err != nil {
 			a.logger.Error("sweep stale EVPN ecmp group", zap.Uint32("group_id", id), zap.Error(err))
+			sweepOK = false
 			continue
 		}
 		a.logger.Info("swept EVPN ecmp group left by a previous run", zap.Uint32("group_id", id))
+		removed++
 	}
+	return removed, sweepOK
+}
 
+// seedEVPNGroupIDs starts the segment group ids above every high-partition
+// id the maps still hold.
+func (a *Applier) seedEVPNGroupIDs() {
 	groups, err := a.ecmp.ListEcmpGroups()
 	if err != nil {
 		a.logger.Error("list ecmp groups; EVPN id allocation may collide with surviving groups", zap.Error(err))

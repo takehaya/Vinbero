@@ -18,6 +18,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
+	"github.com/takehaya/vinbero/pkg/vinbero"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
@@ -57,6 +58,9 @@ type Server struct {
 	// devices attaches interfaces at runtime (DeviceService); nil makes
 	// those RPCs report Unimplemented.
 	devices DeviceAttacher
+	// l2Circuits keeps the L2 headend circuits in the state file; nil keeps
+	// them in the map only.
+	l2Circuits *vinbero.L2Circuits
 }
 
 // NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
@@ -118,6 +122,12 @@ func (s *Server) SetProber(source ProberStatusSource, intervalMs, multiplier uin
 // Call before Setup.
 func (s *Server) SetDeviceAttacher(a DeviceAttacher) {
 	s.devices = a
+}
+
+// SetL2Circuits hands the server the L2 headend circuit book the link
+// watcher shares. Call before Setup.
+func (s *Server) SetL2Circuits(c *vinbero.L2Circuits) {
+	s.l2Circuits = c
 }
 
 // SetCplaneManager installs the control-plane plugin manager. Like
@@ -250,6 +260,9 @@ func (s *Server) Setup() {
 
 	// HeadendL2 service
 	headendL2Server := NewHeadendL2Server(s.mapOps)
+	if s.l2Circuits != nil {
+		headendL2Server.SetCircuits(s.l2Circuits)
+	}
 	headendL2Server.SetClosedVRFCheck(func(ifindex uint32) (string, bool, error) {
 		links, err := vrf.SnapshotLinks()
 		if err != nil {

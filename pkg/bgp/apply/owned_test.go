@@ -101,17 +101,40 @@ func TestSweepOwnedEVPNEntries(t *testing.T) {
 	foreign := bpf.OwnerPluginBundle("plugin")
 	f := &ownedSweepFake{fakeHeadend: &fakeHeadend{}, fdb: map[bpf.FdbKey]bpf.OwnerTag{{BdId: 100}: own, {BdId: 200}: foreign}, peers: map[bpf.BdPeerKey]bpf.OwnerTag{{BdId: 100, Index: 1}: own, {BdId: 200, Index: 1}: foreign}, failFDB: true}
 	a := &Applier{fdbBd: f, localASN: 65000, logger: zap.NewNop()}
-	if a.sweepOwnedEVPNEntries() {
+	if _, ok := a.sweepOwnedEVPNEntries(); ok {
 		t.Fatal("failed cleanup reported complete")
 	}
 	if len(f.peers) != 2 {
 		t.Fatal("freed peer while an FDB reference survived")
 	}
 	f.failFDB = false
-	if !a.sweepOwnedEVPNEntries() {
+	if _, ok := a.sweepOwnedEVPNEntries(); !ok {
 		t.Fatal("cleanup failed")
 	}
 	if len(f.fdb) != 1 || len(f.peers) != 1 || f.fdb[bpf.FdbKey{BdId: 200}] != foreign || f.peers[bpf.BdPeerKey{BdId: 200, Index: 1}] != foreign {
 		t.Fatalf("foreign owner was touched: %v %v", f.fdb, f.peers)
+	}
+}
+
+// The boot-time purge reports a removal that failed, so the start stops
+// instead of attaching with a stale MAC aimed at a peer; it leaves the peers
+// while an FDB reference survives, and other owners' entries alone.
+func TestPurgeBuiltinEVPNFailureStopsTheStart(t *testing.T) {
+	own := bpf.OwnerBGPEVPN(65000)
+	foreign := bpf.OwnerRPC
+	f := &ownedSweepFake{fakeHeadend: newFakeHeadend(), fdb: map[bpf.FdbKey]bpf.OwnerTag{{BdId: 100}: own, {BdId: 200}: foreign}, peers: map[bpf.BdPeerKey]bpf.OwnerTag{{BdId: 100, Index: 1}: own, {BdId: 200, Index: 1}: foreign}, failFDB: true}
+	if _, err := PurgeBuiltinEVPN(f, 65000, zap.NewNop()); err == nil {
+		t.Fatal("a failed removal did not fail the purge")
+	}
+	if len(f.peers) != 2 {
+		t.Fatal("freed a peer while an FDB reference survived")
+	}
+	f.failFDB = false
+	n, err := PurgeBuiltinEVPN(f, 65000, zap.NewNop())
+	if err != nil || n != 2 {
+		t.Fatalf("PurgeBuiltinEVPN = %d, %v", n, err)
+	}
+	if len(f.fdb) != 1 || len(f.peers) != 1 || f.fdb[bpf.FdbKey{BdId: 200}] != foreign {
+		t.Fatalf("another owner's entries were touched: %v %v", f.fdb, f.peers)
 	}
 }
