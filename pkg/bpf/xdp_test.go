@@ -3063,7 +3063,6 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("IPv4 re-encapsulation", func(t *testing.T) {
 		h := newXDPTestHelper(t)
-		h.useUnroutableNetns()
 		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
@@ -3074,7 +3073,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 			t.Fatalf("build packet: %v", err)
 		}
 		ret, out := h.runOnIfindex(pkt, 1)
-		// The helper's namespace cannot forward (useUnroutableNetns), so
+		// The test namespace cannot forward (see TestMain), so
 		// the FIB lookup for fc00:3::3 is declined, whatever routes the
 		// host has. The AS return fails closed on that (a dedicated proxy
 		// circuit must not leak an assembled SR packet to the host
@@ -3158,7 +3157,6 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("Ethernet circuit wraps the whole frame", func(t *testing.T) {
 		h := newXDPTestHelper(t)
-		h.useUnroutableNetns()
 		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerEthernet)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
@@ -3166,8 +3164,8 @@ func TestXDPProgEndASReturn(t *testing.T) {
 		ret, out := h.runOnIfindex(pkt, 1)
 		// do_h_encaps_l2 converts a FIB miss to XDP_DROP (an L2-wrapped
 		// frame must never be handed to the kernel with stale pointers),
-		// and the helper's namespace cannot forward the segment
-		// (useUnroutableNetns). The encapsulation itself is still visible in the output buffer.
+		// and the test namespace cannot forward the segment
+		// (see TestMain). The encapsulation itself is still visible in the output buffer.
 		if ret != XDP_DROP {
 			t.Fatalf("expected XDP_DROP (L2 encap FIB miss), got %d", ret)
 		}
@@ -3316,7 +3314,6 @@ func (h *xdpTestHelper) createSidFunctionEndAD(prefix string, svc *SidAuxService
 // return direction replays it with a per-packet payload length.
 func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 	h := newXDPTestHelper(t)
-	h.useUnroutableNetns()
 	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x11}
 	smac := [6]byte{0x02, 0, 0, 0, 0, 0x12}
 	// The return circuit lives on {lo, VLAN 7}: BPF_PROG_TEST_RUN pins
@@ -3382,7 +3379,7 @@ func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 		t.Fatalf("build return packet: %v", err)
 	}
 	ret, out = h.runOnIfindex(back, 1)
-	// The helper's namespace cannot forward (useUnroutableNetns), so the
+	// The test namespace cannot forward (see TestMain), so the
 	// FIB lookup for the cached next segment is declined, whatever routes
 	// the host has. The AD return fails closed on that (dedicated circuit),
 	// so the verdict is XDP_DROP rather than XDP_PASS, with the replayed
@@ -3673,7 +3670,6 @@ func TestXDPProgServiceReturnFlowLabel(t *testing.T) {
 	}
 
 	h := newXDPTestHelper(t)
-	h.useUnroutableNetns()
 	asEntry := func(mask uint8) *ServiceIngressEntry {
 		return &ServiceIngressEntry{
 			Behavior:      SvcRetAS,
@@ -3700,8 +3696,8 @@ func TestXDPProgServiceReturnFlowLabel(t *testing.T) {
 		}
 	}
 
-	// Both return paths fail closed when the FIB declines (the helper's
-	// namespace cannot forward, see useUnroutableNetns); the
+	// Both return paths fail closed when the FIB declines (the test
+	// namespace cannot forward, see TestMain); the
 	// stamped encapsulation is still in the output buffer. Asserting the
 	// verdict here keeps a fail-closed -> XDP_PASS regression visible.
 	runReturn := func(t *testing.T, pkt []byte) []byte {
@@ -3848,7 +3844,6 @@ const actionEndAM = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM)
 // SRH — no out-of-band state at all.
 func TestXDPProgEndAMForwardAndReturn(t *testing.T) {
 	h := newXDPTestHelper(t)
-	h.useUnroutableNetns()
 	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x21}
 	smac := [6]byte{0x02, 0, 0, 0, 0, 0x22}
 	svc := &SidAuxService{
@@ -4014,7 +4009,6 @@ func TestXDPProgEndAMNegative(t *testing.T) {
 // slot exists for per-SID accounting, not for different processing.
 func TestXDPProgEndAN(t *testing.T) {
 	h := newXDPTestHelper(t)
-	h.useUnroutableNetns()
 	entry := &SidFunctionEntry{Action: uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN)}
 	if err := h.mapOps.CreateSidFunction("fc00:a1::1/128", entry, NewSidAuxServiceName("demo-fw"), OwnerRPC); err != nil {
 		t.Fatalf("create End.AN SID: %v", err)
