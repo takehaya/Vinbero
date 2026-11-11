@@ -82,7 +82,7 @@ func resumeSegments(recs []netresource.ManagedEthernetSegment, reElect func([bpf
 			continue // InitResourceManager refused such a record
 		}
 		if err := evpn.ValidateESI(esi); err != nil {
-			lg.Warn("Ethernet Segment restored from the state file has an ESI that BGP peers would reject; it is not elected and not advertised (delete it with vbctl es delete and create it again with a valid ESI)",
+			lg.Warn("Ethernet Segment restored from the state file has an ESI that BGP peers would reject; it is not elected at start and not advertised (delete it with vbctl es delete and create it again with a valid ESI)",
 				zap.String("esi", r.ESI), zap.Error(err))
 			continue
 		}
