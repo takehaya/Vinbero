@@ -23,10 +23,10 @@ WASM と native の共通化は処理本体を二重に保守しないための�
    し、plugin の slot を指す dispatch entry を書き、address を event で
    plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
    失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
-   この安定性は 1 つの daemon run の中で、同じ名前を同じ locator から
-   宣言し直す限りの話です。instance の作り直しや同名 upgrade では保たれ、
-   locator を変えた宣言は別の address を割り当て直します。daemon 再起動を
-   跨ぐと保証されません (local SID と daemon 再起動の節)。
+   この安定性は、同じ名前を同じ locator から宣言し直す限りの話です。
+   instance の作り直しや同名 upgrade では保たれ、locator を変えた宣言は別の
+   address を割り当て直します。daemon 再起動を跨いで保たれるのは cplane store が
+   有効な場合です (local SID と daemon 再起動の節)。
 4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
 5. 対向でその経路を受けた plugin が headend の状態を宣言します。
 6. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
@@ -121,8 +121,9 @@ plugin は全量宣言、built-in は単一キーの増分更新です。behavio
 組み込み VPN の採否と ECMP メンバー選択は、`pkg/bgp/apply/vpn_select.go` の
 副作用のない関数が担います。applier が現在の family の VRF binding から import
 可否を調べ、関数へ渡します。不一致の RT または空 SID を持つ UPDATE は以前の
-path を撤去します。採用しなかった path は applier の候補 table に残らず、
-binding の変更だけで自動再評価される保証はありません。
+path を撤去します。採用しなかった path は applier の候補 table に残りません。
+binding が変わって import の判定が変わると、applier は loc-rib の経路を受け取り
+直して評価し直します ([srv6_bgp.md](srv6_bgp.md#binding-と-locator-の変更による再評価))。
 
 候補は RD / peer / ADD-PATH ID を区別して保持し、ECMP は SID、RD、peer、
 数値の path ID の順に選びます。同一 SID は一つにまとめ、最大 8 path を反映します。
@@ -131,8 +132,9 @@ SR Policy の参照を持ち続け、選択中の path の withdraw で昇格で
 group ID、SR Policy の参照、probe、map 書き込みと反映成功状態は applier が管理し、
 選択結果だけで反映済みとは扱いません。plugin の独自の選択規則は plugin が担います。
 
-転送キーは address family と masked prefix です。RD / peer / ADD-PATH ID が
-異なっても、別 owner による同じ転送キーへの宣言は競合します。
+転送キーは VRF、address family と masked prefix です。RD / peer / ADD-PATH ID が
+異なっても、別 owner による同じ転送キーへの宣言は競合します。VRF が違えば別の
+キーなので競合しません。
 demux と組み込み applier の経路保持には受信した prefix 文字列を使い、headend
 reconciler の書き込み境界で正規化します。
 
@@ -239,13 +241,15 @@ built-in applier に配りません。
 
 UPDATE で behavior が変わった場合も担当を切り替えます。built-in に渡した
 path が claimed へ変わったら、以前の配送内容を withdraw として渡してから
-新しい UPDATE を plugin に配ります。VPN は RD が違っても同じ family と
-prefix が headend の同じ key を使うので、その prefix の path に claimed が
-1 本でもあれば built-in へ渡した path をすべて撤去します。通常の path の
+新しい UPDATE を plugin に配ります。VPN の抑止は family と prefix の単位で、
+RD と VRF を区別しません。その prefix の path に claimed が 1 本でもあれば
+built-in へ渡した path をすべて撤去します。通常の path の
 UPDATE でこの抑止を抜けることはできず、最後の claimed path が消えたら
 残っている通常の path を built-in に再配送します。
-この抑止は built-in の import RT / SID 検査より前なので、別 VRF 向けの claimed
-path でも同じ prefix を抑止します。plugin が停止・復元失敗していても claim を
+この抑止は built-in の import RT / SID 検査より前で、demux は経路がどの VRF に
+入るかを知らないので、別 VRF 向けの claimed path でも同じ prefix を抑止します。
+2 つの tenant が同じ prefix を使う構成で、片方の経路を plugin の behavior で
+claim すると、もう片方の tenant の同じ prefix の経路も built-in に届きません。plugin が停止・復元失敗していても claim を
 保持している間は built-in に切り替えません。
 
 unregister の Refresh では behavior claim を保持し、その claim に該当する保持経路の再広告を防ぎます。

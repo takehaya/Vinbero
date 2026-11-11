@@ -136,7 +136,7 @@ tenant VRF の AC から入ったパケットが届くのは、次の 2 つだ�
 - その VRF の headend entry が指す SID。entry は operator と plugin がその VRF に書いたものと、その VRF が import RT で取り込んだ BGP の経路です
 - headend に一致しなければ、kernel のその VRF の table にある宛先 (同じノードの、その VRF の port の先)
 
-global VRF と別の VRF の headend entry、このノードの local SID ([local SID と AC](#local-sid-と-ac))、main table の経路には届きません。main table に進まないのは、Vinbero が管理する VRF の table が unreachable default で終わり、入口が VRF device に enslave されている場合です。そうでない構成は [local SID と AC](#local-sid-と-ac) の一覧にあります。
+global VRF と別の VRF の headend entry、このノードの local SID ([local SID と AC](#local-sid-と-ac))、main table の経路には届きません。main table に進まないのは、Vinbero が管理する VRF の table が unreachable default で終わり、入口が VRF device に enslave されている場合です。そうでない構成は [local SID と AC](#local-sid-と-ac) の一覧にあります。kernel が `BPF_FIB_LOOKUP_TBID` を受け付けない場合と `internal.bpf.fib_lookup_tbid: "off"` の場合も table は unreachable default で終わりません ([encap の外側の経路](#encap-の外側の経路))。
 
 表は VRF ごとに分かれるので、tenant どうしで同じ prefix や同じアドレスを使えます。BGP で受けた経路をどの VRF に入れるかは RT だけで決まり、RD は経路を区別するためだけに使います。このノードが広告する経路は VRF ごとに、その VRF の RD で出るので、同じ prefix を広告する VRF には別の RD を付けます。
 
