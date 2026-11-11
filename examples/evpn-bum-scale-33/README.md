@@ -12,9 +12,9 @@ hosts, exactly one copy of unknown unicast, broadcast and ARP at every remote
 PE and host with none sent back into the core, and RX split horizon on an
 Ethernet Segment shared by PE 32 and PE 33.
 
-The run takes several minutes and starts 33 daemons and about 100 packet
-captures at a time, so it is not part of every CI run; evpn-bum-scale (9 PEs)
-is. Give the machine at least 4 CPUs and 8 GB of memory.
+It runs 33 daemons and, during each flood check, about 100 packet captures
+at a time; on 4 CPUs a run takes about three minutes. CI runs it in the three
+BUM modes, as it does evpn-bum-scale.
 
 ```bash
 make build            # from the repository root
