@@ -509,16 +509,42 @@ struct fdb_entry {
     __u8 _pad_esi[2];
 } __attribute__((packed));         // 32 bytes total
 
-// Maximum number of remote PEs per Bridge Domain for BUM flooding
-#define MAX_BUM_NEXTHOPS 8
-
 // Sentinel value for "peer index not found" (find_peer_index_by_src)
 #define BD_PEER_INDEX_INVALID 0xFFFF
+
+// bd_peer index layout of one Bridge Domain (mirrored in pkg/bpf/maps.go):
+//   [0, BD_PEER_FLOOD_RESERVED)      flood slots: RT3 (End.DT2M), operator
+//                                    and plugin flood peers. The BUM loops
+//                                    scan [0, MAX_BUM_NEXTHOPS) only; the
+//                                    rest of the range is kept free so the
+//                                    flood count can grow without moving
+//                                    the ranges below.
+//   [BD_PEER_ES_BASE, +ES_COUNT)     synthetic Ethernet Segment peers of
+//                                    EVPN aliasing. An FDB entry pointing
+//                                    here is a control-plane pointer that
+//                                    MAC learning leaves alone.
+//   [BD_PEER_UNICAST_BASE, +COUNT)   known-unicast peers: RT2 (End.DT2U) and
+//                                    plugin unicast-only peers. Never
+//                                    flooded to.
+#define MAX_BUM_NEXTHOPS 8
+#define BD_PEER_FLOOD_RESERVED 32
+#define BD_PEER_ES_BASE BD_PEER_FLOOD_RESERVED
+#define BD_PEER_ES_COUNT 32
+#define BD_PEER_UNICAST_BASE (BD_PEER_ES_BASE + BD_PEER_ES_COUNT)
+#define BD_PEER_UNICAST_COUNT 64
+
+_Static_assert(MAX_BUM_NEXTHOPS <= BD_PEER_FLOOD_RESERVED,
+               "the flood slots in use must fit the reserved flood range");
+_Static_assert(BD_PEER_ES_BASE >= BD_PEER_FLOOD_RESERVED &&
+                   BD_PEER_UNICAST_BASE >= BD_PEER_ES_BASE + BD_PEER_ES_COUNT,
+               "bd_peer index ranges must not overlap");
+_Static_assert(BD_PEER_UNICAST_BASE + BD_PEER_UNICAST_COUNT <= BD_PEER_INDEX_INVALID,
+               "bd_peer indices must stay below BD_PEER_INDEX_INVALID");
 
 // Key for bd_peer_map: Bridge Domain ID + peer index
 struct bd_peer_key {
     __u16 bd_id;
-    __u16 index;                   // 0..MAX_BUM_NEXTHOPS-1
+    __u16 index;                   // see the index layout above
 } __attribute__((packed));
 
 // Value: headend_entry (reuses existing struct for segments, src_addr, etc.)

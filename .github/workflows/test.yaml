@@ -252,6 +252,7 @@ jobs:
           - end-dt2-p2mp
           - end-dt2m-multihomed
           - bum-ecmp-underlay
+          - evpn-bum-scale
           - end-dx2v
           - end-as
           - end-ad
@@ -290,11 +291,15 @@ jobs:
             bum_mode: xdp
           - example: bum-ecmp-underlay
             bum_mode: xdp
+          - example: evpn-bum-scale
+            bum_mode: xdp
           - example: end-dt2-p2mp
             bum_mode: xdp-native
           - example: end-dt2m-multihomed
             bum_mode: xdp-native
           - example: bum-ecmp-underlay
+            bum_mode: xdp-native
+          - example: evpn-bum-scale
             bum_mode: xdp-native
     steps:
       - name: Check out code

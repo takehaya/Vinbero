@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -463,13 +464,12 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		idx = st.index
 	} else {
 		// Probe-and-create runs inside one critical section: probing here
-		// and creating later would race the operator RPC path onto the
-		// same free slot (both allocate from the same operator range).
+		// and creating later would race another writer (a plugin) onto the
+		// same free slot. The entry is FloodExclude, so it takes an index
+		// of the unicast range, not a flood slot.
 		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN))
 		if err != nil {
-			a.evpnUnwritten()
-			a.logger.Error("install EVPN bd_peer",
-				zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID), zap.Error(err))
+			a.evpnPeerNotWritten(bdID, r, err)
 			return
 		}
 		a.evpn.peers[pk] = &evpnPeerState{index: newIdx, refs: 1, src: entry.SrcAddr, esi: r.ESI}
@@ -703,13 +703,12 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 	// (remote-MAC learning, Local-Bias split-horizon) and must hold the unicast
 	// RT2 (End.DT2U) peer toward the same PE, not this flood peer. remoteSrc is
 	// therefore unused here. Probe-and-create is one critical section for the
-	// same reason as RT2.
+	// same reason as RT2; the flood slots are shared with the operator's
+	// peers.
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
 	idx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN))
 	if err != nil {
-		a.evpnUnwritten()
-		a.logger.Error("install EVPN BUM bd_peer",
-			zap.Uint16("bd_id", bdID), zap.Error(err))
+		a.evpnPeerNotWritten(bdID, r, err)
 		return
 	}
 	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID, src: entry.SrcAddr, esi: r.ESI, pe: r.NextHop}
@@ -851,6 +850,23 @@ func (a *Applier) evpnUnwritten() {
 	if a.evpn.replayUnwritten != nil {
 		*a.evpn.replayUnwritten++
 	}
+}
+
+// evpnPeerNotWritten reports a new bd_peer of route r that could not be
+// allocated. A range of the bridge domain that is full is not a failure to
+// retry: the map operations call the daemon back when an index of that range
+// is freed, and the daemon replays the EVPN routes then (see
+// bpf.MapOperations.SetBdPeerFreedHook), so it is not counted as unwritten.
+// Any other failure is. Caller holds evpnMu.
+func (a *Applier) evpnPeerNotWritten(bdID uint16, r *bgp.EVPNRoute, err error) {
+	if errors.Is(err, bpf.ErrBdPeerRangeFull) {
+		a.logger.Warn("EVPN route not installed: the bridge domain has no free peer index; it is installed when one is freed",
+			zap.Uint16("bd_id", bdID), zap.String("rd", r.RD), zap.String("next_hop", r.NextHop), zap.Error(err))
+		return
+	}
+	a.evpnUnwritten()
+	a.logger.Error("install EVPN bd_peer",
+		zap.Uint16("bd_id", bdID), zap.String("rd", r.RD), zap.String("sid", r.SRv6SID), zap.Error(err))
 }
 
 // reconcileEVPNSource rewrites the EVPN entries written with an

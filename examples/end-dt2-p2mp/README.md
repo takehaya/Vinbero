@@ -63,6 +63,11 @@ sudo ip netns exec p2m-router4 ../../out/bin/vinberod -c vinbero_pe3.yaml &
 
 ### 3. Configure the PEs
 
+Each `peer create` takes one of the bridge domain's 8 flood slots, so a bridge
+domain floods to at most 8 remote PEs (9 nodes). The slots are shared with the
+EVPN RT3 peers BGP installs; see
+[bum_mode.md](../../docs/design/ja/bum_mode.md).
+
 ```bash
 # PE1: H.Encaps.L2 + two BdPeers (PE2 and PE3)
 sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \

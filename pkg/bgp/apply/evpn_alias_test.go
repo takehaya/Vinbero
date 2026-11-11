@@ -81,7 +81,7 @@ func esPeerOf(t *testing.T, fh *fakeHeadend) (uint16, *bpf.HeadendEntry) {
 		entry *bpf.HeadendEntry
 	)
 	for k, e := range fh.bdPeers {
-		if k.bdID != 100 || k.index < bpf.EsPeerIndexBase {
+		if k.bdID != 100 || !bpf.EsPeerRange.Contains(k.index) {
 			continue
 		}
 		if entry != nil {
@@ -131,7 +131,7 @@ func TestApplier_EVPNAliasingRepointsEarlierMacs(t *testing.T) {
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
 		EVPN: rt2From("65000:100:2", "aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
 	before := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]
-	if before.PeerIndex >= bpf.EsPeerIndexBase {
+	if bpf.EsPeerRange.Contains(before.PeerIndex) {
 		t.Fatalf("MAC already on an ES peer before aliasing formed")
 	}
 
@@ -160,7 +160,7 @@ func TestApplier_EVPNAliasingSingleActiveNotAliased(t *testing.T) {
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
 		EVPN: rt2From("65000:100:2", "aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
 	fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]
-	if fdb == nil || fdb.PeerIndex >= bpf.EsPeerIndexBase {
+	if fdb == nil || bpf.EsPeerRange.Contains(fdb.PeerIndex) {
 		t.Errorf("FDB entry = %+v, want a per-PE peer index", fdb)
 	}
 }
@@ -254,12 +254,12 @@ func TestApplier_EVPNAliasingDissolveRepointsMacs(t *testing.T) {
 		t.Errorf("group survived the dissolve: %v", fh.ecmpGroups)
 	}
 	for k := range fh.bdPeers {
-		if k.index >= bpf.EsPeerIndexBase {
+		if bpf.EsPeerRange.Contains(k.index) {
 			t.Errorf("ES peer at index %d survived the dissolve", k.index)
 		}
 	}
 	fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]
-	if fdb == nil || fdb.PeerIndex >= bpf.EsPeerIndexBase {
+	if fdb == nil || bpf.EsPeerRange.Contains(fdb.PeerIndex) {
 		t.Errorf("FDB entry = %+v, want repointed to a per-PE peer", fdb)
 	}
 }
@@ -325,7 +325,7 @@ func TestApplier_EVPNDissolveSweepsDepartedPEsMacs(t *testing.T) {
 		t.Errorf("departed PE2's MAC survived the dissolve and points at a dead PE")
 	}
 	pe1 := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:03"}]
-	if pe1 == nil || pe1.PeerIndex >= bpf.EsPeerIndexBase {
+	if pe1 == nil || bpf.EsPeerRange.Contains(pe1.PeerIndex) {
 		t.Errorf("still-attached PE1's MAC = %+v, want per-PE fallback", pe1)
 	}
 }
@@ -380,7 +380,7 @@ func TestApplier_EVPNDissolveKeepsESPeerWhenSweepFails(t *testing.T) {
 	if _, ok := fh.bdPeers[bdPeerKey{100, idx}]; ok {
 		t.Errorf("ES peer survived the retried dissolve")
 	}
-	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]; fdb == nil || fdb.PeerIndex >= bpf.EsPeerIndexBase {
+	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]; fdb == nil || bpf.EsPeerRange.Contains(fdb.PeerIndex) {
 		t.Errorf("FDB entry = %+v, want repointed to a per-PE peer", fdb)
 	}
 }

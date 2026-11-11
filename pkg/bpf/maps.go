@@ -21,21 +21,93 @@ import (
 )
 
 const (
-	MaxSegments    = 10
-	IPv4AddrLen    = 4
-	IPv6AddrLen    = 16
-	MaxBumNexthops = 8 // Must match MAX_BUM_NEXTHOPS in xdp_prog.h
-	EcmpMaxPaths   = 8 // Must match ECMP_MAX_PATHS in xdp_prog.h
-	EcmpGroupNone  = 0 // headend_entry.group_id sentinel (ECMP_GROUP_NONE)
-
-	// EVPN aliasing places its synthetic Ethernet Segment peers above the
-	// flood range: the TC BUM loop scans bd_peer indices [0, MaxBumNexthops)
-	// only, so an ES peer parked at [EsPeerIndexBase, EsPeerIndexBase +
-	// MaxEsPeersPerBd) can never be replicated to, and it does not consume
-	// one of the eight flood-capable slots either.
-	EsPeerIndexBase = MaxBumNexthops
-	MaxEsPeersPerBd = 32
+	MaxSegments   = 10
+	IPv4AddrLen   = 4
+	IPv6AddrLen   = 16
+	EcmpMaxPaths  = 8 // Must match ECMP_MAX_PATHS in xdp_prog.h
+	EcmpGroupNone = 0 // headend_entry.group_id sentinel (ECMP_GROUP_NONE)
 )
+
+// The bd_peer index layout of one bridge domain. It must match MAX_BUM_NEXTHOPS
+// and the BD_PEER_* definitions in src/core/xdp_prog.h.
+//
+//   - [0, BdPeerFloodReserved): flood slots, for RT3 (End.DT2M) peers and
+//     the operator's and plugins' flood peers. The BUM loops scan
+//     [0, MaxBumNexthops) only; the rest of the range is kept free, so the
+//     flood count can grow without moving the ranges below.
+//   - [EsPeerIndexBase, +MaxEsPeersPerBd): the synthetic Ethernet Segment
+//     peers of EVPN aliasing, which only the BGP applier allocates. An FDB
+//     entry pointing here is a control-plane pointer MAC learning leaves
+//     alone.
+//   - [UnicastPeerIndexBase, +MaxUnicastPeersPerBd): known-unicast peers,
+//     RT2 (End.DT2U) and plugin unicast-only peers (FloodExclude set). They
+//     are never flooded to and do not take a flood slot.
+const (
+	MaxBumNexthops       = 8
+	BdPeerFloodReserved  = 32
+	EsPeerIndexBase      = BdPeerFloodReserved
+	MaxEsPeersPerBd      = 32
+	UnicastPeerIndexBase = EsPeerIndexBase + MaxEsPeersPerBd
+	MaxUnicastPeersPerBd = 64
+
+	// bdPeerIndexInvalid is BD_PEER_INDEX_INVALID, the reverse lookup's
+	// "no peer" answer: no range may reach it.
+	bdPeerIndexInvalid = 0xFFFF
+)
+
+// Compile-time checks of the layout: a negative array length does not build.
+var (
+	_ [BdPeerFloodReserved - MaxBumNexthops]struct{}
+	_ [bdPeerIndexInvalid - (UnicastPeerIndexBase + MaxUnicastPeersPerBd)]struct{}
+)
+
+// BdPeerRange is one range of bd_peer indices of a bridge domain.
+type BdPeerRange struct {
+	Name  string
+	Base  uint16
+	Count uint16
+}
+
+// End is the first index after the range.
+func (r BdPeerRange) End() uint16 { return r.Base + r.Count }
+
+// Contains reports whether index is in the range.
+func (r BdPeerRange) Contains(index uint16) bool {
+	return index >= r.Base && index < r.End()
+}
+
+func (r BdPeerRange) String() string {
+	return fmt.Sprintf("%s [%d, %d)", r.Name, r.Base, r.End())
+}
+
+var (
+	// FloodPeerRange holds the flood slots in use.
+	FloodPeerRange = BdPeerRange{Name: "flood", Base: 0, Count: MaxBumNexthops}
+	// ReservedFloodPeerRange is the part of the flood range kept free.
+	ReservedFloodPeerRange = BdPeerRange{Name: "reserved flood", Base: MaxBumNexthops, Count: BdPeerFloodReserved - MaxBumNexthops}
+	// EsPeerRange holds the synthetic Ethernet Segment peers.
+	EsPeerRange = BdPeerRange{Name: "Ethernet Segment", Base: EsPeerIndexBase, Count: MaxEsPeersPerBd}
+	// UnicastPeerRange holds the known-unicast peers.
+	UnicastPeerRange = BdPeerRange{Name: "unicast", Base: UnicastPeerIndexBase, Count: MaxUnicastPeersPerBd}
+	// LegacyEsPeerRange is where the Ethernet Segment peers were placed
+	// when the flood slots and the RT2 peers shared [0, 8). Pinned maps of
+	// such a run can still hold them; the EVPN startup sweep removes them.
+	LegacyEsPeerRange = BdPeerRange{Name: "Ethernet Segment of the earlier layout", Base: 8, Count: 32}
+)
+
+// PeerRangeFor is the range a new peer is allocated from: the unicast range
+// for an entry that is never flooded to (FloodExclude), the flood slots
+// otherwise.
+func PeerRangeFor(entry *HeadendEntry) BdPeerRange {
+	if entry != nil && entry.FloodExclude != 0 {
+		return UnicastPeerRange
+	}
+	return FloodPeerRange
+}
+
+// ErrBdPeerRangeFull is returned when a bridge domain has no free index left
+// in the range a new peer needs.
+var ErrBdPeerRangeFull = errors.New("no free bd_peer index")
 
 // Type aliases for BPF generated types
 type (
@@ -150,10 +222,17 @@ type MapOperations struct {
 	// its reverse entry dangling. Probe+create atomicity comes from
 	// CreateBdPeerAtFreeIndex, which every writer (the server RPC path and
 	// the BGP applier alike) uses for new slots, so index allocation never
-	// races across writers even though they share one index range; bare
+	// races across writers even though they share the index ranges; bare
 	// FindFreeBdPeerIndex answers are stale by the time the lock is
 	// dropped and must not feed a separate create.
 	bdPeerLifecycle sync.Mutex
+	// bdPeerStarved holds the {BD, range} pairs a CreateBdPeerAtFreeIndex
+	// found full; bdPeerFreed is set when an index of such a pair is freed
+	// and makes the public call that freed it run onBdPeerFreed once the
+	// lock is released. bdPeerStarved is guarded by bdPeerLifecycle.
+	bdPeerStarved map[bdPeerRangeKey]struct{}
+	bdPeerFreed   atomic.Bool
+	onBdPeerFreed atomic.Pointer[func()]
 
 	// bum rebuilds the xdp-mode BUM devmaps after every bd_peer and
 	// headend_l2 mutation (nil: no BD runs in xdp mode), once per public
@@ -3254,6 +3333,7 @@ func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
 // existed=true means a DIFFERENT entry occupies the slot (nothing deleted);
 // a transient read failure is an error, never a mismatch.
 func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6AddrLen]byte) (existed, matched bool, err error) {
+	defer m.notifyBdPeerFreed()
 	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
@@ -3272,36 +3352,41 @@ func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6
 	return ex, true, derr
 }
 
-// FindFreeBdPeerIndex probes indexes 0..MaxBumNexthops-1 for a given BD
-// and returns the first unused index. Returns MaxBumNexthops if all slots are occupied.
+// FindFreeBdPeerIndex probes the flood slots of a given BD and returns the
+// first unused index, or MaxBumNexthops if all slots are occupied.
 // This avoids iterating the entire bd_peer_map (ListBdPeers) on every create request.
 func (m *MapOperations) FindFreeBdPeerIndex(bdID uint16) uint16 {
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
-	return m.findFreeBdPeerIndexLocked(bdID)
+	if i, ok := m.findFreeBdPeerIndexLocked(bdID, FloodPeerRange); ok {
+		return i
+	}
+	return MaxBumNexthops
 }
 
-func (m *MapOperations) findFreeBdPeerIndexLocked(bdID uint16) uint16 {
+// findFreeBdPeerIndexLocked returns the lowest index of r that neither a peer
+// nor an owner record of the BD holds, and false if there is none.
+func (m *MapOperations) findFreeBdPeerIndexLocked(bdID uint16, r BdPeerRange) (uint16, bool) {
 	var entry HeadendEntry
-	for i := uint16(0); i < MaxBumNexthops; i++ {
+	for i := r.Base; i < r.End(); i++ {
 		key := &BdPeerKey{BdId: bdID, Index: i}
 		err := m.objs.BdPeerMap.Lookup(key, &entry)
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			if _, owned, oerr := m.bdPeerOwners.Lookup(key); oerr != nil {
-				return MaxBumNexthops
+				return 0, false
 			} else if owned {
 				continue
 			}
-			return i
+			return i, true
 		}
 		if err != nil {
 			// A transient read failure must not present an occupied slot
 			// as free -- overwriting a live peer is worse than reporting
 			// the BD full and letting the caller retry.
-			return MaxBumNexthops
+			return 0, false
 		}
 	}
-	return MaxBumNexthops
+	return 0, false
 }
 
 // ListBdPeers returns all BD peer entries
@@ -3501,6 +3586,7 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 	// flushed as if it were the snapshotted peer.
 	// One devmap rebuild per BD touched, not per peer, after the lock.
 	touched := map[uint16]struct{}{}
+	defer m.notifyBdPeerFreed()
 	defer func() {
 		for bd := range touched {
 			m.resyncBum(bd)
@@ -3525,11 +3611,12 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 		if bdID != 0 && key.BdId != bdID {
 			continue
 		}
-		// The reserved ES range belongs to the BGP applier's EVPN aliasing
-		// state (see EsPeerIndexBase); flushing it here would leave the
-		// applier's ledger, the FDB pointers and the ECMP group referencing
-		// a peer that no longer exists, with nothing to trigger a repair.
-		if key.Index >= EsPeerIndexBase {
+		// The ES range belongs to the BGP applier's EVPN aliasing state
+		// (see EsPeerRange); flushing it here would leave the applier's
+		// ledger, the FDB pointers and the ECMP group referencing a peer
+		// that no longer exists, with nothing to trigger a repair. The
+		// other ranges are decided by the owner below.
+		if EsPeerRange.Contains(key.Index) {
 			continue
 		}
 		tag, owned, oerr := m.bdPeerOwners.Lookup(&key)

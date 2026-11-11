@@ -198,6 +198,12 @@ func (s *Server) Setup() {
 		if r, ok := s.tracked.(trackedRetrySetter); ok {
 			r.SetTrackedRetry(replayer.requestTrackedAfterFailure)
 		}
+		// An EVPN route whose bridge domain had no free peer index left in
+		// the range it needs is not retried on its own: freeing an index of
+		// that range replays the EVPN routes, which installs it.
+		if s.mapOps != nil {
+			s.mapOps.SetBdPeerFreedHook(bdPeerFreedReplay(requestReplay))
+		}
 		// The manager reports every binding mutation that changed what the
 		// import-RT filter accepts, whichever path made it.
 		s.vrfBgpMgr.SetImportFilterHook(vpnImportFilterHook(requestReplay, s.logger))

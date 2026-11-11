@@ -80,6 +80,7 @@ Each example uses its own namespace prefix, such as `end-host1` or `dx4-router1`
 | `end-dt2-p2mp/` | End.DT2 P2MP | Multisite L2VPN with BUM flooding |
 | `end-dt2m-multihomed/` | End.DT2M | Multihomed L2VPN with DF election and split horizon |
 | `bum-ecmp-underlay/` | H.Encaps.L2 | BUM replication over an ECMP underlay (tc, xdp) |
+| `evpn-bum-scale/` | End.DT2 / End.DT2M + EVPN | Nine PEs in one EVPN bridge domain (tc, xdp) |
 | `end-dx2v/` | End.DX2V | Per-VLAN L2 cross-connect |
 | `end-un/` | uN | NEXT-C-SID shift forwarding (RFC 9800, F3216) |
 | `end-ua/` | uA | NEXT-C-SID shift and adjacency forwarding (RFC 9800, F3216) |

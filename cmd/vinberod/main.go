@@ -136,13 +136,17 @@ func run(cliCtx *cli.Context) error {
 		if err := restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetMapOperations(), vin.GetResourceManager(), lg); err != nil {
 			return err
 		}
-		if !cliCtx.Bool("bgp-enabled") {
-			return nil
+		if cliCtx.Bool("bgp-enabled") {
+			if err := purgeBGPHeadends(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg); err != nil {
+				return err
+			}
+			if err := purgeBGPEVPN(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg); err != nil {
+				return err
+			}
 		}
-		if err := purgeBGPHeadends(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg); err != nil {
-			return err
-		}
-		return purgeBGPEVPN(vin.GetMapOperations(), cfg.BGP.Global.LocalASN, lg)
+		// After the EVPN sweep, which removes what the applier wrote under
+		// the earlier peer index layout: what is left there stops the start.
+		return vin.GetMapOperations().CheckBdPeerLayout()
 	}, func() error {
 		if err := vin.AttachConfigDevices(); err != nil {
 			return fmt.Errorf("attach devices: %w", err)

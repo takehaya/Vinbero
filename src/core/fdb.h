@@ -36,4 +36,13 @@ static __always_inline int fdb_replace_forward(struct fdb_entry *entry,
     return __sync_val_compare_and_swap((__u64 *)(void *)entry, old.word, next.word) == old.word;
 }
 
+// A remote FDB entry whose peer index is in the Ethernet Segment range
+// points at a synthetic aliasing peer the control plane owns (see the
+// bd_peer index layout in xdp_prog.h). Any other remote index is the peer of
+// one PE.
+static __always_inline int bd_peer_index_is_es(__u16 index)
+{
+    return index >= BD_PEER_ES_BASE && index < BD_PEER_ES_BASE + BD_PEER_ES_COUNT;
+}
+
 #endif

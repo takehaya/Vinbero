@@ -359,9 +359,22 @@ func (s *compositionMaps) applyEVPN(owner bpf.OwnerTag, desired []peerDesired, w
 	if err != nil {
 		return err
 	}
+	// A held peer whose index is outside the range its desired entry takes
+	// (bpf.PeerRangeFor: a flood output added to a unicast-only peer, or
+	// the last one removed from a flood peer) is not rewritten in place but
+	// pruned and installed again in its range.
+	inRange := func(key string, pk bpf.BdPeerKey) bool {
+		p := want[key]
+		return bpf.PeerRangeFor(&p.entry).Contains(pk.Index)
+	}
+	for key, oldKey := range updates {
+		if !inRange(key, current[oldKey]) {
+			delete(updates, key)
+		}
+	}
 	keepPeers := map[bpf.BdPeerKey]bool{}
 	for key, pk := range current {
-		if _, ok := want[key]; ok {
+		if _, ok := want[key]; ok && inRange(key, pk) {
 			keepPeers[pk] = true
 		}
 	}

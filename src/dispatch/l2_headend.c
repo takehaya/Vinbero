@@ -70,7 +70,7 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
                         bum_fdb_event_emit(key.bd_id, eth->h_source, ctx->ingress_ifindex,
                                            FDB_EVENT_MOVE);
                 }
-            } else if (!old.is_remote || old.peer_index < MAX_BUM_NEXTHOPS) {
+            } else if (!old.is_remote || !bd_peer_index_is_es(old.peer_index)) {
                 existing->last_seen = bpf_ktime_get_ns();
             }
         }

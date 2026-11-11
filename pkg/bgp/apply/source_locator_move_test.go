@@ -265,7 +265,7 @@ func TestEVPNAliasingMemberAddedWhileSourceLocatorGone(t *testing.T) {
 	if _, es := esPeerOf(t, fh); es.GroupId != group {
 		t.Errorf("ES peer points at group %d, want %d", es.GroupId, group)
 	}
-	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:03"}]; fdb == nil || fdb.PeerIndex < bpf.EsPeerIndexBase {
+	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:03"}]; fdb == nil || !bpf.EsPeerRange.Contains(fdb.PeerIndex) {
 		t.Errorf("MAC on the segment moved off the ES peer: %+v", fdb)
 	}
 	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {

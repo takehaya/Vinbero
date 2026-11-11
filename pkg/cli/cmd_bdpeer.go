@@ -19,6 +19,11 @@ func bdPeerCommand() *cli.Command {
 			{
 				Name:  "create",
 				Usage: "Register a remote PE in a Bridge Domain",
+				Description: "The peer takes one of the Bridge Domain's 8 flood slots: BUM frames are copied to it,\n" +
+					"and MACs learned from its source address are forwarded to it. The flood slots are shared\n" +
+					"with the EVPN RT3 (End.DT2M) peers BGP installs. EVPN RT2 (End.DT2U) peers do not take a\n" +
+					"flood slot, so a Bridge Domain reaches 8 remote PEs (9 nodes) when no peer is created here.\n" +
+					"The create fails when all flood slots are in use.",
 				Flags: []cli.Flag{
 					&cli.UintFlag{Name: "bd-id", Required: true, Usage: "Bridge Domain ID"},
 					&cli.StringFlag{Name: "src-addr", Required: true, Usage: "Outer IPv6 source address"},

@@ -57,6 +57,8 @@ sudo ip netns exec p2m-router4 ../../out/bin/vinberod -c vinbero_pe3.yaml &
 
 ### 3. PE設定
 
+`peer create` の peer は、それぞれ Bridge Domain の flood スロット 8 つのうち 1 つを使います。1 つの Bridge Domain が flood するリモート PE は 8 台（計 9 node）までです。スロットは BGP が入れる EVPN の RT3 の peer と共有します（[bum_mode.md](../../docs/design/ja/bum_mode.md)）。
+
 ```bash
 # PE1: H.Encaps.L2 + BdPeer（PE2とPE3の2つ）
 sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
