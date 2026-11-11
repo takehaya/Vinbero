@@ -11,6 +11,7 @@ import (
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/evpn"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
@@ -429,6 +430,10 @@ func (c *L2Circuits) restore() error {
 			continue
 		}
 		entry, esi, _ := circuitEntry(r)
+		if err := evpn.ValidateESI(esi); err != nil {
+			c.logger.Warn("L2 headend circuit in the state file has an ESI that BGP peers would reject; it is restored but the ESI is not advertised (delete the circuit and create it again with a valid ESI)",
+				zap.String("interface", r.Interface), zap.Uint16("vlan", r.VLAN), zap.String("esi", r.ESI), zap.Error(err))
+		}
 		if err := c.maps.CreateHeadendL2(r.Ifindex, r.VLAN, entry, esi); err != nil {
 			return fmt.Errorf("restore the L2 circuit on %s VLAN %d: %w", r.Interface, r.VLAN, err)
 		}

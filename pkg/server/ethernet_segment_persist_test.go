@@ -65,7 +65,7 @@ func TestEthernetSegmentServer_SaveFailure(t *testing.T) {
 	elected := 0
 	s := NewEthernetSegmentServer(nil, func([bpf.ESILen]byte) { elected++ }, hook, zap.NewNop())
 	s.SetSegments(vinbero.NewEthernetSegments(m, res, zap.NewNop()))
-	es := &v1.EthernetSegment{Esi: "01:00:00:00:00:00:00:00:00:01", LocalAttached: true, LocalPeSrcAddr: "fc00:1::1",
+	es := &v1.EthernetSegment{Esi: "01:00:00:00:00:00:00:00:01:00", LocalAttached: true, LocalPeSrcAddr: "fc00:1::1",
 		RedundancyMode: v1.EsiRedundancyMode_ESI_REDUNDANCY_MODE_ALL_ACTIVE, Rd: "65000:1"}
 	create := func() *v1.EsCreateResponse {
 		resp, err := s.EsCreate(context.Background(), connect.NewRequest(&v1.EsCreateRequest{Entries: []*v1.EthernetSegment{es}}))

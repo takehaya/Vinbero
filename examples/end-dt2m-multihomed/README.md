@@ -6,7 +6,7 @@ Verifies RFC 9252 split-horizon filtering and static DF election on a
 5-namespace topology where **host1 is dual-homed to PE1 and PE2 through a
 shared Linux bridge**.
 
-- ESI: `01:00:00:00:00:00:00:00:00:01` (`local_attached` on both PE1 and PE2)
+- ESI: `01:00:00:00:00:00:00:00:01:00` (`local_attached` on both PE1 and PE2)
 - Bridge domain: `bd_id = 100` / VLAN 100
 - host1's MAC is pinned to `02:00:00:00:00:01` with MAC pinning
 - The host1-side veths run `ethtool -K <veth> txvlan off` so the VLAN tag
@@ -71,12 +71,12 @@ sudo ./teardown.sh
    http://127.0.0.1:<PE port>`; there is no `vbctl` binary inside the
    namespaces. Pass the real ESI from the top of this page to `--esi`.
    - DF starts as PE1. Run
-     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:1::1`
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:01:00 --pe fc00:1::1`
      on both PEs so they agree on the DF.
    - `PE3 -> BUM -> host1` from the remote side reaches host1 only via PE1
      (PE2 drops it as `NON_DF_DROP`).
    - Switch the DF to PE2 with
-     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`,
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:01:00 --pe fc00:2::2`,
      after which the traffic arrives via PE2.
 3. **Restart (phase E)**: PE1 runs with pinned maps. It is killed, its pinned
    `headend_l2_map` is removed, and it is started again with nothing

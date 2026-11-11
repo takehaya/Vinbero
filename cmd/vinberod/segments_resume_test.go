@@ -13,9 +13,11 @@ import (
 // a locally attached one its DF election, one with an RD its RT4 too.
 func TestResumeSegments(t *testing.T) {
 	recs := []netresource.ManagedEthernetSegment{
-		{ESI: "01:00:00:00:00:00:00:00:00:01", LocalAttached: true, RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", LocalPeSrcAddr: "fc00:1::1", RD: "65000:1"},
-		{ESI: "01:00:00:00:00:00:00:00:00:02", LocalAttached: true, RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", LocalPeSrcAddr: "fc00:1::1"},
-		{ESI: "01:00:00:00:00:00:00:00:00:03", RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", RD: "65000:3"},
+		{ESI: "01:00:00:00:00:00:00:00:01:00", LocalAttached: true, RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", LocalPeSrcAddr: "fc00:1::1", RD: "65000:1"},
+		{ESI: "01:00:00:00:00:00:00:00:02:00", LocalAttached: true, RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", LocalPeSrcAddr: "fc00:1::1"},
+		{ESI: "01:00:00:00:00:00:00:00:03:00", RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", RD: "65000:3"},
+		// An ESI that peers would reject is neither elected nor advertised.
+		{ESI: "01:00:00:00:00:00:00:00:00:01", LocalAttached: true, RedundancyMode: "ESI_REDUNDANCY_MODE_ALL_ACTIVE", LocalPeSrcAddr: "fc00:1::1", RD: "65000:4"},
 	}
 	var elected []string
 	enabled := map[string]string{}

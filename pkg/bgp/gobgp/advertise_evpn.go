@@ -11,6 +11,7 @@ import (
 	gobgppkt "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/evpn"
 )
 
 var _ bgp.EVPNController = (*Session)(nil)
@@ -181,6 +182,9 @@ func encodeEVPNMulticastPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 // End.DT2U SID in the SRv6 L2 Service TLV (RFC 9252 §6.2) and the route
 // targets as extended communities; the next hop rides in MP_REACH_NLRI.
 func encodeEVPNMacPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
+	if err := evpn.ValidateESI(r.ESI); err != nil {
+		return nil, fmt.Errorf("EVPN RT2: %w", err)
+	}
 	hw, err := net.ParseMAC(r.MAC)
 	if err != nil {
 		return nil, fmt.Errorf("parse MAC %q: %w", r.MAC, err)
@@ -286,6 +290,9 @@ func evpnEsKey(rd string, esi [10]byte) bgp.RouteKey {
 // an extended community. RT4 carries no Prefix-SID; the next hop rides in
 // MP_REACH_NLRI.
 func encodeEVPNEthernetSegmentPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
+	if err := evpn.ValidateESI(r.ESI); err != nil {
+		return nil, fmt.Errorf("EVPN RT4: %w", err)
+	}
 	var zeroESI [10]byte
 	if r.ESI == zeroESI {
 		return nil, fmt.Errorf("EVPN RT4 ESI must be non-zero")
@@ -388,6 +395,9 @@ func evpnAdKey(rd string, esi [10]byte, etag uint32) bgp.RouteKey {
 // PE's own End.DT2U SID in the SRv6 L2 Service TLV (RFC 9252 §6.1), the
 // address a peer sends aliased traffic to, so the SID is required there.
 func encodeEVPNEthernetADPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
+	if err := evpn.ValidateESI(r.ESI); err != nil {
+		return nil, fmt.Errorf("EVPN RT1: %w", err)
+	}
 	var zeroESI [10]byte
 	if r.ESI == zeroESI {
 		return nil, fmt.Errorf("EVPN RT1 ESI must be non-zero")

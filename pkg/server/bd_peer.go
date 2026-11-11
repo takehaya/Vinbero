@@ -49,7 +49,7 @@ func (s *BdPeerServer) BdPeerCreate(
 			continue
 		}
 
-		esi, err := bpf.ParseESI(peer.Esi)
+		esi, err := bpf.ParseValidESI(peer.Esi)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),

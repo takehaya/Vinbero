@@ -13,6 +13,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/evpn"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
@@ -106,6 +107,9 @@ func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manag
 // idempotent: an ES already advertised is replaced. A push failure is returned
 // (the caller logs it; the ES data-plane entry is unaffected).
 func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
+	if err := evpn.ValidateESI(esi); err != nil {
+		return fmt.Errorf("ESI %s is not advertised: %w", bpf.FormatESI(esi), err)
+	}
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
 		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}

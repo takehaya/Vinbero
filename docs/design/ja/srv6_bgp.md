@@ -254,6 +254,15 @@ flowchart LR
 1 つの顧客を 2 つの PE にぶら下げると (multi-homing)、BUM が両 PE から顧客へ二重に届いたり、片方が受けた BUM をもう片方経由で顧客へ送り返してループになったりします。これを防ぐのが Designated Forwarder (DF) と split-horizon です。
 
 - Ethernet Segment (ES) は ESI (10 byte の識別子) で表し、同じ ES に接続する PE は RT4 を ES-Import RT 付きで広報し合います。各 PE は、受信した RT4 の送信元 PE と自分を候補集合にして、RFC 8584 の default DF election (候補を encap source で整列し index = ETag mod N) を独立に走らせます。ELAN は ETag 0 なので encap source が最小の PE が DF になります。全 PE が同じ membership から同じ結果を出すので、合意のための調停はいりません。
+- ESI は 10 octet で、先頭の 1 octet が type です (RFC 7432 §5)。vinberod が受け付けるのは次の形だけで、`vbctl es create`、`bgp advertise-evpn-mac` / `advertise-evpn-es` / `advertise-evpn-ad`、`hl2 create`、`bd-peer create` の `--esi` が同じ検査を通ります。それ以外はエラーを返し、値を直して通すことはしません。エラーには、誤っている octet と、その type の並びを示します。
+  - type 0 (任意): 続く 9 octet は何でもかまいません。全 0 は single-homed を表します。
+  - type 1 (LACP): system MAC 6 octet、port key 2 octet、最後の 1 octet は 0x00 です。
+  - type 2 (bridge protocol): bridge MAC 6 octet、priority 2 octet、最後の 1 octet は 0x00 です。
+  - type 3 (MAC): system MAC 6 octet、local discriminator 3 octet です。予約された octet はありません。
+  - type 4 (router ID): router ID 4 octet、local discriminator 4 octet、最後の 1 octet は 0x00 です。
+  - type 5 (AS): AS 番号 4 octet、local discriminator 4 octet、最後の 1 octet は 0x00 です。
+  - type 6 以上は定義がないので受け付けません。
+  - 最後の octet が 0x00 でない type 1、2、4、5 の ESI は、受信した GoBGP が UPDATE を不正として session を切ります。そのため 1 つの誤った入力が、その経路を受け取るほかの node の BGP session を落とします。type 6 以上は GoBGP の受信側は通しますが、RFC 7432 に type が無いので vinberod は広告しません。
 - BUM が来たとき、DF だけが顧客へ流し、非 DF は drop します (data plane の dt2m_non_df_drop)。これで二重配送が消えます。
 - split-horizon (RFC 9252 Local Bias) は、ある PE が受けた BUM を、同じ ES の別 PE 経由で共有顧客へ再 flood しないようにします。受信フレームの outer source (相手 PE の encap source) を鍵に、その PE 向けの flood を抑えます。
 

@@ -10,6 +10,7 @@ import (
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/evpn"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"go.uber.org/zap"
 )
@@ -256,6 +257,10 @@ func (s *EthernetSegments) restore() error {
 			return fmt.Errorf("runtime_ethernet_segments[%d]: a second Ethernet Segment %s", i, r.ESI)
 		}
 		seen[esi] = true
+		if err := evpn.ValidateESI(esi); err != nil {
+			s.logger.Warn("Ethernet Segment in the state file has an ESI that BGP peers would reject; it is restored to the data plane but not advertised (delete it with vbctl es delete and create it again with a valid ESI)",
+				zap.String("esi", r.ESI), zap.Error(err))
+		}
 	}
 	for _, r := range recs {
 		esi, entry, _ := SegmentEntry(r)

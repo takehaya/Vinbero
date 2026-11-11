@@ -503,6 +503,17 @@ func TestEnableESRejectsEmptyRDAndBadNextHop(t *testing.T) {
 	}
 }
 
+func TestEnableESRefusesAnESIPeersWouldReject(t *testing.T) {
+	e, adv, _ := newTestEVPNExporter(t)
+	bad := [bpf.ESILen]byte{0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03} // type 1, last octet 3
+	if err := e.EnableES(bad, "65000:200"); err == nil {
+		t.Fatal("EnableES accepted a type 1 ESI with a nonzero last octet")
+	}
+	if len(adv.pushedES) != 0 {
+		t.Errorf("an RT4 was pushed: %d", len(adv.pushedES))
+	}
+}
+
 func TestDisableESWithdrawsRT4(t *testing.T) {
 	e, adv, _ := newTestEVPNExporter(t)
 	if err := e.EnableES(testESI, "65000:200"); err != nil {

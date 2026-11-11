@@ -18,6 +18,8 @@ import (
 
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
+
+	"github.com/takehaya/vinbero/pkg/evpn"
 )
 
 const (
@@ -4080,6 +4082,21 @@ func ParseESI(s string) ([ESILen]byte, error) {
 	}
 	copy(out[:], hw)
 	return out, nil
+}
+
+// ParseValidESI is ParseESI plus evpn.ValidateESI: the entry points that can
+// put an ESI on the wire or into a new table entry use it, so a value that a
+// receiving BGP speaker would reject never gets in. Lookups, deletes and
+// withdraws use ParseESI so a value stored earlier can still be removed.
+func ParseValidESI(s string) ([ESILen]byte, error) {
+	esi, err := ParseESI(s)
+	if err != nil {
+		return esi, err
+	}
+	if err := evpn.ValidateESI(esi); err != nil {
+		return esi, err
+	}
+	return esi, nil
 }
 
 // FormatESI encodes a 10-byte ESI as colon-separated hex. All-zero returns ""

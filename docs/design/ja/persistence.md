@@ -204,7 +204,7 @@ RPC は、state.json への書き込みが成功したときだけ成功を返�
 ```json
 "runtime_ethernet_segments": [
   {
-    "esi": "01:00:00:00:00:00:00:00:00:01",
+    "esi": "01:00:00:00:00:00:00:00:01:00",
     "local_attached": true,
     "redundancy_mode": "ESI_REDUNDANCY_MODE_ALL_ACTIVE",
     "local_pe_src_addr": "fc00:1::1",
@@ -221,6 +221,7 @@ RPC は、state.json への書き込みが成功したときだけ成功を返�
 - 復元は state を読んだ直後、L2 headend の回線の復元の前に行います。VRF table の reconcile、EVPN の掃除、XDP attach、BGP より前です。ESI を持つ回線の最初のフレームから split horizon と DF の判定が効き、BGP の DF 選出は最初に受信した RT4 から local attach を見ます
 - Ethernet Segment の記録は interface を持たないので、照合せずにそのまま戻します。ESI を持つ回線は回線の規則 (ifindex、名前、hardware address の一致) で戻るかどうかが決まり、interface が消えた回線は戻りませんが Ethernet Segment は戻ります。稼働中に interface を消したときも、消えるのは回線だけで Ethernet Segment は残ります
 - BGP を有効にした起動では、session の起動の後に、local attach の Ethernet Segment の DF を選び直し、EVPN auto-advertise が有効で `rd` を持つものの RT4 を広告します (`es create` の後と同じです)
+- state.json の Ethernet Segment または L2 headend の回線の ESI が、受け付ける形 ([srv6_bgp.md](srv6_bgp.md) の ESI の type ごとの並び) を満たさないときも起動は止まりません。どちらも data plane に戻しますが、警告に ESI を示します。Ethernet Segment は起動時の DF の選出と RT4 の広告を行いません (ほかの PE の RT4 を受信したときの DF の選出は通常どおり走ります。type 6 以上の ESI は GoBGP の受信側が通すためです)。`vbctl es delete` (回線は `hl2 delete`) で消して、正しい ESI で作り直してください
 
 RPC は、`esi_map` と state.json の両方を書けたときだけ成功を返します。
 
