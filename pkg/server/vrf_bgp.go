@@ -172,10 +172,23 @@ func bindingFamiliesToProto(in map[bgp.Family]vrfbgp.FamilyPolicy) map[string]*v
 // and EVPN coordinator. Every mutation RPC funnels through here so the
 // manager + exporter + EVPN state stays in lock-step. Caller must hold s.mu.
 //
+// A binding the config file does not declare is saved to the state file
+// before the manager holds it. A success means the binding is applied and
+// saved; an error means the bindings in the manager and in the state file
+// are unchanged, and so is the exporter unless the error says restoring it
+// failed. A VRF object the attempt created stays, like any VRF a binding
+// ensured.
+//
 // Normalize runs before the exporter reads ExportRTs and EVPN reads
 // Families: a caller that set only Families (or only the legacy lists)
 // would otherwise hand the exporter a half-populated binding.
 func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
+	// Refused before anything below can act on it: the Ensure further
+	// down would otherwise create a VRF without a name, which the next
+	// VRF save writes and the next start refuses.
+	if updated.VRFName == "" {
+		return vrfbgp.ErrEmptyVRFName
+	}
 	updated = updated.Normalize()
 	prev, existed := s.mgr.Get(updated.VRFName)
 	if s.exporter != nil {
@@ -194,21 +207,39 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			return reason
 		}
 	}
-	if err := s.mgr.Bind(updated); err != nil {
-		if s.exporter != nil {
-			if existed {
-				// AddVRF(updated) already replaced prev in the exporter;
-				// restore prev so the exporter agrees with the manager (which
-				// still holds prev). A second failure here surfaces alongside
-				// the Bind error so the operator sees the divergence.
-				if rerr := s.exporter.AddVRF(prev); rerr != nil {
-					return fmt.Errorf("%w; restoring prior binding in exporter failed: %v", err, rerr)
-				}
-			} else {
-				s.exporter.RemoveVRF(updated.VRFName)
-			}
+	// undoExporter puts the exporter back to the binding the manager still
+	// holds, after a failure past AddVRF(updated). A second failure surfaces
+	// alongside err so the operator sees the divergence.
+	undoExporter := func(err error) error {
+		if s.exporter == nil {
+			return err
+		}
+		if !existed {
+			s.exporter.RemoveVRF(updated.VRFName)
+			return err
+		}
+		if rerr := s.exporter.AddVRF(prev); rerr != nil {
+			return fmt.Errorf("%w; restoring prior binding in exporter failed: %v", err, rerr)
 		}
 		return err
+	}
+	// The binding reaches the state file before the manager publishes it,
+	// so the route applier and the plugins never use a binding a restart
+	// would lose, and a failed write changes nothing. Ensure first: the
+	// saved binding's VRF is saved with it, and Bind then cannot fail on
+	// the VRF.
+	if _, err := s.mgr.VRF().Ensure(updated.VRFName); err != nil {
+		return undoExporter(err)
+	}
+	if err := s.mgr.SaveWith(updated); err != nil {
+		return undoExporter(fmt.Errorf("binding of vrf %q not changed: %w: %v", updated.VRFName, errBindingNotSaved, err))
+	}
+	if err := s.mgr.Bind(updated); err != nil {
+		// The file now holds updated; put it back to what the manager holds.
+		if serr := s.mgr.Save(); serr != nil {
+			err = fmt.Errorf("%w; the state file still holds the rejected binding: %v", err, serr)
+		}
+		return undoExporter(err)
 	}
 	if s.evpn != nil {
 		// Disable the bridge domain when the caller dropped the evpn export
@@ -282,6 +313,20 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 		s.cplane.ReconcileAdvertised(context.Background())
 	}
 	return nil
+}
+
+// errBindingNotSaved marks a binding change refused because the state file
+// could not be written. Nothing changed: the RPC can be repeated.
+var errBindingNotSaved = errors.New("the state file was not written")
+
+// commitCode is the connect code of a failed commitBinding. Most failures
+// are the input's (a missing rd or default_locator, an unknown locator,
+// surfaced by the exporter); a state file that cannot be written is not.
+func commitCode(err error) connect.Code {
+	if errors.Is(err, errBindingNotSaved) {
+		return connect.CodeInternal
+	}
+	return connect.CodeInvalidArgument
 }
 
 // hasNewImportRT reports whether updated declares an import-direction RT
@@ -470,7 +515,16 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 		if v, ok := s.mgr.VRF().Get(name); ok && v.Bridge != nil {
 			facetBD = v.Bridge.BdID
 		}
-		err := s.mgr.Unbind(name)
+		// The state file drops the binding first: a failed write leaves it
+		// bound, and a restart never brings back one the RPC removed.
+		var err error
+		if !existed {
+			err = s.mgr.Unbind(name)
+		} else if serr := s.mgr.SaveWithout(name); serr != nil {
+			err = fmt.Errorf("binding of vrf %q not removed: %w: %v", name, errBindingNotSaved, serr)
+		} else {
+			err = s.mgr.Unbind(name)
+		}
 		if err == nil {
 			if s.exporter != nil {
 				s.exporter.RemoveVRF(name)
@@ -559,7 +613,7 @@ func (s *VrfBgpServer) UpdateBinding(
 		// default_locator, unknown locator) surfaced by the exporter, so
 		// surface as InvalidArgument; rare infrastructure failures still
 		// carry the underlying error message for the operator.
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(commitCode(err), err)
 	}
 	stored, _ := s.mgr.Get(binding.VRFName)
 	return connect.NewResponse(&v1.UpdateBindingResponse{Binding: bindingToProto(stored)}), nil
@@ -601,7 +655,7 @@ func (s *VrfBgpServer) BatchModifyRouteTargets(
 	}
 	if err := s.commitBinding(scratch); err != nil {
 		// Same input-driven failure dominance as UpdateBinding.
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(commitCode(err), err)
 	}
 	stored, _ := s.mgr.Get(vrfName)
 	return connect.NewResponse(&v1.BatchModifyRouteTargetsResponse{Binding: bindingToProto(stored)}), nil
@@ -741,7 +795,7 @@ func (s *VrfBgpServer) mutateOne(vrfName string, mutate func(*vrfbgp.Binding) er
 	}
 	if err := s.commitBinding(scratch); err != nil {
 		// Same input-driven failure dominance as UpdateBinding.
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(commitCode(err), err)
 	}
 	stored, _ := s.mgr.Get(vrfName)
 	return bindingToProto(stored), nil

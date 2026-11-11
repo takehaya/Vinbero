@@ -701,10 +701,12 @@ func (m *Manager) Restore(s State) error {
 // created, and every declared one, is marked as config-origin. A restored
 // config-origin VRF that is no longer declared and holds no AC, device or
 // bridge is dropped and its id stays retired: nothing refers to it any more,
-// and keeping it would bring it back on every boot. A VRF created over the API
-// stays until it is deleted. It returns the dropped names. Only the first call
-// does anything.
-func (m *Manager) FinishRestore(declared []string) []string {
+// and keeping it would bring it back on every boot. held are the names that
+// something else saved refers to (a binding made over the API): they are
+// kept, and their origin is left as it was. A VRF created over the API stays
+// until it is deleted. It returns the dropped names. Only the first call does
+// anything.
+func (m *Manager) FinishRestore(declared, held []string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.restoreDone {
@@ -719,7 +721,8 @@ func (m *Manager) FinishRestore(declared []string) []string {
 		_, wasRestored := m.restored[name]
 		_, isConfig := m.configOrigin[name]
 		_, isDeclared := decl[name]
-		if wasRestored && isConfig && !isDeclared && len(v.ACs) == 0 && v.Device == nil && v.Bridge == nil {
+		isHeld := slices.Contains(held, name)
+		if wasRestored && isConfig && !isDeclared && !isHeld && len(v.ACs) == 0 && v.Device == nil && v.Bridge == nil {
 			delete(m.byName, name)
 			delete(m.byID, v.ID)
 			delete(m.configOrigin, name)

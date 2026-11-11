@@ -15,6 +15,7 @@ test は次を確認します。
 - tenant-b の pod は tenant-a の pod と同じアドレスを持ち、各 PE は同じ /32 を 2 つの VRF に別の service SID で持つ。ping は送り手と同じ tenant の pod にだけ届き、同じアドレスを持つ別 tenant の pod は echo request を 1 つも受けない。PE をまたぐ場合も同じ PE 内でも同じ
 - 配線済みの pod で CHECK が通り、DEL の後は失敗する
 - PE2 の再起動後に veth が attach し直され、両 tenant の /32 がそれぞれの VRF で再び広告される
+- PE1 の再起動後、network configuration から作った binding が state file から元の内容で戻り (次の ADD を待たずに)、両 tenant の /32 が再び広告される
 - tenant-b の pod の DEL は、同じアドレスを持つ tenant-a の pod と、その経路と lease に触れない
 - DEL の前に veth が消えても、他の pod の ADD と DEL は止まらない
 - DEL で /32 が withdraw され、veth が detach と削除され、AC が外れ、アドレスが解放される。2 回目の DEL も成功する

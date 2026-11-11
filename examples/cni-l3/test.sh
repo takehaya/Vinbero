@@ -326,6 +326,29 @@ check "pod1 -> $ip2 reaches pod2 only after the restart" reaches_only "$POD1" "$
 eventually "pod1x -> pod2x after the PE2 restart" ping_from "$POD1X" "$ip2x"
 check "pod1x -> $ip2 reaches pod2x only after the restart" reaches_only "$POD1X" "$ip2x" "$POD2X" "$POD2"
 
+# PE1's bindings came from the network configurations, over the API. They
+# are in the state file, so a restart brings them back as they were, before
+# any further ADD, and the pods' /32s are advertised again.
+bindings() {
+    ctl "cnil3-pe$1" --json vrf-bgp list | jq -S 'sort_by(.vrf_name)'
+}
+bindings 1 > "$work/pe1-bindings-before.json"
+stop_pe 1
+start_pe 1
+bindings 1 > "$work/pe1-bindings-after.json"
+check "PE1's bindings from the network configurations are back as they were" \
+    cmp -s "$work/pe1-bindings-before.json" "$work/pe1-bindings-after.json"
+check "PE1 kept tenant-a's binding" bound_with_rd 1 65100:1
+check "PE1 kept tenant-b's binding" bound_with_rd 1 65100:11 tenant-b
+check "host veth re-attached after restart (PE1)" device_attached 1 "$veth1"
+eventually "PE2 imported pod1's /32 again after the PE1 restart" headend_to 2 "$ip1"
+eventually "PE2 imported pod1x's /32 again after the PE1 restart" headend_to 2 "$ip1x" tenant-b
+eventually "PE1 imported pod2's /32 again after its restart" headend_to 1 "$ip2"
+eventually "pod2 -> pod1 after the PE1 restart" ping_from "$POD2" "$ip1"
+check "pod2 -> $ip1 reaches pod1 only after the PE1 restart" reaches_only "$POD2" "$ip1" "$POD1" "$POD1X"
+eventually "pod2x -> pod1x after the PE1 restart" ping_from "$POD2X" "$ip1x"
+check "pod2x -> $ip1 reaches pod1x only after the PE1 restart" reaches_only "$POD2X" "$ip1x" "$POD1X" "$POD1"
+
 # DEL of a tenant-b pod leaves tenant-a's pod with the same address alone.
 check "DEL pod1x" cni 1 DEL $POD1X tenant-b
 eventually "PE2 withdrew pod1x's /32 from tenant-b" no_headend_in 2 "$ip1x" tenant-b

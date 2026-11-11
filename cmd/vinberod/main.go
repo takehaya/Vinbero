@@ -114,6 +114,13 @@ func run(cliCtx *cli.Context) error {
 	for _, b := range cfg.BGP.VrfBindings {
 		bindingVRFs = append(bindingVRFs, b.VRFName)
 	}
+	// The bindings made over the API before the restart. Decoded before
+	// anything is restored, so a record that does not decode stops the start
+	// before restoreVRFs keeps a VRF for it.
+	restoredBindings, err := savedBindings(vin.GetResourceManager())
+	if err != nil {
+		return fmt.Errorf("vrf bindings: %w (repair the state file, settings.state_path, and restart)", err)
+	}
 	err = bringUpDataPlane(func() error {
 		if err := restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetMapOperations(), vin.GetResourceManager(), lg); err != nil {
 			return err
@@ -140,6 +147,11 @@ func run(cliCtx *cli.Context) error {
 	// The boot's creates and adopts are done: from here on a create that
 	// would close a table under an L2 headend circuit is refused.
 	vin.GetResourceManager().FinishBoot()
+	// Before BGP is set up below: the route applier, the exporters and the
+	// plugins see the restored bindings from their first route on.
+	if err := restoreBindings(vrfBgpMgr, restoredBindings, bindingVRFs, bindingStateStore{res: vin.GetResourceManager()}, lg); err != nil {
+		return fmt.Errorf("vrf bindings: %w", err)
+	}
 	warnVRFPorts(vrfBgpMgr.VRF(), vin.GetMapOperations(), lg)
 	// Forget runtime attachments whose interface is deleted.
 	if err := vin.WatchDevices(); err != nil {
@@ -739,9 +751,11 @@ func bringUpDataPlane(classify, attach func() error) error {
 // BGP is enabled), the kernel devices and bridges the resource manager
 // reconciled from the state file, then vrfs.entries (adopt-idempotent over
 // the seed). A state file written before the ids were saved therefore gets
-// the ids the previous run had. A VRF the boot-time load created that the
-// config no longer declares, and that holds nothing, is not restored
-// (vrf.Manager.FinishRestore).
+// the ids the previous run had. The VRFs of the bindings saved from the API
+// come between the config's bindings and the devices; they have saved ids
+// unless that save failed. A VRF the boot-time load created that the config
+// no longer declares, and that holds nothing, is not restored
+// (vrf.Manager.FinishRestore); a saved binding counts as holding its VRF.
 //
 // Saving: the state is written before ingress_vrf_map, so an id reaches the
 // data plane only after it is on disk. A failed write is a warning, so a
@@ -783,6 +797,14 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 			}
 		}
 	}
+	// The bindings saved from the API keep their VRFs, with the ids they
+	// had, without making them config VRFs.
+	held := savedBindingVRFs(resMgr)
+	for _, name := range held {
+		if _, err := mgr.Ensure(name); err != nil {
+			return fmt.Errorf("runtime_vrf_bindings %q: %w", name, err)
+		}
+	}
 	for _, v := range cfg.Entries {
 		declared = append(declared, v.Name)
 	}
@@ -799,7 +821,7 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 	for _, v := range mgr.List() {
 		before[v.ID] = v.Name
 	}
-	for _, name := range mgr.FinishRestore(declared) {
+	for _, name := range mgr.FinishRestore(declared, held) {
 		lg.Info("VRF not restored: the config no longer declares it and it has no AC, device or bridge; its vrf_id stays retired",
 			zap.String("vrf", name))
 	}

@@ -47,6 +47,10 @@ header.
 3. **BUM flood.** The customer hosts carry no static ARP: the ARP broadcast is
    flooded over the EVPN toward each peer's End.DT2M SID and resolved
    dynamically, after which unicast follows over RT2.
+4. **Binding across a restart.** pe-osaka's `vbctl vrf-bgp bind` is not
+   repeated after its vinberod restarts: the binding comes back from the state
+   file, and once LOC1 is registered again pe-tokyo's RT2 installs ce-tokyo's
+   MAC into bd 100 again.
 
 ## Scope
 

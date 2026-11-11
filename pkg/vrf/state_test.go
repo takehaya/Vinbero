@@ -232,7 +232,7 @@ func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
 	if _, err := m.SetBridge("legacy-br", Bridge{Name: "legacy-br", BdID: 10}); err != nil {
 		t.Fatal(err)
 	}
-	if dropped := m.FinishRestore([]string{"cfg-kept", "cfg-gone", "cfg-with-ac"}); len(dropped) != 0 {
+	if dropped := m.FinishRestore([]string{"cfg-kept", "cfg-gone", "cfg-with-ac"}, nil); len(dropped) != 0 {
 		t.Fatalf("first boot dropped %v", dropped)
 	}
 	api := mustEnsure(t, m, "api") // after the boot-time load
@@ -252,7 +252,7 @@ func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
 	if _, err := m2.SetBridge("tenant", Bridge{Name: "legacy-br", BdID: 10}); err != nil {
 		t.Fatal(err)
 	}
-	dropped := m2.FinishRestore(nil)
+	dropped := m2.FinishRestore(nil, nil)
 	if want := []string{"cfg-gone", "cfg-kept", "legacy-br"}; !reflect.DeepEqual(dropped, want) {
 		t.Errorf("dropped = %v, want %v", dropped, want)
 	}
@@ -266,6 +266,38 @@ func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
 	}
 	if !m2.RestoreDone() {
 		t.Error("RestoreDone after FinishRestore = false")
+	}
+}
+
+// A config VRF the config dropped stays while a saved binding still names it,
+// and is not turned into one the next boot can drop.
+func TestState_FinishRestoreKeepsHeldVRFs(t *testing.T) {
+	store := &fakeStore{}
+	m := NewManager()
+	m.SetStore(store)
+	mustEnsure(t, m, "cfg-bound")
+	mustEnsure(t, m, "cfg-gone")
+	m.FinishRestore([]string{"cfg-bound", "cfg-gone"}, nil)
+	api := mustEnsure(t, m, "api-bound")
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	m2 := restart(t, store.last(t))
+	dropped := m2.FinishRestore(nil, []string{"cfg-bound", "api-bound"})
+	if want := []string{"cfg-gone"}; !reflect.DeepEqual(dropped, want) {
+		t.Errorf("dropped = %v, want %v", dropped, want)
+	}
+	if v, ok := m2.Get("api-bound"); !ok || v.ID != api.ID {
+		t.Errorf("api-bound = %+v, %v; want id %d", v, ok, api.ID)
+	}
+	m2.SetStore(store)
+	if err := m2.Save(); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range store.last(t).VRFs {
+		if want := p.Name == "cfg-bound"; p.Config != want {
+			t.Errorf("%s saved with Config=%v, want %v", p.Name, p.Config, want)
+		}
 	}
 }
 

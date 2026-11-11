@@ -34,6 +34,9 @@ The test checks that:
 - CHECK passes on a wired pod and fails after DEL
 - after a PE2 restart the veth is attached again and the /32s of both
   tenants are advertised again, each in its own VRF
+- after a PE1 restart the bindings its network configurations created
+  are back as they were, from the state file and before any further ADD,
+  and the /32s of both tenants are advertised again
 - DEL of a tenant-b pod leaves tenant-a's pod with the same address, its
   route and its lease alone
 - a veth that vanishes before its DEL does not block other pods' ADD and DEL

@@ -11,7 +11,9 @@
 #      stretched L2 domain, with the frame H.Encaps.L2'd toward the peer's
 #      End.DT2U SID (outer DA on the core link);
 #   3. BUM flood: the CEs resolve ARP dynamically (no static ARP) -- the ARP
-#      broadcast is flooded over the EVPN, proving RT3 / End.DT2M works.
+#      broadcast is flooded over the EVPN, proving RT3 / End.DT2M works;
+#   4. the EVPN binding pe-osaka made over the API comes back from the state
+#      file when its vinberod restarts, and imports pe-tokyo's RT2 again.
 #
 # Exit non-zero on the first failed assertion.
 set -u
@@ -191,6 +193,61 @@ else
     ng "ce-tokyo: no ARP flood captured toward $OSAKA_DT2M (RT3 flood path not exercised)"
 fi
 rm -f "$fcap"
+
+# --- 4. The EVPN binding made over the API survives a daemon restart --------
+echo ""
+echo "[4] pe-osaka's vinberod restarts with its EVPN binding"
+# start.sh bound evi-100 with `vbctl vrf-bgp bind`. The daemon is restarted
+# and not bound again: the binding comes back from the state file, the bridge
+# facet with it. The maps are not pinned and LOC1 was registered over the
+# API, so LOC1 is registered again (the source locator RT2 installs need);
+# pe-tokyo's RT2 then installs ce-tokyo's MAC into bd 100 once more, which
+# only a binding importing 65000:100 into evi-100 allows.
+osaka_pid=$(dexec "$PE_OSAKA" cat /var/run/vinberod.pid)
+dexec "$PE_OSAKA" kill -TERM "$osaka_pid"
+# start.sh has exited, so nothing reaps the old daemon: a zombie counts as
+# stopped.
+osaka_stopped() {
+    docker exec "$PE_OSAKA" sh -c "[ ! -e /proc/$osaka_pid ] || grep -q '^State:[[:space:]]*Z' /proc/$osaka_pid/status"
+}
+if retry_n 15 osaka_stopped; then
+    ok "pe-osaka's vinberod stopped"
+else
+    ng "pe-osaka's vinberod did not stop"
+fi
+dexec -d "$PE_OSAKA" sh -c \
+    'echo $$ > /var/run/vinberod.pid; exec /usr/local/bin/vinberod --bgp-enabled -c /etc/vinbero/vinbero.yaml >> /var/log/vinberod.log 2>&1'
+# The new daemon says it restored the binding, so the checks below cannot be
+# answered by the old one.
+osaka_restored() {
+    dexec "$PE_OSAKA" grep -q 'VRF bindings restored from the state file' /var/log/vinberod.log
+}
+if retry_n 30 bash -c "docker exec $PE_OSAKA vbctl locator list" && retry_n 15 osaka_restored; then
+    ok "pe-osaka's vinberod is back and restored the bindings from its state file"
+else
+    ng "pe-osaka's vinberod did not come back with its bindings"
+    dexec "$PE_OSAKA" tail -30 /var/log/vinberod.log || true
+fi
+osaka_bound() {
+    dexec "$PE_OSAKA" vbctl vrf-bgp list 2>/dev/null | grep 'evi-100' | grep -qF 'evpn=[65000:100(import)]'
+}
+if osaka_bound; then
+    ok "pe-osaka restored evi-100's binding (evpn import 65000:100) without a new bind"
+else
+    ng "pe-osaka lost evi-100's binding over the restart"
+fi
+dexec "$PE_OSAKA" vbctl vrf-bgp list | sed 's/^/      /'
+dexec "$PE_OSAKA" vbctl locator create \
+    --name LOC1 \
+    --prefix fd00:200::/48 \
+    --block-len 32 --node-len 16 --function-len 16 --argument-len 64 \
+    --behavior classic >/dev/null
+if retry osaka_learned_tokyo_mac; then
+    ok "pe-osaka learned ce-tokyo's MAC ($CE_TOKYO_MAC) via RT2 again after the restart"
+else
+    ng "pe-osaka did not learn ce-tokyo's MAC after the restart"
+    dexec "$PE_OSAKA" vbctl fdb list || true
+fi
 
 echo ""
 echo "=============================================="
