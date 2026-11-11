@@ -3459,7 +3459,15 @@ func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 func TestXDPProgEndADNegative(t *testing.T) {
 	innerSrc := net.ParseIP("10.0.0.1")
 	innerDst := net.ParseIP("172.0.2.1")
-	svc := &SidAuxService{IfaceOut: 1, IfaceIn: 1, InnerType: SvcInnerIPv4}
+	// Static MACs, as in TestXDPProgEndADForwardAndReplay: the seeding
+	// subtests need the forward packet to reach the service. Without them
+	// the forward takes a FIB lookup on the inner destination, whose
+	// verdict depends on the test host's routes and forwarding sysctl
+	// (redirect via a default route, drop without one).
+	svc := &SidAuxService{
+		IfaceOut: 1, IfaceIn: 1, InnerType: SvcInnerIPv4,
+		Flags: SvcAuxFStaticMac, Dmac: [6]byte{0x02, 0, 0, 0, 0, 0x11}, Smac: [6]byte{0x02, 0, 0, 0, 0, 0x12},
+	}
 
 	t.Run("replay before seed drops", func(t *testing.T) {
 		h := newXDPTestHelper(t)
