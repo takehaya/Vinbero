@@ -130,7 +130,7 @@ kernel の multipath は、送信元、宛先、flowinfo、L4 ポートのハッ
 経路が変わったときは、次の契機で全 BD の devmap を組み立て直します（200 ms の debounce を挟みます）。
 
 - route の通知と、nexthop object（`RTNLGRP_NEXTHOP`）、IPv6 の ip rule（`RTNLGRP_IPV6_RULE`）の通知。group の member の削除や `nexthop_compat_mode=0` のように、route の通知が出ない変更があるためです。
-- egress program が `BUM_UPLINK_MISMATCH` か `BUM_EGRESS_NO_NEIGH` を数えたとき（どちらも 1 秒ごとに確認します）。通知なしで peer の next hop が変わる場合があるためです。`fib_multipath_hash_policy` 3 の hash field やハッシュの seed の変更、hash-threshold の nexthop group で gateway の neighbor が FAILED や INCOMPLETE になったとき（その next hop は選ばれなくなり、戻ると元に戻ります）、carrier の変化、device を落としたときの nexthop の削除などです。組み立て直しで uplink と next hop を引き直し、neighbor エントリーも作り直します。neighbor が flush された場合（carrier の変化など）もここで回復します。これらの数え上げは `enable_stats` に関係なく働きます（`bum_uplink_resync`）。
+- egress program が `BUM_UPLINK_MISMATCH` か `BUM_EGRESS_NO_NEIGH` を数えたとき（どちらも 1 秒ごとに確認します）。通知なしで peer の next hop が変わる場合があるためです。`fib_multipath_hash_policy` 3 の hash field やハッシュの seed の変更、hash-threshold の nexthop group で gateway の neighbor が FAILED や INCOMPLETE になったとき（その next hop は選ばれなくなり、戻ると元に戻ります）、carrier の変化、device を落としたときの nexthop の削除などです。組み立て直しで uplink と next hop を引き直し、neighbor エントリーも作り直します。neighbor が flush された場合（carrier の変化など）もここで回復します。BD の peer は encap の next hop の keeper の宛先でもあるので、encap の宛先と同じ next hop の entry は、keeper も flush の約 200 ms 後に作り直し、carrier が戻るとすぐに解決し直します（[vrf.md](vrf.md#encap-の-next-hop-の-neighbour)）。これらの数え上げは `enable_stats` に関係なく働きます（`bum_uplink_resync`）。
 
 - 30 秒ごとの再試行。uplink を引けずに外れたスロットや、AC の答えが割れて tc モードで動いている BD があるときだけ行います。これらはコピーを出さないのでカウンタでは分からず、原因の解消（AC の forwarding sysctl など）に通知が出ないこともあるためです。外れたスロットのログは、外れたときと原因が変わったときに警告を 1 回出し、再試行の間は debug レベルです。
 
