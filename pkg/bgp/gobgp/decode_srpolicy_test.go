@@ -170,11 +170,14 @@ func TestDecodeSRPolicy_NotSRPolicyNLRI(t *testing.T) {
 
 // An IPv4 endpoint on the IPv6 SR Policy family is rejected: it could
 // never match the always-IPv6 VPN next hop, so the policy must not decode.
+// GoBGP's constructor and decoder refuse such an NLRI, so the test shortens
+// the endpoint of a valid one.
 func TestDecodeSRPolicy_RejectsIPv4Endpoint(t *testing.T) {
-	nlri, err := gobgppkt.NewSRPolicy(gobgppkt.RF_SR_POLICY_IPv6, gobgppkt.SRPolicyIPv6NLRILen, 1, 100, []byte{10, 0, 0, 1})
+	nlri, err := gobgppkt.NewSRPolicy(gobgppkt.RF_SR_POLICY_IPv6, gobgppkt.SRPolicyIPv6NLRILen, 1, 100, netip.MustParseAddr("2001:db8::2").AsSlice())
 	if err != nil {
 		t.Fatalf("NewSRPolicy: %v", err)
 	}
+	nlri.Endpoint = []byte{10, 0, 0, 1}
 	p := &apiutil.Path{Family: gobgppkt.RF_SR_POLICY_IPv6, Nlri: nlri}
 	if got := decodeSRPolicy(p); got != nil {
 		t.Errorf("decodeSRPolicy(IPv4 endpoint) = %+v, want nil", got)

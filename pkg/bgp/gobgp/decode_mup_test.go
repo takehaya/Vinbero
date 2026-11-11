@@ -107,7 +107,7 @@ func TestDecodeMUP_SegmentID(t *testing.T) {
 	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
 	nlri := gobgppkt.NewMUPType2SessionTransformedRoute(rd, 64, netip.MustParseAddr("192.0.2.100"), teidAddr(0x11223344))
 	ext := &gobgppkt.PathAttributeExtendedCommunities{
-		Value: []gobgppkt.ExtendedCommunityInterface{gobgppkt.NewMUPExtended(7, 0xdeadbeef)},
+		Value: []gobgppkt.ExtendedCommunityInterface{gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG, 7, 0xdeadbeef)},
 	}
 
 	got := decodeMUPRoute(mupPath(nlri, ext))
@@ -120,6 +120,32 @@ func TestDecodeMUP_SegmentID(t *testing.T) {
 	// Full 32-bit TEID for prefixlen 64 (32 endpoint + 32 TEID).
 	if got.TEID != 0x11223344 || got.TEIDLen != 32 {
 		t.Errorf("teid = 0x%08X/%d, want 0x11223344/32", got.TEID, got.TEIDLen)
+	}
+}
+
+// An Interwork Segment community has the same layout as the Direct Segment
+// one but does not name a direct segment: it is not read as the segment id.
+func TestDecodeMUP_SegmentIDIgnoresInterworkSegment(t *testing.T) {
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
+	nlri := gobgppkt.NewMUPType2SessionTransformedRoute(rd, 64, netip.MustParseAddr("192.0.2.100"), teidAddr(0x11223344))
+	ext := &gobgppkt.PathAttributeExtendedCommunities{
+		Value: []gobgppkt.ExtendedCommunityInterface{
+			gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_INTERWORK_SEG, 1, 2),
+			gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG, 7, 0xdeadbeef),
+		},
+	}
+	got := decodeMUPRoute(mupPath(nlri, ext))
+	if got == nil {
+		t.Fatal("decodeMUPRoute returned nil")
+	}
+	if got.SegmentID2 != 7 || got.SegmentID4 != 0xdeadbeef {
+		t.Errorf("segment id = %d:%08x, want 7:deadbeef", got.SegmentID2, got.SegmentID4)
+	}
+	only := &gobgppkt.PathAttributeExtendedCommunities{
+		Value: []gobgppkt.ExtendedCommunityInterface{gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_INTERWORK_SEG, 1, 2)},
+	}
+	if got := decodeMUPRoute(mupPath(nlri, only)); got == nil || got.SegmentID2 != 0 || got.SegmentID4 != 0 {
+		t.Errorf("interwork segment only: got %+v, want segment id 0:0", got)
 	}
 }
 

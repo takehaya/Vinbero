@@ -66,7 +66,7 @@ func TestControllerUplinkOutputKeys(t *testing.T) {
 			initial := fixtures(t, 256)
 			c.Update(replay(initial))
 			rd := bgp.NewRouteDistinguisherTwoOctetAS(65000, 8)
-			direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 1)})
+			direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 1)})
 			st2 := route(t, bgp.NewMUPType2SessionTransformedRoute(rd, 64, netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("0.0.1.0")), direct)
 			address := netip.MustParseAddr("fd00:a:0:100::")
 			if conflict {
@@ -107,7 +107,7 @@ func TestControllerSharedGateClaims(t *testing.T) {
 					extra = append(extra, route(t, bgp.NewMUPType1SessionTransformedRoute(bgp.NewRouteDistinguisherTwoOctetAS(65000, 9), netip.MustParsePrefix(prefix), netip.MustParseAddr("0.0.2.0"), 9, netip.MustParseAddr("172.16.0.1"), nil)))
 				}
 				if name == "conflicting uplinks" {
-					direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 1)})
+					direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 1)})
 					rd := bgp.NewRouteDistinguisherTwoOctetAS(65000, 8)
 					sid := bgp.NewPathAttributePrefixSID(bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service, bgp.NewSRv6InformationSubTLV(netip.MustParseAddr("fd00:b:0:100::"), bgp.END_DT4)))
 					extra = append(extra, route(t, bgp.NewMUPType2SessionTransformedRoute(rd, 64, netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("0.0.1.0")), direct), route(t, bgp.NewMUPDirectSegmentDiscoveryRoute(rd, netip.MustParseAddr("192.0.2.3")), direct, sid))

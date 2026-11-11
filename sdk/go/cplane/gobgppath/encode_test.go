@@ -29,7 +29,7 @@ func TestEncodeDecodePacketPreservesAttributes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			unknown := bgp.NewPathAttributeUnknown(bgp.BGP_ATTR_FLAG_OPTIONAL|bgp.BGP_ATTR_FLAG_TRANSITIVE, 250, []byte{1, 2, 3})
 			attrs := []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), unknown,
-				bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 0), bgp.NewMUPExtended(0, 0)})}
+				bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0), bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0)})}
 			packet, err := Encode(tt.family, tt.nlri, attrs)
 			if err != nil {
 				t.Fatal(err)

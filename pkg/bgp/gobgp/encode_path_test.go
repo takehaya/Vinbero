@@ -78,7 +78,7 @@ func pluginBGPFixtures(t *testing.T) map[string]*apiutil.Path {
 		// Keep both a zero segment ID and duplicates; neither is "absent".
 		path.Attrs = append(path.Attrs, sid,
 			gobgppkt.NewPathAttributeExtendedCommunities([]gobgppkt.ExtendedCommunityInterface{
-				gobgppkt.NewMUPExtended(0, 0), gobgppkt.NewMUPExtended(7, 8), gobgppkt.NewMUPExtended(7, 8),
+				gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG, 0, 0), gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG, 7, 8), gobgppkt.NewMUPExtended(gobgppkt.EC_SUBTYPE_MUP_DIRECT_SEG, 7, 8),
 			}), gobgppkt.NewPathAttributeUnknown(0xc0, 253, []byte{1, 2, 3}))
 	}
 	return paths
