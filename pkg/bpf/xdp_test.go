@@ -3063,6 +3063,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("IPv4 re-encapsulation", func(t *testing.T) {
 		h := newXDPTestHelper(t)
+		h.useUnroutableNetns()
 		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
@@ -3073,11 +3074,13 @@ func TestXDPProgEndASReturn(t *testing.T) {
 			t.Fatalf("build packet: %v", err)
 		}
 		ret, out := h.runOnIfindex(pkt, 1)
-		// FIB lookup for fc00:3::3 fails in the test environment. The AS
-		// return fails closed on a FIB miss (a dedicated proxy circuit
-		// must not leak an assembled SR packet to the host stack), so the
-		// verdict is XDP_DROP — but the re-encapsulation is already in the
-		// output buffer and is asserted below.
+		// The helper's namespace cannot forward (useUnroutableNetns), so
+		// the FIB lookup for fc00:3::3 is declined, whatever routes the
+		// host has. The AS return fails closed on that (a dedicated proxy
+		// circuit must not leak an assembled SR packet to the host
+		// stack), so the verdict is XDP_DROP, not XDP_PASS; the
+		// re-encapsulation is already in the output buffer and is
+		// asserted below.
 		if ret != XDP_DROP {
 			t.Fatalf("expected XDP_DROP (FIB miss, fail-closed), got %d", ret)
 		}
@@ -3155,6 +3158,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("Ethernet circuit wraps the whole frame", func(t *testing.T) {
 		h := newXDPTestHelper(t)
+		h.useUnroutableNetns()
 		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerEthernet)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
@@ -3162,8 +3166,8 @@ func TestXDPProgEndASReturn(t *testing.T) {
 		ret, out := h.runOnIfindex(pkt, 1)
 		// do_h_encaps_l2 converts a FIB miss to XDP_DROP (an L2-wrapped
 		// frame must never be handed to the kernel with stale pointers),
-		// and the test environment has no route for the segment. The
-		// encapsulation itself is still visible in the output buffer.
+		// and the helper's namespace cannot forward the segment
+		// (useUnroutableNetns). The encapsulation itself is still visible in the output buffer.
 		if ret != XDP_DROP {
 			t.Fatalf("expected XDP_DROP (L2 encap FIB miss), got %d", ret)
 		}
@@ -3312,6 +3316,7 @@ func (h *xdpTestHelper) createSidFunctionEndAD(prefix string, svc *SidAuxService
 // return direction replays it with a per-packet payload length.
 func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 	h := newXDPTestHelper(t)
+	h.useUnroutableNetns()
 	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x11}
 	smac := [6]byte{0x02, 0, 0, 0, 0, 0x12}
 	// The return circuit lives on {lo, VLAN 7}: BPF_PROG_TEST_RUN pins
@@ -3377,9 +3382,11 @@ func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 		t.Fatalf("build return packet: %v", err)
 	}
 	ret, out = h.runOnIfindex(back, 1)
-	// FIB miss in the test env; the AD return fails closed (dedicated
-	// circuit) so the verdict is XDP_DROP, with the replayed encapsulation
-	// still in the output buffer and asserted below.
+	// The helper's namespace cannot forward (useUnroutableNetns), so the
+	// FIB lookup for the cached next segment is declined, whatever routes
+	// the host has. The AD return fails closed on that (dedicated circuit),
+	// so the verdict is XDP_DROP rather than XDP_PASS, with the replayed
+	// encapsulation still in the output buffer and asserted below.
 	if ret != XDP_DROP {
 		t.Fatalf("replay: expected XDP_DROP (FIB miss, fail-closed), got %d", ret)
 	}
@@ -3666,6 +3673,7 @@ func TestXDPProgServiceReturnFlowLabel(t *testing.T) {
 	}
 
 	h := newXDPTestHelper(t)
+	h.useUnroutableNetns()
 	asEntry := func(mask uint8) *ServiceIngressEntry {
 		return &ServiceIngressEntry{
 			Behavior:      SvcRetAS,
@@ -3692,7 +3700,8 @@ func TestXDPProgServiceReturnFlowLabel(t *testing.T) {
 		}
 	}
 
-	// Both return paths fail closed on the test environment's FIB miss; the
+	// Both return paths fail closed when the FIB declines (the helper's
+	// namespace cannot forward, see useUnroutableNetns); the
 	// stamped encapsulation is still in the output buffer. Asserting the
 	// verdict here keeps a fail-closed -> XDP_PASS regression visible.
 	runReturn := func(t *testing.T, pkt []byte) []byte {
@@ -3839,6 +3848,7 @@ const actionEndAM = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM)
 // SRH — no out-of-band state at all.
 func TestXDPProgEndAMForwardAndReturn(t *testing.T) {
 	h := newXDPTestHelper(t)
+	h.useUnroutableNetns()
 	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x21}
 	smac := [6]byte{0x02, 0, 0, 0, 0, 0x22}
 	svc := &SidAuxService{
@@ -3895,7 +3905,7 @@ func TestXDPProgEndAMForwardAndReturn(t *testing.T) {
 	back = append(back, out[14:]...)
 	ret, out2 := h.runOnIfindex(back, 1)
 	if ret != XDP_PASS {
-		t.Fatalf("return: expected XDP_PASS (FIB miss in test env), got %d", ret)
+		t.Fatalf("return: expected XDP_PASS (FIB declined in the unroutable namespace), got %d", ret)
 	}
 	// De-masquerading edits in place; the VLAN tag stays, so L3 sits at 18.
 	if !bytes.Equal(out2[18+24:18+40], net.ParseIP("fc00:4::4").To16()) {
@@ -4004,6 +4014,7 @@ func TestXDPProgEndAMNegative(t *testing.T) {
 // slot exists for per-SID accounting, not for different processing.
 func TestXDPProgEndAN(t *testing.T) {
 	h := newXDPTestHelper(t)
+	h.useUnroutableNetns()
 	entry := &SidFunctionEntry{Action: uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN)}
 	if err := h.mapOps.CreateSidFunction("fc00:a1::1/128", entry, NewSidAuxServiceName("demo-fw"), OwnerRPC); err != nil {
 		t.Fatalf("create End.AN SID: %v", err)
@@ -4016,7 +4027,7 @@ func TestXDPProgEndAN(t *testing.T) {
 	}
 	ret, out := h.run(pkt)
 	if ret != XDP_PASS {
-		t.Fatalf("expected XDP_PASS (FIB miss in test env), got %d", ret)
+		t.Fatalf("expected XDP_PASS (FIB declined in the unroutable namespace), got %d", ret)
 	}
 	verifyDAAndSL(t, out, "fc00:3::3", 1)
 

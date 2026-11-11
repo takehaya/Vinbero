@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"os"
+	"runtime"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -12,6 +14,7 @@ import (
 	"github.com/google/gopacket/layers"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/packet"
+	"github.com/vishvananda/netns"
 )
 
 // ========== Test Constants ==========
@@ -61,6 +64,9 @@ type xdpTestHelper struct {
 	// headendVRFs are the VRFs the L3 headend create helpers write in
 	// (vrfsForHeadend).
 	headendVRFs []uint32
+	// ns, when set (useUnroutableNetns), is the network namespace every
+	// run and runOnIfindex call executes in.
+	ns netns.NsHandle
 }
 
 func newXDPTestHelper(tb testing.TB) *xdpTestHelper {
@@ -93,11 +99,84 @@ func (h *xdpTestHelper) run(pkt []byte) (uint32, []byte) {
 		DataOut: make([]byte, 1500),
 		Repeat:  1,
 	}
-	ret, err := h.objs.VinberoMain.Run(&opts)
+	ret, err := h.testRun(&opts)
 	if err != nil {
 		h.t.Fatalf("Failed to run BPF program: %v", err)
 	}
 	return ret, opts.DataOut
+}
+
+// useUnroutableNetns makes every run and runOnIfindex of this helper execute
+// in a fresh network namespace of its own, with IPv6 forwarding off and no
+// routes. bpf_fib_lookup resolves against the namespace of the ingress device
+// (lo, ifindex 1, which BPF_PROG_TEST_RUN looks up in the calling thread's
+// namespace), so the lookup cannot succeed whatever routes the test host has:
+// it returns BPF_FIB_LKUP_RET_FWD_DISABLED, which the data plane maps to
+// XDP_PASS. A test calling this expects exactly that "the FIB cannot forward
+// this" outcome: XDP_PASS for the plain endpoints, and the fail-closed
+// XDP_DROP (PASS converted to DROP) for the dedicated service return circuits.
+// Without it the verdict depends on the host: an IPv6 default route with
+// forwarding on and a resolved gateway turns it into XDP_REDIRECT.
+func (h *xdpTestHelper) useUnroutableNetns() {
+	h.t.Helper()
+	var (
+		ns      netns.NsHandle
+		fwd     []byte
+		nsErr   error
+		readErr error
+	)
+	// The new namespace is entered on this goroutine's thread. The goroutine
+	// exits while still locked to it, so the runtime discards the thread
+	// instead of handing it back to other goroutines.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.LockOSThread()
+		if ns, nsErr = netns.New(); nsErr != nil {
+			return
+		}
+		const fwdPath = "/proc/sys/net/ipv6/conf/all/forwarding"
+		if nsErr = os.WriteFile(fwdPath, []byte("0"), 0o644); nsErr != nil {
+			return
+		}
+		fwd, readErr = os.ReadFile(fwdPath)
+	}()
+	<-done
+	// netns.New can succeed and the sysctl write after it fail, so the
+	// handle is released whenever it exists.
+	if ns != 0 {
+		h.t.Cleanup(func() { _ = ns.Close() })
+	}
+	if nsErr != nil {
+		h.t.Fatalf("create the unroutable test namespace: %v", nsErr)
+	}
+	if readErr != nil || string(bytes.TrimSpace(fwd)) != "0" {
+		h.t.Fatalf("test namespace must have IPv6 forwarding off, got %q (%v)", fwd, readErr)
+	}
+	h.ns = ns
+}
+
+// testRun is VinberoMain.Run, executed in the helper's namespace when it has
+// one.
+func (h *xdpTestHelper) testRun(opts *ebpf.RunOptions) (uint32, error) {
+	if h.ns == 0 {
+		return h.objs.VinberoMain.Run(opts)
+	}
+	var (
+		ret uint32
+		err error
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.LockOSThread() // never unlocked: the thread stays in the namespace and is discarded
+		if err = netns.Set(h.ns); err != nil {
+			return
+		}
+		ret, err = h.objs.VinberoMain.Run(opts)
+	}()
+	<-done
+	return ret, err
 }
 
 // xdpMdCtx mirrors struct xdp_md for BPF_PROG_TEST_RUN's ctx_in. The kernel
@@ -126,7 +205,7 @@ func (h *xdpTestHelper) runOnIfindex(pkt []byte, ifindex uint32) (uint32, []byte
 		Context: ctx,
 		Repeat:  1,
 	}
-	ret, err := h.objs.VinberoMain.Run(&opts)
+	ret, err := h.testRun(&opts)
 	if err != nil {
 		h.t.Fatalf("Failed to run BPF program with ingress_ifindex=%d: %v", ifindex, err)
 	}
