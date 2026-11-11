@@ -16,6 +16,28 @@ check_root() {
     fi
 }
 
+# resolve_bpftool sets BPFTOOL_BIN to a bpftool that runs on this kernel.
+# Ubuntu's /usr/sbin/bpftool is a wrapper that only finds the tools package
+# of the running kernel, so fall back to any installed linux-tools binary.
+resolve_bpftool() {
+    if [[ -n "${BPFTOOL_BIN:-}" ]]; then
+        "$BPFTOOL_BIN" version >/dev/null 2>&1 || {
+            print_error "Cannot run BPFTOOL_BIN=$BPFTOOL_BIN"
+            return 1
+        }
+        return 0
+    fi
+    local candidate
+    for candidate in bpftool /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool; do
+        if "$candidate" version >/dev/null 2>&1; then
+            BPFTOOL_BIN=$candidate
+            return 0
+        fi
+    done
+    print_error "No working bpftool found; install kernel tools or set BPFTOOL_BIN"
+    return 1
+}
+
 # Execute command with echo (for debugging)
 # Usage: run <command...>
 run() {

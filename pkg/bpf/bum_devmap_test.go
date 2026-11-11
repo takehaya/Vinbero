@@ -311,10 +311,26 @@ func TestKeepNeighResolved(t *testing.T) {
 		}
 		return l, uint32(l.Attrs().Index)
 	}
-	linkA, ifA := addr("bumnb-a", "fd00:bb::1/64")
-	linkB, _ := addr("bumnb-b", "fd00:bb::2/64")
-	if err := netlink.LinkSetUp(linkA); err != nil {
-		t.Fatal(err)
+	_, ifA := addr("bumnb-a", "fd00:bb::1/64")
+	// Both ends come up before the neighbour is made managed, and stay up:
+	// with the carrier off on an up device the kernel's NETDEV_CHANGE
+	// handling flushes the device's neighbours, managed ones included
+	// (ndisc_evict_nocarrier). The carrier-off event a new veth queues is
+	// processed by linkwatch up to a second later, so with only one end up
+	// it could land after KeepNeighResolved and delete the entry under
+	// test. The next hop is unreachable instead because its address is
+	// not configured yet.
+	for _, name := range []string{"bumnb-a", "bumnb-b"} {
+		l, err := netlink.LinkByName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := netlink.LinkSetUp(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if l, err := netlink.LinkByIndex(int(ifA)); err != nil || l.Attrs().RawFlags&unix.IFF_LOWER_UP == 0 {
+		t.Fatalf("bumnb-a has no carrier with both ends up: err=%v", err)
 	}
 
 	find := func(ip net.IP) *netlink.Neigh {
@@ -344,8 +360,9 @@ func TestKeepNeighResolved(t *testing.T) {
 		}
 	}
 
-	// The next hop does not answer yet: its solicits run out and the entry
-	// fails, staying managed and exempt from GC.
+	// The next hop does not answer yet (its address is missing): its
+	// solicits run out and the entry fails, staying managed and exempt
+	// from GC.
 	nh := net.ParseIP("fd00:bb::2")
 	if err := KeepNeighResolved(ifA, nh); err != nil {
 		t.Fatal(err)
@@ -359,11 +376,9 @@ func TestKeepNeighResolved(t *testing.T) {
 	// Once it answers, the kernel's periodic probe resolves it, no traffic
 	// involved (after a failure that takes up to the 5 s probe interval
 	// plus a round of solicits).
-	if err := netlink.LinkSetUp(linkB); err != nil {
-		t.Fatal(err)
-	}
+	addr("bumnb-b", "fd00:bb::2/64")
 	const reachable = netlink.NUD_REACHABLE | netlink.NUD_STALE | netlink.NUD_DELAY | netlink.NUD_PROBE
-	waitFor("next hop not resolved after it came up", 20*time.Second,
+	waitFor("next hop not resolved after its address was added", 20*time.Second,
 		func(n *netlink.Neigh) bool { return n.State&reachable != 0 && len(n.HardwareAddr) != 0 }, nh)
 	// Idempotent.
 	if err := KeepNeighResolved(ifA, nh); err != nil {

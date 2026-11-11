@@ -60,6 +60,8 @@ sudo ./test.sh     # プラグインコンパイル → 登録 → テスト
 sudo ./teardown.sh # クリーンアップ
 ```
 
+`test.sh` は `plugin_counter_map` を bpftool で読むので、実行中のカーネルで動く bpftool が必要です。Ubuntu では `linux-tools-generic` を入れます。Ubuntu の `/usr/sbin/bpftool` は実行中のカーネルに合う tools パッケージしか探さないため、見つからないときは `/usr/lib/linux-tools/*/bpftool` を使います。別の場所にある場合は `BPFTOOL_BIN` にパスを指定します。
+
 ## 手動実行
 
 ### 1. プラグインのコンパイル

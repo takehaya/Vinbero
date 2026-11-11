@@ -3459,7 +3459,15 @@ func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 func TestXDPProgEndADNegative(t *testing.T) {
 	innerSrc := net.ParseIP("10.0.0.1")
 	innerDst := net.ParseIP("172.0.2.1")
-	svc := &SidAuxService{IfaceOut: 1, IfaceIn: 1, InnerType: SvcInnerIPv4}
+	// Static MACs, as in TestXDPProgEndADForwardAndReplay: the seeding
+	// subtests need the forward packet to reach the service. Without them
+	// the forward takes a FIB lookup on the inner destination, whose
+	// verdict depends on the test host's routes and forwarding sysctl
+	// (redirect via a default route, drop without one).
+	svc := &SidAuxService{
+		IfaceOut: 1, IfaceIn: 1, InnerType: SvcInnerIPv4,
+		Flags: SvcAuxFStaticMac, Dmac: [6]byte{0x02, 0, 0, 0, 0, 0x11}, Smac: [6]byte{0x02, 0, 0, 0, 0, 0x12},
+	}
 
 	t.Run("replay before seed drops", func(t *testing.T) {
 		h := newXDPTestHelper(t)
@@ -3508,8 +3516,15 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		if err != nil {
 			t.Fatalf("build return packet: %v", err)
 		}
-		if ret, _ := h.runOnIfindex(back, 1); ret != XDP_DROP {
+		ret, out := h.runOnIfindex(back, 1)
+		if ret != XDP_DROP {
 			t.Fatalf("odd seq: expected XDP_DROP, got %d", ret)
+		}
+		// A replay would also end in XDP_DROP on a host with no route to
+		// the cached DA, so check that the frame was left as it came: the
+		// seqlock check drops before any header is prepended.
+		if !bytes.Equal(out, back) {
+			t.Fatalf("odd seq: the frame was rewritten before the drop: % x", out)
 		}
 	})
 
