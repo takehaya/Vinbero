@@ -99,7 +99,7 @@ GTP6_PCAP=/tmp/gtp6_encap.pcap
 SENT=3
 rm -f "$GTP6_PCAP"  # drop any stale capture so we never read a previous run's
 capture_start "$ns_router2" "${TOPO_NS_PREFIX}rt2rt1" "$GTP6_PCAP" -c "$SENT" \
-    'ip6 and dst net fc00:3::/64'
+    'ip6 and dst net fc00:3::/64' || { PIDS="$CAPTURE_PID $PIDS"; exit 1; }
 PIDS="$CAPTURE_PID $PIDS"  # also kill it on early exit
 
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu_v6.py" \

@@ -92,9 +92,13 @@ out_pcap=/tmp/vinbero_end_hlim_out.pcap
 
 # Both captures must be listening before the first ping leaves, or the
 # packet they are after can pass unseen.
-capture_start "$ns_router1" "$veth_rt1_rt2" "$in_pcap" -c 1 -Q out 'ip6 and ip6[6] == 43'
+# A capture that never listens must not outlive the script (-c 1 only ends it
+# once a packet arrives), so stop what is running before the failure exits.
+capture_start "$ns_router1" "$veth_rt1_rt2" "$in_pcap" -c 1 -Q out 'ip6 and ip6[6] == 43' ||
+    { kill "$CAPTURE_PID" 2>/dev/null; exit 1; }
 in_pid=$CAPTURE_PID
-capture_start "$ns_router3" "$veth_rt3_rt2" "$out_pcap" -c 1 -Q in 'ip6 and ip6[6] == 43'
+capture_start "$ns_router3" "$veth_rt3_rt2" "$out_pcap" -c 1 -Q in 'ip6 and ip6[6] == 43' ||
+    { kill "$in_pid" "$CAPTURE_PID" 2>/dev/null; exit 1; }
 out_pid=$CAPTURE_PID
 ip netns exec "$ns_host1" ping -c 3 -W 2 172.0.2.1 > /dev/null 2>&1 || true
 capture_stop "$in_pid"
