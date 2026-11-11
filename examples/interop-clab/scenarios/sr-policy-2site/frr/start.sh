@@ -51,8 +51,8 @@ ip link set eth2 up 2>/dev/null || true
 # fd00:100::/48-on-eth2 route that beats its static toward pe-tokyo.
 
 # FRR ships an entrypoint that starts watchfrr, which starts the daemons
-# selected in /etc/frr/daemons and keeps them alive. Each daemon gets its
-# part of frr.conf (`vtysh -b -d <daemon>`) as soon as it is started.
+# selected in /etc/frr/daemons, applies frr.conf to them (`vtysh -b`) once
+# they are all started, and keeps them alive.
 /usr/lib/frr/frrinit.sh start
 
 # frr.conf is applied exactly once. A second `vtysh -b` re-enters the SRv6
