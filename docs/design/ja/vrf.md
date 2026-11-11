@@ -100,6 +100,33 @@ Vinbero を通さずに、起動後に閉じた table の VRF へ enslave され
 
 VRF device に enslave したまま AC にしていない interface は vrf_id 0 なので、encap の外側も入口で引き、VRF table の unreachable default で drop になります。vinberod は、閉じた VRF の member のうち data plane が分類する port (XDP が動く port と、XDP が動く port の VLAN subinterface) で、その VRF の AC でないものを 1 つずつ warning に出します。VLAN subinterface `eth1.100` は AC `{eth1, 100}` があれば対象外です。dummy、bridge、SVI のように XDP が見ない member は対象外です。warning を出すのは起動時 (XDP を attach した後) と、`VrfAcRemove` でそのような port が残ったときです。member を指定した `VrfCreate` の直後に `VrfAcAdd` する通常の手順では出ません。今の状態は `vbctl vrf show` (`VrfShow` の `members_without_ac`) で見られます。直すには、その interface を VRF の AC にする (`vbctl vrf ac-add`、config の `vrfs.entries[].acs`) か、VRF を `no_unreachable_default` にします。
 
+### ip rule と FIB lookup のコスト
+
+Linux では、network namespace (netns) で一度でも `ip rule` を足すと、その netns の「direct でない」FIB lookup は経路表を引く前に rule の一覧をたどるようになります。rule を消しても戻らず、netns が消えるまで続きます。初期 netns なら、戻すには reboot するしかありません。この状態は IPv4 と IPv6 で別々に持たれ、IPv6 は IPv6 の rule を足したときに、IPv4 は IPv4 の rule を足すか消したときに立ちます。VRF device を netns で最初に作ると kernel が両方の family に l3mdev rule を足すので、同じ状態になります。VRF device を消しても l3mdev rule は残り、rule を消した後もこの状態は残ります。rule を消すと `ip rule` の出力は既定の一覧に戻って見えるため、この状態は `ip rule` では分かりません。
+
+根拠は kernel の次の関数です。IPv4 の `fib_lookup()` は `fib_has_custom_rules` が false の間、rule を読まずに table を直接引きます。IPv6 の `fib6_lookup()` も `fib6_has_custom_rules` で同じ分岐をします。この印は netns の作成時は false で、rule の追加 (`fib4_rule_configure()` と `fib6_rule_configure()`) で true になります。IPv4 は削除 (`fib4_rule_delete()`) でも true にします。rule の追加と削除は印を false に戻しません。VRF driver は netns で最初の VRF device を作るとき (`vrf_newlink()`) に限って l3mdev rule を足し、`vrf_dellink()` は rule を消しません。`bpf_fib_lookup` は `BPF_FIB_LOOKUP_DIRECT` を付けると table を 1 つ引くだけで rule を読まず、付けなければ上の `fib_lookup()` と `fib6_lookup()` を通ります。
+
+Vinbero の lookup は次のように分かれます。印が立った family では、flags 0 の lookup が rule をたどります。
+
+| lookup | 呼ぶ経路 | flags | rule をたどるか |
+|---|---|---|---|
+| encap の外側 (`srv6_fib_lookup_encap()`) で、入口の vrf_id が 0 | H.Encaps、H.Insert、L2 headend、GTP headend、service proxy の戻り (End.AS / End.AD / End.AM) | 0 | たどる |
+| 同じ lookup で、入口の vrf_id が 0 以外 (tenant VRF の AC) | 同上 | `DIRECT \| TBID` (main table) | たどらない |
+| 同じ lookup で、TBID を使えない場合 | 上の vrf_id が 0 以外の経路すべて | 0 | たどる |
+| IPv6 の転送 | End、End.T、uN、uT、End.B6、End.M.GTP6.D と .E、IPv6 の decap 後の転送 (End.DT6 など)、service proxy の転送、BUM の複製と uplink probe (XDP と tc) | 0 | たどる |
+| IPv6 の隣接解決 | End.X、uA、End.X 系の USD | 0 | たどる |
+| IPv4 の転送 (`srv6_fib_lookup_and_update_v4()`) | End.DT4 など decap 後の IPv4、End.M.GTP4.E | 0 | たどる |
+
+TBID を使えないのは、kernel が `BPF_FIB_LOOKUP_TBID` を受け付けない場合、起動時の確認が失敗した場合、`internal.bpf.fib_lookup_tbid: "off"` の場合です。End.DT4 / DT6 / DT46 と End.T / uT は、SID に VRF を指定していればその VRF device を ifindex にして引き、VRF の table へは l3mdev rule が向けます。VRF を指定していない End.DT4 / DT6 / DT46 は入口の interface で引きます。
+
+1 回の lookup で増えるのは数十 ns です。`BPF_PROG_TEST_RUN` で `bpf_fib_lookup` だけを繰り返したところ、既定の rule だけの netns に比べて、rule をたどる lookup はおよそ 30 ns 長く、direct lookup は変わりませんでした。
+
+運用では次の点に注意してください。
+
+- 過去に VRF device か `ip rule` を作ったことのある node では、上の表で「たどる」経路が、一度も作ったことのない node より 1 packet あたり少し遅くなります。End.DT4 でテナントの VRF へ decap するには VRF device が要るので、VRF device を避ける必要はありません
+- node 間や実行間で転送性能を比べるときは、rule の履歴をそろえてください
+- 履歴の無い状態に戻せるのは、reboot か新しい netns だけです
+
 ### encap の next hop の neighbour
 
 外側の next hop の neighbour が未解決 (NO_NEIGH) のとき、XDP は encap したパケットを kernel へ渡して解決させます。enslave した入口から渡したパケットは kernel が VRF table で引くので、unreachable default で止まり、解決のきっかけになりません。L2 と service proxy の戻りはそのようなパケットを drop します。
