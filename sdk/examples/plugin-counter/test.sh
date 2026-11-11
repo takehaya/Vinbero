@@ -16,6 +16,8 @@ COMMON_DIR="${REPO_ROOT}/examples/common"
 
 source "${COMMON_DIR}/test_utils.sh"
 check_root
+# plugin_counter_map is read with bpftool below.
+resolve_bpftool || exit 1
 
 VINBEROD_BIN="${REPO_ROOT}/out/bin/vinberod"
 VINBERO_BIN="${REPO_ROOT}/out/bin/vinbero"
@@ -150,10 +152,10 @@ fi
 # plugin_counter_map is the plugin's private per-CPU counter — a second
 # independent check against bpftool.
 print_info "plugin_counter_map (plugin-private, read via bpftool):"
-MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
+MAP_ID=$(ip netns exec "$ns_router2" "$BPFTOOL_BIN" map show 2>/dev/null \
     | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
 if [ -n "$MAP_ID" ]; then
-    COUNTER_TOTAL=$(ip netns exec "$ns_router2" bpftool map dump id "$MAP_ID" 2>/dev/null \
+    COUNTER_TOTAL=$(ip netns exec "$ns_router2" "$BPFTOOL_BIN" map dump id "$MAP_ID" 2>/dev/null \
         | grep -Eo '"value": [0-9]+' | awk '{ s += $2 } END { print s+0 }')
     print_info "plugin_counter_map total=${COUNTER_TOTAL}"
     # The plugin aux sets increment=10, so with SLOT_PACKETS plugin
@@ -166,6 +168,9 @@ if [ -n "$MAP_ID" ]; then
         print_error "counter mismatch: got ${COUNTER_TOTAL}, expected ${EXPECTED}"
         FAILED=$((FAILED + 1))
     fi
+else
+    print_error "plugin_counter_map not found by ${BPFTOOL_BIN} map show"
+    FAILED=$((FAILED + 1))
 fi
 
 # ==========================================
