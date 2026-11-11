@@ -40,17 +40,19 @@ mv "$cni_path/vinbero-cni" "$cni_path/vinbero"
 
 declare -A pids=()
 cleanup() {
-    local rc=$?
+    local rc=$? sockets="" ns
     trap - EXIT
+    # Taken while the daemons still hold them; printed after the daemons stop.
     if ((rc != 0)); then
         for ns in "$PE1" "$PE2"; do
-            echo "--- BGP sockets in $ns"
-            ip netns exec "$ns" ss -tno '( sport = :179 or dport = :179 )' || true
+            sockets+="--- BGP sockets in $ns"$'\n'
+            sockets+=$(ip netns exec "$ns" ss -tno '( sport = :179 or dport = :179 )' 2>&1)$'\n' || true
         done
     fi
     for node in "${!pids[@]}"; do kill -TERM "${pids[$node]}" 2>/dev/null || true; done
     for node in "${!pids[@]}"; do wait "${pids[$node]}" 2>/dev/null || true; done
     if ((rc != 0)); then
+        printf '%s' "$sockets"
         # The BGP session events (peer up and down, connections closed
         # unused) start at the top of a log, where the tail below cuts.
         for log in "$work"/*.log; do echo "--- BGP peer events in $log"; grep -a 'Topic=Peer' "$log" || true; done
