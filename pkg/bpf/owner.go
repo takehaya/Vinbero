@@ -42,9 +42,9 @@ const (
 )
 
 // OwnerBGPVPN is the entry owner for a VPNv4 / VPNv6 prefix installed from
-// a BGP UPDATE. The (asn, rd) pair is sufficient to attribute the entry
-// back to the BGP session that learned it. Defined now; the receive path
-// that calls it is wired up in Phase 1d.
+// a BGP UPDATE. The applier calls it with an empty rd: it aggregates every
+// PE's path for a prefix into one trigger per VRF, so the trigger belongs to
+// no single RD.
 func OwnerBGPVPN(asn uint32, rd string) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:rd=%s", OwnerTagVersion, asn, rd))
 }
@@ -85,23 +85,6 @@ func OwnerBGPEVPNGroup(asn uint32) OwnerTag {
 // OwnerBGPEVPN owns the built-in EVPN FDB and peer entries across RDs.
 func OwnerBGPEVPN(asn uint32) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:evpn", OwnerTagVersion, asn))
-}
-
-// IsLegacyBGPVPNOwner reports whether tag is a pre-aggregation VPN owner
-// belonging to this node: the RD-scoped form OwnerBGPVPN produced when each
-// prefix was written per RD.
-//
-// It exists for the upgrade. Those entries persist in the pinned headend
-// maps, and the aggregating writer uses an RD-independent owner, so every
-// previously installed prefix would fail the cross-owner check and never
-// reinstall. Recognising the old shape lets the writer clear exactly its
-// own leftovers, and nothing else -- an operator's RPC-installed entry for
-// the same prefix must survive.
-func IsLegacyBGPVPNOwner(asn uint32, tag OwnerTag) bool {
-	prefix := fmt.Sprintf("bgp:%s:asn=%d:rd=", OwnerTagVersion, asn)
-	rd, ok := strings.CutPrefix(string(tag), prefix)
-	// An empty RD is the aggregating writer's own owner, not a legacy one.
-	return ok && rd != ""
 }
 
 // OwnerBGPMUP is the entry owner for a downlink H.Encaps headend installed from

@@ -31,7 +31,7 @@ func TestPurgeBGPHeadendsRemovesAnEarlierRunsEntries(t *testing.T) {
 		return &bpf.HeadendEntry{Mode: uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS), NumSegments: n, Segments: segs}
 	}
 	gone := []bpf.HeadendID{{VRF: 0, Prefix: "10.2.0.0/24"}, {VRF: 7, Prefix: "10.2.0.0/24"}, {VRF: 0, Prefix: "10.3.0.0/24"}, {VRF: 7, Prefix: "10.4.0.1/32"}}
-	gownr := []bpf.OwnerTag{bpf.OwnerBGPVPN(asn, ""), bpf.OwnerBGPVPN(asn, ""), bpf.OwnerBGPVPN(asn, "65100:9"), bpf.OwnerBGPMUP(asn, "65100:1")}
+	gownr := []bpf.OwnerTag{bpf.OwnerBGPVPN(asn, ""), bpf.OwnerBGPVPN(asn, ""), bpf.OwnerBGPVPN(asn, ""), bpf.OwnerBGPMUP(asn, "65100:1")}
 	for i, id := range gone {
 		if err := m.CreateHeadendV4In(id.VRF, id.Prefix, entry(), gownr[i]); err != nil {
 			t.Fatal(err)

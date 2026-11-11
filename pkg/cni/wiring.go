@@ -99,10 +99,6 @@ func (p *Plugin) Add(args *skel.CmdArgs) (*current.Result, error) {
 		HostVeth:    hostIf,
 		Address:     addr,
 	}
-	if err := p.checkOverlap(store, a); err != nil {
-		_ = p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData)
-		return nil, err
-	}
 	// Record before touching anything, so a DEL after a failed ADD finds
 	// what to undo.
 	if err := store.Put(a); err != nil {
@@ -224,35 +220,6 @@ func podAddress(r *current.Result) (netip.Prefix, []netip.Prefix, error) {
 		}
 	}
 	return addr, routes, nil
-}
-
-// checkOverlap refuses an address whose subnet overlaps a subnet another
-// VRF's live attachment uses on this node, as recorded in this network's
-// dataDir. The headend table vinberod encapsulates from is
-// shared by every VRF, so overlapping pod subnets in two VRFs would steal
-// each other's traffic.
-func (p *Plugin) checkOverlap(store *Store, a Attachment) error {
-	all, err := store.List()
-	if err != nil {
-		return err
-	}
-	mine := a.Address.Masked()
-	for _, o := range all {
-		if o.VRF == a.VRF || !o.Address.IsValid() {
-			continue
-		}
-		if theirs := o.Address.Masked(); theirs.Overlaps(mine) {
-			// A record can outlive its pod (a reboot, a DEL that never
-			// came); without its veth it occupies no subnet. A failed
-			// lookup counts as occupied.
-			if live, err := p.Net.HostVethExists(o.HostVeth); err == nil && !live {
-				continue
-			}
-			return fmt.Errorf("pod subnet %s of vrf %s overlaps %s of vrf %s (network %s); pod subnets must not overlap across VRFs",
-				mine, a.VRF, theirs, o.VRF, o.Network)
-		}
-	}
-	return nil
 }
 
 // Del runs CNI DEL. Every step treats "already gone" as done, so a DEL

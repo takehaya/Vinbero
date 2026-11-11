@@ -27,7 +27,7 @@ pod netns                              node (host netns)
 - host veth は `DeviceAttach` で XDP / TC に載せ、`VrfAcAdd` で VRF の ingress AC にします
 - MTU は既定で 1436 です。1500 の underlay から外側 IPv6 header (40) と SID 1 つの SRH (8 + 16) を引いた値です
 
-pod から別 node の pod への packet は host veth の XDP で headend (`headend_v4_map`、BGP で学んだ /32) に当たり、SRv6 で encap されて underlay へ redirect されます。host veth は VRF の AC なので、外側の IPv6 ヘッダの経路は VRF table ではなく main table で引きます。相手の node では End.DT4 が decap し、VRF table の /32 と permanent neighbour で host veth へ redirect します。
+pod から別 node の pod への packet は host veth の XDP で、pod の VRF の headend entry (`headend_v4_map`、BGP で学んだ /32) に当たり、SRv6 で encap されて underlay へ redirect されます。host veth は VRF の AC なので、外側の IPv6 ヘッダの経路は VRF table ではなく main table で引きます。相手の node では End.DT4 が decap し、VRF table の /32 と permanent neighbour で host veth へ redirect します。
 
 ## network configuration
 
@@ -55,7 +55,7 @@ pod から別 node の pod への packet は host veth の XDP で headend (`hea
 | `maxPrefixes` | 0 (無制限) | binding を作るときの広告数の上限 |
 | `deviceMode` | `generic` | host veth の XDP attach mode。`generic` / `driver` |
 | `mtu` | 1436 | veth 両端の MTU |
-| `dataDir` | `/var/lib/vinbero/cni` | attachment の記録を置く directory。subnet の重なりの検査はこの中の記録を見るので、node 上のすべての NAD で同じ値にします |
+| `dataDir` | `/var/lib/vinbero/cni` | attachment の記録を置く directory。記録は container ID と interface 名ごとの file で、DEL と CHECK が読みます |
 | `ipam` | 必須 | 委譲先の IPAM plugin の設定 |
 
 binding の扱いは次のとおりです。
@@ -70,19 +70,18 @@ binding の扱いは次のとおりです。
 ADD は次の順に進みます。
 
 1. IPAM ADD で IPv4 アドレスを得ます
-2. 別の VRF の pod が同じ node で使っている subnet と重なれば拒否します (後述)
-3. attachment を `dataDir` に記録します。以降で失敗したときは DEL と同じ手順で巻き戻します
-4. veth を作り、pod 側を設定します
-5. VRF が無ければ `VrfCreate` を呼び、必要なら `VrfBgpBind` を呼びます
-6. host veth を VRF に enslave し、`VrfAcAdd`、`DeviceAttach` を呼びます
-7. 最後に VRF table へ /32 と neighbour を入れます。veth が data plane に載ってから広告が出ます
+2. attachment を `dataDir` に記録します。以降で失敗したときは DEL と同じ手順で巻き戻します
+3. veth を作り、pod 側を設定します
+4. VRF が無ければ `VrfCreate` を呼び、必要なら `VrfBgpBind` を呼びます
+5. host veth を VRF に enslave し、`VrfAcAdd`、`DeviceAttach` を呼びます
+6. 最後に VRF table へ /32 と neighbour を入れます。veth が data plane に載ってから広告が出ます
 
 DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`DeviceDetach`、`VrfAcRemove`、veth の削除、IPAM DEL を行います。どの手順も「既に無い」を成功として扱います。記録が無い場合 (ADD が途中で止まった、DEL の再実行) も、veth の名前は導出できるので data plane 側は片付きます。途中の手順が失敗すると記録を残してエラーを返します。`VrfAcRemove` が失敗した場合は veth の削除と IPAM DEL を行いません。vinberod に届かない間は DEL も失敗します。
 
 失敗した DEL が片付くかどうかは runtime によります。DEL を再実行する runtime なら、次の DEL で残りを片付けます。Multus の thick plugin は delegate の DEL の失敗を runtime に返さないので、再実行は来ません。この場合 veth と /32 は pod の netns とともに消えますが、次のものが残ります。
 
 - IPAM の lease。whereabouts なら reconciler が回収します。host-local には回収の仕組みがありません
-- `dataDir` の attachment の記録。veth が無いので、subnet の重なりの検査では無視されます
+- `dataDir` の attachment の記録。ほかの pod の ADD、DEL、CHECK は読まないので、通信にも配線にも関係しません。不要なら file を消します
 - vinberod が持つ attach の記録 (`DeviceDetach` が失敗したとき)。interface はもう無いので通信には関係せず、vinberod の次の再起動で消えます
 - vinberod が持つ AC の記録 (`VrfAcRemove` が失敗したとき)。これも通信には関係しません。再起動後も `state.json` に残り、reconcile で飛ばされます (warning は 1 度だけ出ます)。消すには `vbctl vrf ac-remove` を実行します
 
@@ -203,12 +202,36 @@ spec:
 
 pod は `k8s.v1.cni.cncf.io/networks: tenant-a` の annotation で接続します。whereabouts は cluster 全体でアドレスを払い出すので、node をまたいで同じ range を使えます。host-local は node ごとに重ならない range を書きます (`routes` に cluster 全体の range を足すと、pod は別 node の pod にも net1 で届きます)。
 
+## テナントの分離
+
+NAD ごとに VRF が分かれ、pod の通信は次のように VRF の中に閉じます。
+
+- pod の /32 は NAD の `tableId` の VRF table に入り、permanent neighbour は pod ごとの host veth に付きます
+- host veth はその VRF の AC なので、pod が net1 に送った packet は、その VRF の headend entry だけで引かれます。一致しなければ、global VRF も別の VRF も引かずに kernel へ渡し、kernel はその VRF table を引きます。table に無い宛先は unreachable default で止まります。kernel が `BPF_FIB_LOOKUP_TBID` を受け付けない場合と `internal.bpf.fib_lookup_tbid: "off"` の場合は unreachable default が入らず、table に無い宛先は main table へ進みます ([vrf.md](vrf.md#encap-の外側の経路))
+- 別の node の pod の /32 は、受信した経路の RT がその VRF の import RT に一致したときだけ、その VRF の headend entry になります
+
+そのため pod が net1 で届くのは、同じ VRF の pod (同じ node なら VRF table で、別の node なら SRv6 で) と、その VRF が import した経路の宛先です。VRF table が unreachable default で終わらない上の場合は、main table の宛先にも届きます。NET_ADMIN を持つ pod が net1 経由の経路を足しても、別の VRF の pod へは encap されません。tenant の AC から来た packet は node の local SID も使えないので、別の VRF の End.DT4 の SID を宛先にしても decap されません ([vrf.md](vrf.md#local-sid-と-ac))。
+
+### 同じ subnet を別の NAD で使う
+
+VRF が違えば、NAD どうしで subnet が重なっていても、同じアドレスが 2 つの tenant にあっても構いません。同じ node でも別の node でも、それぞれの pod は自分の VRF の pod にだけ届きます。2 つ目の NAD では次を 1 つ目と変えます。
+
+- `vrf` と `tableId`
+- RD。pod の /32 は VRF ごとに、その VRF の RD で広告されます。2 つの VRF が同じ RD で同じ /32 を広告すると、BGP では 1 つの経路になり、片方が届かなくなります
+- route target。import RT が相手の VRF の export RT と重なると、相手の経路も取り込みます
+- IPAM の pool。whereabouts は range ごとに 1 つの pool で払い出すので、`ipam` に NAD ごとの `network_name` を書いて pool を分けます。host-local は network の `name` ごとに lease を持つので、`name` が違えば別々に払い出します
+
+```json
+"ipam": {"type": "whereabouts", "range": "10.100.0.0/16", "network_name": "tenant-b"}
+```
+
+同じ VRF の中でアドレスが重ならないようにするのは IPAM の役目で、plugin は検査しません。同じ VRF を指す NAD を複数作る場合は、range が重ならないようにします。
+
 ## 制約
 
 - IPv4 だけです。IPAM が IPv6 を返すと ADD は失敗します
 - L3 mode だけです。EVPN L2 mode は未実装です
-- plugin は同じ node の記録 (veth が残っているもの) どうしで subnet の重なりを拒否します。NAD 間で subnet を重ねないでください
-- 別の node の pod の /32 は、受信した PE がその VRF の headend entry として入れ、pod の packet は pod の VRF の entry で引かれます。NET_ADMIN を持つ pod が net1 経由の経路を足しても、別の VRF の pod の /32 へは encap されません
+- 1 つの pod に、同じ subnet (または同じ `routes` の宛先) を持つ 2 つの NAD は付けられません。pod の経路表は 1 つなので、2 つ目の ADD は同じ宛先の経路を足せずに失敗します。subnet が重なるだけで同じでなければ ADD は通りますが、重なる範囲の宛先には prefix の長い方の network が使われます
 - vinberod を再起動すると、network configuration から作った binding は消えます。binding は config で宣言してください。plugin が足した AC と VRF の vrf_id は state file から戻るので、pod は再起動後も同じ VRF に分類されます
 - node を再起動すると、Multus が CNI の設定を書き直す前に kubelet が pod の sandbox を作り直すことがあります。その pod は primary network だけで Running になり、net1 がありません。`k8s.v1.cni.cncf.io/network-status` annotation は古い値のままなので、再起動後は pod の中で net1 を確認し、無ければ pod を作り直してください
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します

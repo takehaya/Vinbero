@@ -8,7 +8,7 @@
 
 control plane (Go、in-memory) は何を install するかを決め、data plane (eBPF マップと kernel FIB) がそれを高速に実行します。control plane のテーブルは BGP 経路や RPC を受けて方針を保持し、その結果を data plane のテーブルへ書き込みます。
 
-転送テーブルの持ち主は 2 つです。kernel が L3 の per-VRF FIB を持ち、eBPF が SRv6 service テーブル (local SID、headend、F-TEID) と L2 テーブル (FDB、bridge domain) を持ちます。Vinbero は per-VRF の L3 経路表を eBPF 側に持たず、End.DT4/DT6/DT46 で kernel VRF へ渡したあとの L3 lookup は kernel に任せます。BGP で学んだ IPv6 unicast 経路も kernel FIB へ注入します (`pkg/fib`)。
+転送テーブルの持ち主は 2 つです。kernel が L3 の per-VRF FIB を持ち、eBPF が SRv6 service テーブル (local SID、headend、F-TEID) と L2 テーブル (FDB、bridge domain) を持ちます。eBPF 側の VRF ごとの表は、どの SID へ encap するかを決める headend と F-TEID の表です。VRF の中の宛先へ届ける L3 lookup (End.DT4/DT6/DT46 で kernel VRF へ渡したあとと、headend に一致しなかったパケット) は kernel に任せます。BGP で学んだ IPv6 unicast 経路も kernel FIB へ注入します (`pkg/fib`)。
 
 ## 転送の lookup chain
 
@@ -48,7 +48,7 @@ encap 対象のパケットは `headend_v4/v6_map` を {vrf_id, prefix} で引�
 
 - global: ノード全体で 1 つ。tenant の次元を持ちません。`sid_function_map`、`sr_policy_map` がこれです。local SID 空間はノード共通です。local SID は vrf_id 0 の入口から来たパケットだけが使えます。
 - VRF (vrf_id): routing/forwarding instance の identity です。control plane では `pkg/vrf` の一級オブジェクトが name と数値 vrf_id (0 = global/underlay) と ingress membership ({interface, VLAN}) を持ちます。data plane では front door が ingress access circuit を vrf_id に分類し、headend の lookup (`headend_v4/v6_map`) と MUP F-TEID lookup (`mup_uplink_v4/v6_map`) がその vrf_id をキーに含めるので、同じ宛先 prefix や同じ N3 endpoint と TEID 空間を複数の VRF が使っても衝突しません。BGP の RT policy (`vrfbgp`)、MUP、EVPN は name で VRF に紐付く facet です。オブジェクト全体の設計は [vrf.md](vrf.md) を参照してください。
-- kernel VRF: VRF の L3 facet です。End.DT4/DT6/DT46 が aux の vrf_ifindex で kernel VRF へ渡し、per-VRF の L3 FIB は kernel が持ちます。eBPF 側はどの VRF へ渡すかだけを決めます。この kernel device は VRF object の facet として `vrf.Manager` が lifecycle を持ち、1 つの VRF が vrf_id と table_id と ifindex を併せ持ちます。作成と削除は `vbctl vrf create` / `vbctl vrf delete` または config の `vrfs.entries[].table_id` で、netlink 操作と JSON state への永続化は `pkg/netresource` が機構レイヤとして担います。削除は SID 参照、ingress AC、vrf-bgp binding のいずれかが残っている間は拒否します。config から entry を消しても device は消えません (config は加算的で、削除は明示的な `vbctl vrf delete` です)。data plane の lookup キーは従来どおり ifindex です (kernel の要求)。Vinbero が作るか adopt した device の table には unreachable default を足すので、per-VRF の lookup は table に無い宛先で main table へ進みません。End.DT4/DT6/DT46 が decap したパケットも、VRF table に無い宛先なら drop します。
+- kernel VRF: VRF の L3 facet です。End.DT4/DT6/DT46 が aux の vrf_ifindex で kernel VRF へ渡し、per-VRF の L3 FIB は kernel が持ちます。eBPF 側はどの VRF へ渡すかだけを決めます。この kernel device は VRF object の facet として `vrf.Manager` が lifecycle を持ち、1 つの VRF が vrf_id と table_id と ifindex を併せ持ちます。作成と削除は `vbctl vrf create` / `vbctl vrf delete` または config の `vrfs.entries[].table_id` で、netlink 操作と JSON state への永続化は `pkg/netresource` が機構レイヤとして担います。削除は ingress AC、vrf-bgp binding、bridge facet、その vrf_id の headend entry、SID 参照のいずれかが残っている間は拒否します ([vrf.md](vrf.md#削除))。config から entry を消しても device は消えません (config は加算的で、削除は明示的な `vbctl vrf delete` です)。data plane の lookup キーは ifindex です (kernel の要求)。Vinbero が作るか adopt した device の table には unreachable default を足すので、per-VRF の lookup は table に無い宛先で main table へ進みません。End.DT4/DT6/DT46 が decap したパケットも、VRF table に無い宛先なら drop します。
 - bridge domain (bd): L2 の tenant です。`fdb_map` を {bd, MAC} で引き、BUM は bd 単位で flood します。
 
 ## default と explicit という共通パターン

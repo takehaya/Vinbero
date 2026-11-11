@@ -241,7 +241,8 @@ the plugin creates a veth per pod, puts the host end on the XDP data plane
 through the node's `vinberod`, and installs the pod's /32 into the VRF table
 so `vinberod` advertises it as VPNv4. Pods on other nodes are reached over
 SRv6 (End.DT4). The primary CNI keeps handling ClusterIP, DNS and
-NetworkPolicy.
+NetworkPolicy. Pods in different VRFs do not reach each other, so networks
+in different VRFs may use the same subnet (see cni.md for the conditions).
 
 1. Give every node an IPv6 underlay: a loopback address, routes to the other
    nodes' loopbacks and locators, and IP forwarding enabled.

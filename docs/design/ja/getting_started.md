@@ -214,7 +214,7 @@ vinbero stats slot show --type endpoint       # builtin + plugin の slot 毎
 vinbero stats slot show --plugin-only --top 10 # 人気の plugin slot
 ```
 
-`hv4` / `hv6` の各 subcommand は `--vrf` を省略すると global VRF を扱います。`list` と `flush` に `--all-vrfs` を付けると全 VRF です。一覧の 2 列目が VRF です (global VRF は `global`)。headend の entry を global VRF 以外に作るには、既存の VRF を `--vrf` で指定します。存在しない VRF は拒否します。data plane は global VRF の entry だけで encap するので、それ以外の VRF の entry は保存と一覧だけです ([vrf.md](vrf.md#headend-entry-の-vrf))。
+`hv4` / `hv6` の各 subcommand は `--vrf` を省略すると global VRF を扱います。`list` と `flush` に `--all-vrfs` を付けると全 VRF です。一覧の 2 列目が VRF です (global VRF は `global`)。headend の entry を global VRF 以外に作るには、既存の VRF を `--vrf` で指定します。存在しない VRF は拒否します。data plane はパケットを、入ってきた AC の VRF の entry で引きます。AC の無い口から入るパケットは global VRF の entry を使います ([vrf.md](vrf.md#headend-entry-の-vrf))。
 
 ```bash
 vinbero hv4 create --trigger-prefix 10.0.0.0/24 --src-addr fc00::1 --segments fc00::100 --vrf tenant-a

@@ -12,7 +12,10 @@ PE2=cnil3-pe2
 POD1=cnil3-pod1   # on PE1
 POD1B=cnil3-pod1b # on PE1
 POD2=cnil3-pod2   # on PE2
-NAMESPACES=("$PE1" "$PE2" "$POD1" "$POD1B" "$POD2")
+# tenant-b uses tenant-a's subnets: POD1X gets POD1's address, POD2X POD2's.
+POD1X=cnil3-pod1x # on PE1
+POD2X=cnil3-pod2x # on PE2
+NAMESPACES=("$PE1" "$PE2" "$POD1" "$POD1B" "$POD2" "$POD1X" "$POD2X")
 VINBEROD_BIN="$REPO_ROOT/out/bin/vinberod"
 VINBERO_BIN="$REPO_ROOT/out/bin/vinbero"
 CNI_BIN="$REPO_ROOT/out/bin/vinbero-cni"

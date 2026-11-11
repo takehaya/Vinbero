@@ -253,7 +253,7 @@ vinbero plugin aux get --map-type endpoint --slot 32 --index "$IDX"
 vinbero plugin aux free --map-type endpoint --slot 32 --index "$IDX"
 ```
 
-独立 aux は **daemon 再起動で消失**します (`sid_function_map` に紐づかない index は `RecoverAuxIndices` の復元対象外)。`pin_maps: true` で永続化される対象にも含まれていません。恒久化が必要な場合は `--plugin-aux-json` 経由で SID と一体で管理するか、外部コントローラから起動時に再投入してください。詳しくは [`persistence.md`](persistence.md) を参照。
+独立 aux は、`pin_maps: false` では **daemon 再起動で消失**します。`pin_maps: true` では `aux_owner_map` が pin されるので、`RecoverAuxIndices` が owner と index の使用状況を復元し、独立 aux も再起動を跨いで残ります。不要になった index は `vbctl plugin aux free` か `plugin aux purge` で解放します。詳しくは [`persistence.md`](persistence.md) を参照。
 
 ### Go SDK からのタイプ付アクセス (`sdk/go/plugin`)
 

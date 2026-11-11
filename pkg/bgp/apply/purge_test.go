@@ -71,7 +71,6 @@ func (m *purgeMaps) DeleteHeadendV6In(v uint32, p string, owner bpf.OwnerTag) er
 func TestPurgeBuiltinHeadends(t *testing.T) {
 	const asn = 65000
 	vpn := bpf.OwnerBGPVPN(asn, "")
-	legacy := bpf.OwnerBGPVPN(asn, "65000:1")
 	mup := bpf.OwnerBGPMUP(asn, "65000:7")
 	keep := map[bpf.HeadendID]bpf.OwnerTag{
 		{Prefix: "10.9.0.0/24"}:         bpf.OwnerRPC,
@@ -85,7 +84,6 @@ func TestPurgeBuiltinHeadends(t *testing.T) {
 	gone4 := map[bpf.HeadendID]bpf.OwnerTag{
 		{Prefix: "10.0.0.0/24"}:         vpn,
 		{VRF: 7, Prefix: "10.0.0.0/24"}: vpn,
-		{VRF: 8, Prefix: "10.1.0.0/24"}: legacy,
 		{Prefix: "10.2.0.1/32"}:         mup,
 	}
 	m := &purgeMaps{v4: map[bpf.HeadendID]bpf.OwnerTag{}, v6: map[bpf.HeadendID]bpf.OwnerTag{
