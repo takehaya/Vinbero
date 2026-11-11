@@ -83,6 +83,18 @@ start_vinbero() {
     return 0
 }
 
+# restart_vinbero <ns> <config> <log> <bind_addr> <pid> <signal>: stops the
+# vinberod started by this shell with the signal (TERM for a normal stop,
+# KILL for a crash), waits for it to exit, and starts it again on the same
+# config, logging to <log>. Sets VINBERO_LAST_PID.
+restart_vinbero() {
+    local ns="$1" config="$2" log="$3" addr="$4" pid="$5" sig="$6"
+    kill -"$sig" "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    start_vinbero "$ns" "$config" "$log" || return 1
+    wait_vinbero_ready "$ns" "$addr" 15
+}
+
 # Wait for vinbero's health endpoint to respond.
 # Polls /health every second until ready or timeout.
 # Usage: wait_vinbero_ready <namespace> <bind_addr> [timeout_sec]

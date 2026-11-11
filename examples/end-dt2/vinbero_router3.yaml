@@ -13,6 +13,9 @@ internal:
     add_caller: true
 
 settings:
+  # The L2 headend circuits this daemon creates are saved here, apart
+  # from the other daemons of the example.
+  state_path: /tmp/vinbero_end_dt2_router3_state.json
   entries:
     sid_function:
       capacity: 1024

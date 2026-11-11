@@ -86,6 +86,10 @@ sudo ip netns exec hl2-router2 tcpdump -i hl2-rt2rt1 -n -v ip6
 
 SRv6 Routing Header (RT6) と Next Header 143 (Ethernet) が確認できます。
 
+### 再起動
+
+各 router は作った HeadendL2 エントリを自分の state ファイル (`settings.state_path`、`/tmp/vinbero_headend_l2_router{1,3}_state.json`) に保存します。vinberod を止めるか kill して同じ config で起動し直すと、登録し直さなくてもエントリが戻り、ping が通ります。`test.sh` は両方 (router1 は SIGTERM、router3 は SIGKILL) を行い、再起動の前に消したエントリが戻らないことも確かめます。
+
 ### 5. 環境のクリーンアップ
 ```bash
 sudo ./teardown.sh

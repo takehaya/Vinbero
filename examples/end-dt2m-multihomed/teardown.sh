@@ -11,3 +11,5 @@ for ns in mh-host1 mh-host2 mh-pe1 mh-pe2 mh-pe3 mh-p; do
     delete_netns "$ns"
 done
 print_success "End.DT2M multi-homed topology removed"
+# The daemons' state files (their L2 headend circuits).
+rm -f /tmp/vinbero_end_dt2m_multihomed_*_state.json

@@ -9,6 +9,9 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
+# A state file left by an earlier run would bring its L2 headend circuits back.
+rm -f /tmp/vinbero_end_dt2_*_state.json
+
 VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
 VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG_RT1="${SCRIPT_DIR}/vinbero_router1.yaml"

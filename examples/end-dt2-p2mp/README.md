@@ -113,6 +113,14 @@ sudo ip netns exec p2m-host1 ping -c 3 -I p2m-h1rt1.100 172.16.100.4
 sudo ip netns exec p2m-host2 ping -c 3 -I p2m-h2rt3.100 172.16.100.3
 ```
 
+### Restart
+
+`test.sh` runs PE1 with pinned maps (`/sys/fs/bpf/vinbero_p2mp_pe1`) and its
+own state file. At the end it kills PE1's vinberod and starts it again: the
+runtime-attached AC and the HeadendL2 entry come back from the state file,
+the BD peers from the pinned maps, and the BUM copies and the ping work with
+nothing configured again.
+
 ### 5. Clean up
 
 ```bash

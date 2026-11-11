@@ -13,6 +13,9 @@ internal:
     add_caller: true
 
 settings:
+  # The L2 headend circuits this daemon creates are saved here, apart
+  # from the other daemons of the example.
+  state_path: /tmp/vinbero_end_dt2m_multihomed_pe3_state.json
   enable_stats: true
   entries:
     sid_function:

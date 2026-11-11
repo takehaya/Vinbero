@@ -76,6 +76,7 @@ encap 対象のパケットは `headend_v4/v6_map` を {vrf_id, prefix} で引�
 | sr_policy_map | policy_id | transport SID list | global | eBPF | SrPolicyService / BGP applier |
 | ingress_vrf_map | {ifindex, vlan} | vrf_id | VRF (vrf_id) | eBPF | VrfService / config (`vrf.Manager`) |
 | mup_uplink_v4/v6_map | {vrf_id, endpoint, TEID prefix} (LPM) | direct SID | VRF (vrf_id) | eBPF | BGP applier (MUP T2ST) |
+| headend_l2_map | {ifindex, vlan} | H.Encaps.L2 エントリ (bd、direct encap の segment) | port | eBPF | HeadendL2Service (state ファイルに保存し、再起動時に戻す) |
 | fdb_map | {bd, MAC} | bd_peer | bridge domain | eBPF | FdbService / BGP applier (EVPN RT2) |
 | bd_peer_map ほか | bd / peer | End.DT2U/DT2M peer、flood、DF | bridge domain | eBPF | BdPeerService / BGP applier (EVPN) |
 | kernel VRF FIB | inner dst | next hop | kernel VRF | kernel | kernel (decap 後) + `pkg/fib` (BGP IPv6 unicast) |

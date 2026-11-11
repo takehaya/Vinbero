@@ -13,3 +13,5 @@ export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-hl2-}"
 source "${SCRIPT_DIR}/../common/topologies/three_router.sh"
 
 teardown_three_router_topology
+# The daemons' state files (their L2 headend circuits).
+rm -f /tmp/vinbero_headend_l2_*_state.json
