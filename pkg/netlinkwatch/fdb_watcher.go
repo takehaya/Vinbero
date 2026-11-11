@@ -170,14 +170,15 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 		_ = ns.Close()
 		return err
 	}
-	w.replayFDB()
+	listing := netlinksub.NewListing(w.logger, "FDB")
+	again := listing.Result(w.replayFDB())
 	w.mu.Lock()
 	w.started = true
 	w.mu.Unlock()
 
 	w.wg.Go(func() {
 		defer func() { _ = ns.Close() }()
-		w.follow(ctx, ns, updates, stop)
+		w.follow(ctx, ns, updates, stop, listing, again)
 	})
 
 	// Start aging timer if configured
@@ -212,22 +213,23 @@ func (w *FDBWatcher) subscribeFDB() (<-chan netlink.NeighUpdate, chan struct{}, 
 // replayFDB delivers the existing FDB entries of the registered bridges as
 // adds. It lists them with a request of its own: the library's ListExisting
 // would send the request to every other subscriber of the neighbour group
-// (netlinksub).
-func (w *FDBWatcher) replayFDB() {
+// (netlinksub). What an interrupted dump returned is delivered too, and the
+// error is returned for a retry.
+func (w *FDBWatcher) replayFDB() error {
 	neighs, err := w.neighList(0, unix.AF_BRIDGE)
-	if err != nil {
-		w.logger.Warn("list the existing FDB; its MACs reach fdb_map as the bridges learn them again", zap.Error(err))
-		return
-	}
 	for i := range neighs {
 		w.handleNeighUpdate(netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH, Neigh: neighs[i]})
 	}
+	if err != nil {
+		return fmt.Errorf("list the existing FDB: %w", err)
+	}
+	return nil
 }
 
-// follow applies the subscription's updates until the watcher stops,
-// subscribing again (and replaying the FDB) in ns each time the subscription
-// ends.
-func (w *FDBWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-chan netlink.NeighUpdate, stop chan struct{}) {
+// follow applies the subscription's updates until the watcher stops. It
+// subscribes again in ns each time the subscription ends and replays the FDB
+// then, and repeats a replay that failed when again fires.
+func (w *FDBWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-chan netlink.NeighUpdate, stop chan struct{}, listing *netlinksub.Listing, again <-chan time.Time) {
 	if err := enterNetns(ns); err != nil {
 		w.logger.Warn("FDB watcher: cannot enter the network namespace it watches; a resubscribe may watch another", zap.Error(err))
 	}
@@ -240,20 +242,28 @@ func (w *FDBWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-ch
 		close(quit)
 	}()
 	for {
-		if !w.processUpdates(ctx, updates) {
+		select {
+		case <-quit:
 			close(stop)
 			go drain(updates)
 			return
+		case <-again:
+			again = listing.Result(w.replayFDB())
+		case update, ok := <-updates:
+			if ok {
+				w.handleNeighUpdate(update)
+				continue
+			}
+			close(stop)
+			if !w.subSt.Again(quit, func() error {
+				var err error
+				updates, stop, err = w.subscribeFDB()
+				return err
+			}) {
+				return
+			}
+			again = listing.Result(w.replayFDB())
 		}
-		close(stop)
-		if !w.subSt.Again(quit, func() error {
-			var err error
-			updates, stop, err = w.subscribeFDB()
-			return err
-		}) {
-			return
-		}
-		w.replayFDB()
 	}
 }
 
@@ -605,24 +615,6 @@ func (w *FDBWatcher) withdrawAged(aged []bpf.AgedFdbEntry) {
 		w.notifyMAC(sinks, a.BDID, a.MAC, false)
 	}
 	w.logger.Info("FDB aging: deleted stale entries", zap.Int("count", len(aged)))
-}
-
-// processUpdates applies updates until the subscription ends (true) or the
-// watcher stops (false).
-func (w *FDBWatcher) processUpdates(ctx context.Context, updates <-chan netlink.NeighUpdate) bool {
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-w.done:
-			return false
-		case update, ok := <-updates:
-			if !ok {
-				return true
-			}
-			w.handleNeighUpdate(update)
-		}
-	}
 }
 
 func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {

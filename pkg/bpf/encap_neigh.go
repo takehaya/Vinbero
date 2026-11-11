@@ -1231,7 +1231,7 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 			// as having got it back.
 			carrier = carrierState{}
 			clear(rearm)
-			if k.resyncCarrier(carrier) {
+			if k.resyncCarrier(carrier, rearm) {
 				pending()
 			}
 		case <-k.wake:
@@ -1249,10 +1249,11 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 	}
 }
 
-// resyncCarrier records in c the carrier of every device and queues the
-// re-probe of the next hops on each device up with its carrier, as a carrier
-// that came back would. It reports whether one was queued.
-func (k *EncapNeighKeeper) resyncCarrier(c carrierState) bool {
+// resyncCarrier records in c the carrier of every device and, as a carrier
+// that came back would, queues the re-probe of the next hops on each device
+// up with its carrier and opens its window in rearm. It reports whether one
+// was queued.
+func (k *EncapNeighKeeper) resyncCarrier(c carrierState, rearm map[int32]time.Time) bool {
 	links, err := k.linkList()
 	if err != nil {
 		k.logger.Debug("list devices for the carrier state", zap.Error(err))
@@ -1265,6 +1266,7 @@ func (k *EncapNeighKeeper) resyncCarrier(c carrierState) bool {
 		c[int32(a.Index)] = up
 		if up && k.hasNexthopsOn(a.Index) {
 			k.carrierUp(uint32(a.Index))
+			rearm[int32(a.Index)] = time.Now().Add(encapNeighCarrierWindow)
 			queued = true
 		}
 	}

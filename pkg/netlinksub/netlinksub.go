@@ -143,3 +143,45 @@ func (s *State) Again(stop <-chan struct{}, subscribe func() error) bool {
 		return true
 	}
 }
+
+// Listing follows a listing of the existing state that a (re)subscribe is
+// followed by: one that fails, or returns only part of the state (a dump the
+// kernel interrupted), is tried again after the same waits as a subscribe,
+// and its failure is logged when it changes.
+type Listing struct {
+	name   string
+	logger *zap.Logger
+
+	failure string
+	delay   time.Duration
+}
+
+// NewListing returns the Listing called name ("FDB", ...), which the log
+// lines carry.
+func NewListing(logger *zap.Logger, name string) *Listing {
+	return &Listing{name: name, logger: logger}
+}
+
+// Result records the outcome of a listing and returns the channel that
+// fires for the next attempt, or nil when it succeeded. It is called from
+// the owner's loop only.
+func (l *Listing) Result(err error) <-chan time.Time {
+	if err == nil {
+		if l.failure != "" {
+			l.logger.Info("netlink listing complete after a retry", zap.String("listing", l.name))
+		}
+		l.failure, l.delay = "", 0
+		return nil
+	}
+	if l.delay == 0 {
+		l.delay = MinDelay
+	} else {
+		l.delay = min(2*l.delay, MaxDelay)
+	}
+	if text := err.Error(); text != l.failure {
+		l.failure = text
+		l.logger.Warn("netlink listing incomplete; retrying",
+			zap.String("listing", l.name), zap.Duration("retry_in", l.delay), zap.Error(err))
+	}
+	return time.After(l.delay)
+}

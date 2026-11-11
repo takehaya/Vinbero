@@ -51,6 +51,11 @@ type RouteWatcher struct {
 	// removed since, so a resync can remove the ones whose route went away
 	// while the subscription was down. Guarded by mu.
 	added map[uint32]map[netip.Prefix]struct{}
+	// regGen numbers each table's registration, so a resync that read a
+	// table under one registration delivers nothing once it is replaced.
+	// Guarded by mu.
+	regGen  map[uint32]uint64
+	nextGen uint64
 	// subscribe opens the route event stream and routeList lists a table;
 	// tests replace them.
 	subscribe func(ch chan<- netlink.RouteUpdate, done <-chan struct{}, options netlink.RouteSubscribeOptions) error
@@ -74,6 +79,7 @@ func NewRouteWatcher(sink RouteSink, logger *zap.Logger) *RouteWatcher {
 		logger:    logger.Named("route.watch"),
 		watched:   make(map[uint32]map[int]struct{}),
 		added:     make(map[uint32]map[netip.Prefix]struct{}),
+		regGen:    make(map[uint32]uint64),
 		subscribe: netlink.RouteSubscribeWithOptions,
 		routeList: listTable,
 		done:      make(chan struct{}),
@@ -134,6 +140,8 @@ func (w *RouteWatcher) RegisterTable(table uint32, protocols []string) error {
 	}
 	w.mu.Lock()
 	w.watched[table] = set
+	w.nextGen++
+	w.regGen[table] = w.nextGen
 	w.mu.Unlock()
 	w.logger.Info("registered VRF table for route redistribution",
 		zap.Uint32("table", table), zap.Strings("protocols", protocols))
@@ -145,6 +153,7 @@ func (w *RouteWatcher) UnregisterTable(table uint32) {
 	w.mu.Lock()
 	delete(w.watched, table)
 	delete(w.added, table)
+	delete(w.regGen, table)
 	w.mu.Unlock()
 }
 
@@ -193,8 +202,9 @@ func (w *RouteWatcher) subscribeRoutes() (<-chan netlink.RouteUpdate, chan struc
 }
 
 // follow resyncs the tables, then forwards the subscription's updates until
-// the watcher stops, subscribing again and resyncing in ns each time the
-// subscription ends.
+// the watcher stops. It subscribes again in ns each time the subscription
+// ends and resyncs then, and repeats a resync that failed when its retry
+// fires.
 func (w *RouteWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-chan netlink.RouteUpdate, stop chan struct{}) {
 	if err := enterNetns(ns); err != nil {
 		w.logger.Warn("route watcher: cannot enter the network namespace it watches; a resync may list another", zap.Error(err))
@@ -207,37 +217,52 @@ func (w *RouteWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-
 		}
 		close(quit)
 	}()
+	listing := netlinksub.NewListing(w.logger, "routes")
+	again := listing.Result(w.resync())
 	for {
-		if err := w.resync(); err != nil {
-			w.logger.Warn("list the routes of the redistributed tables; a missed route reaches the sinks with its next update", zap.Error(err))
-		}
-		if !w.processUpdates(ctx, updates) {
+		select {
+		case <-quit:
 			close(stop)
 			go drain(updates)
 			return
-		}
-		close(stop)
-		if !w.subSt.Again(quit, func() error {
-			var err error
-			updates, stop, err = w.subscribeRoutes()
-			return err
-		}) {
-			return
+		case <-again:
+			again = listing.Result(w.resync())
+		case update, ok := <-updates:
+			if ok {
+				w.handleRouteUpdate(update)
+				continue
+			}
+			close(stop)
+			if !w.subSt.Again(quit, func() error {
+				var err error
+				updates, stop, err = w.subscribeRoutes()
+				return err
+			}) {
+				return
+			}
+			again = listing.Result(w.resync())
 		}
 	}
 }
 
-// resync delivers every redistributed route of the watched tables as added,
-// and as removed each prefix delivered as added whose route is gone.
+// resync delivers as removed each prefix of a watched table delivered as
+// added whose route is gone, then every redistributed route of the table as
+// added: removals first, so a prefix cap (max_prefixes) frees its room
+// before the adds. A table whose listing fails is left as it is, and the
+// error is returned for a retry.
 func (w *RouteWatcher) resync() error {
+	type reg struct {
+		protos map[int]struct{}
+		gen    uint64
+	}
 	w.mu.RLock()
-	tables := make(map[uint32]map[int]struct{}, len(w.watched))
+	tables := make(map[uint32]reg, len(w.watched))
 	for t, p := range w.watched {
-		tables[t] = p
+		tables[t] = reg{protos: p, gen: w.regGen[t]}
 	}
 	w.mu.RUnlock()
 	var errs []error
-	for table, protos := range tables {
+	for table, r := range tables {
 		routes, err := w.routeList(table)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("table %d: %w", table, err))
@@ -245,7 +270,7 @@ func (w *RouteWatcher) resync() error {
 		}
 		present := map[netip.Prefix]struct{}{}
 		for i := range routes {
-			if p, ok := redistributed(protos, int(routes[i].Protocol), routes[i].Dst); ok {
+			if p, ok := redistributed(r.protos, int(routes[i].Protocol), routes[i].Dst); ok {
 				present[p] = struct{}{}
 			}
 		}
@@ -257,32 +282,14 @@ func (w *RouteWatcher) resync() error {
 			}
 		}
 		w.mu.RUnlock()
-		for p := range present {
-			w.send(table, p, true)
-		}
 		for _, p := range gone {
-			w.send(table, p, false)
+			w.sendAs(table, r.gen, p, false)
+		}
+		for p := range present {
+			w.sendAs(table, r.gen, p, true)
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// processUpdates forwards updates until the subscription ends (true) or the
-// watcher stops (false).
-func (w *RouteWatcher) processUpdates(ctx context.Context, updates <-chan netlink.RouteUpdate) bool {
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-w.done:
-			return false
-		case update, ok := <-updates:
-			if !ok {
-				return true
-			}
-			w.handleRouteUpdate(update)
-		}
-	}
 }
 
 func (w *RouteWatcher) handleRouteUpdate(u netlink.RouteUpdate) {
@@ -329,18 +336,28 @@ func redistributed(protos map[int]struct{}, proto int, dst *net.IPNet) (netip.Pr
 
 // send records the change in added and forwards it to every registered sink.
 func (w *RouteWatcher) send(table uint32, prefix netip.Prefix, added bool) {
+	w.sendAs(table, 0, prefix, added)
+}
+
+// sendAs is send for a change read under the table's registration gen (0:
+// any). A change for a table that is not watched, or whose registration is
+// not gen any more, is dropped.
+func (w *RouteWatcher) sendAs(table uint32, gen uint64, prefix netip.Prefix, added bool) {
 	// Copy the sink list so delivery runs without holding w.mu: a sink may
 	// call back into the watcher (RegisterTable / DumpTable).
 	w.mu.Lock()
-	if _, watched := w.watched[table]; watched {
-		if added {
-			if w.added[table] == nil {
-				w.added[table] = map[netip.Prefix]struct{}{}
-			}
-			w.added[table][prefix] = struct{}{}
-		} else {
-			delete(w.added[table], prefix)
+	cur, watched := w.regGen[table]
+	if !watched || (gen != 0 && cur != gen) {
+		w.mu.Unlock()
+		return
+	}
+	if added {
+		if w.added[table] == nil {
+			w.added[table] = map[netip.Prefix]struct{}{}
 		}
+		w.added[table][prefix] = struct{}{}
+	} else {
+		delete(w.added[table], prefix)
 	}
 	sinks := make([]RouteSink, 0, len(w.sinks))
 	for _, e := range w.sinks {

@@ -96,3 +96,31 @@ func TestAgain(t *testing.T) {
 		t.Error("Again reported a subscription after stop")
 	}
 }
+
+// A failed listing is retried with growing waits and logged when its error
+// changes; success stops the retries and is logged once after a failure.
+func TestListing(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	l := NewListing(zap.New(core), "FDB")
+	if l.Result(nil) != nil || logs.Len() != 0 {
+		t.Fatal("a listing that succeeded asked for a retry or logged")
+	}
+	err := errors.New("results may be incomplete or inconsistent")
+	for range 3 {
+		if l.Result(err) == nil {
+			t.Fatal("a failed listing asked for no retry")
+		}
+	}
+	if l.delay != 4*MinDelay {
+		t.Errorf("third wait %v, want %v", l.delay, 4*MinDelay)
+	}
+	if n := logs.FilterMessage("netlink listing incomplete; retrying").Len(); n != 1 {
+		t.Errorf("the same failure logged %d times, want 1", n)
+	}
+	if l.Result(nil) != nil {
+		t.Error("a listing that succeeded asked for a retry")
+	}
+	if n := logs.FilterMessage("netlink listing complete after a retry").Len(); n != 1 {
+		t.Errorf("the success after a failure logged %d times, want 1", n)
+	}
+}

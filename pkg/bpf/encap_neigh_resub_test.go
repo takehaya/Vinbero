@@ -176,7 +176,8 @@ func TestEncapNeighKeeperNeighbourSubscriptionDown(t *testing.T) {
 
 // When the link subscription comes back, every device up with its carrier
 // counts as having got it back: an unresolved managed entry on one is marked
-// again, as a carrier-up event would have.
+// again, and a failure within the window marks it once more, as after a
+// carrier-up event.
 func TestEncapNeighKeeperLinkResubscribeResyncsCarrier(t *testing.T) {
 	shortResubscribe(t)
 	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2)}
@@ -227,4 +228,13 @@ func TestEncapNeighKeeperLinkResubscribeResyncsCarrier(t *testing.T) {
 		t.Fatal("the keeper did not subscribe to link updates again")
 	}
 	waitCond(t, "the failed entry marked again after the resubscribe", func() bool { return sets() > base })
+
+	// As after a carrier-up event, the first failure on the device within
+	// the window asks for one more mark.
+	time.Sleep(2 * encapNeighDebounce) // the pass of the resync is done
+	base = sets()
+	neighs.updates <- netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH, Neigh: netlink.Neigh{
+		LinkIndex: 2, IP: net.ParseIP("fe80::1"), State: netlink.NUD_FAILED,
+	}}
+	waitCond(t, "one more mark after a failure within the window", func() bool { return sets() > base })
 }
