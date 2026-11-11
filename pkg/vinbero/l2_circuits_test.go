@@ -232,12 +232,22 @@ func TestL2CircuitsCreateSaveFailure(t *testing.T) {
 // carries the name the interface has once it is written.
 func TestL2CircuitsCreateRecordsRenameDuringCreate(t *testing.T) {
 	asked := LinkID{Name: "veth0", Ifindex: 7, MAC: macA}
-	c, _, s := newTestCircuits(map[uint32]LinkID{7: {Name: "veth0x", Ifindex: 7, MAC: macB}})
+	links := map[uint32]LinkID{7: {Name: "veth0x", Ifindex: 7, MAC: macA}}
+	c, m, s := newTestCircuits(links)
 	if err := c.Create(circuitOn(asked, 0, 100, esi1)); err != nil {
 		t.Fatal(err)
 	}
-	if s.file[0].Interface != "veth0x" || s.file[0].MAC != macB.String() {
-		t.Errorf("saved %+v, want the name and address after the rename", s.file[0])
+	if s.file[0].Interface != "veth0x" || s.file[0].MAC != macA.String() {
+		t.Errorf("saved %+v, want the name after the rename", s.file[0])
+	}
+	// Another interface took the ifindex in between: the create fails and
+	// leaves the map and the file as they were.
+	links[7] = LinkID{Name: "veth9", Ifindex: 7, MAC: macB}
+	if err := c.Create(circuitOn(asked, 5, 100, esi1)); !errors.Is(err, ErrL2InterfaceGone) {
+		t.Fatalf("Create on a reused ifindex = %v", err)
+	}
+	if _, ok := m.entries[circuitKey{7, 5}]; ok || len(s.file) != 1 {
+		t.Errorf("a create on a reused ifindex left %v, saved %+v", m.entries, s.file)
 	}
 }
 
