@@ -118,6 +118,16 @@ type VrfServer struct {
 	// taken under s.mu and releasing nothing else, so it cannot deadlock with
 	// applyMu (which the delete never takes).
 	grantLease *sync.Mutex
+	// savePolicy keeps the policy VrfSetPolicy sets in the state file; nil
+	// saves nothing (SetPolicyStore).
+	savePolicy func(vrf.Policy) error
+}
+
+// SetPolicyStore installs what saves the policy VrfSetPolicy sets. It writes
+// the state file, fails changing nothing when it cannot, and saves nothing
+// when the config owns the policy.
+func (s *VrfServer) SetPolicyStore(save func(vrf.Policy) error) {
+	s.savePolicy = save
 }
 
 // NewVrfServer wires the handler. mu is the mutation mutex, shared with
@@ -915,9 +925,23 @@ func (s *VrfServer) VrfSetPolicy(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	prev := s.mgr.Policy()
-	s.mgr.SetPolicy(vrf.Policy{DefaultDeny: p.GetDefaultDeny(), DenyAction: action})
-	if err := s.reconcileOrRollback(func() error { s.mgr.SetPolicy(prev); return nil }); err != nil {
+	next := vrf.Policy{DefaultDeny: p.GetDefaultDeny(), DenyAction: action}
+	s.mgr.SetPolicy(next)
+	undo := func() error { s.mgr.SetPolicy(prev); return nil }
+	if err := s.reconcileOrRollback(undo); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Saved once the data plane has it; a failed write puts the previous
+	// policy back in memory and in the data plane.
+	if s.savePolicy != nil {
+		if err := s.savePolicy(next); err != nil {
+			cause := fmt.Errorf("the policy is not changed: %w", err)
+			_ = undo()
+			if rerr := s.reconcile(); rerr != nil {
+				cause = fmt.Errorf("%w; the data plane could not be reverted (state may diverge): %v", cause, rerr)
+			}
+			return nil, connect.NewError(connect.CodeInternal, cause)
+		}
 	}
 	return connect.NewResponse(&v1.VrfSetPolicyResponse{
 		Policy: &v1.VrfPolicy{DefaultDeny: p.GetDefaultDeny(), DenyAction: denyActionString(action)},

@@ -4,26 +4,37 @@
 
 ## TL;DR
 
-| リソース | `pin_maps: false` (default) | `pin_maps: true` | 復旧手段 |
-|---|---|---|---|
-| `vinbero.yml` (設定ファイル) | 残る (disk) | 残る | そのまま再ロード |
-| XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` と、`state.json` に記録された実行時 attach の device に attach し直す |
-| SID function / aux | **消える** | **残る** (bpffs pin)。SID owner も保存 | RPC / CLI で再投入。cplane plugin の SID は保存済み割り当てと再宣言で復旧 |
-| cplane plugin の SID 名と割り当て | cplane store 有効なら残る | 同左 | locator 登録より前に予約を復元。dispatch と grant は再宣言で作り直す |
-| Headend v4 / v6 | **消える** | **残る** (bpffs pin)。ただし BGP を有効にした起動では、BGP の applier が書いた entry を全 VRF から消す | default: RPC / CLI で再投入。BGP の entry は経路の受信で書き直す ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除)) |
-| L2 headend の回線 (`hl2 create`) | `state.json` に残る | 同左。ESI も `state.json` から戻る | 起動時に、VRF table を閉じるかの判断と XDP attach より前に復元 ([L2 headend の回線](#l2-headend-の回線)) |
-| BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin)。ただし BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消す | default: RPC / CLI (FDB は学習でも埋まる)。BGP の entry は経路の受信で書き直す |
-| Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
-| VRF の vrf_id と実行時 AC (`vrf ac-add`) | `state.json` に残る | 同左 | 起動時に XDP attach より前に復元 |
-| 実行時の vrf-bgp binding (`vrf-bgp bind` など) | `state.json` に残る | 同左 | 起動時に BGP より前に復元。同じ VRF を config が bind していれば config が優先 |
-| 登録済み plugin (`PROG_ARRAY`) | **消える** | **消える** (pin しない) | register RPC を再実行 |
-| Global stats / per-slot stats | **消える** | **消える** (pin しない) | 自然増加で埋まる |
+再起動の後に何から戻るかで分けた表です。`state.json` の行は `pin_maps` の有無にかかわらず戻ります。`pin_maps` の行は `pin_maps: true` のときだけ残り、`pin_maps: false` (default) では消えるので、再起動の後に API から入れ直します。BGP の行は経路を受信し直すと戻ります。
+
+| リソース | 戻る元 | 復旧の仕方と注意 |
+|---|---|---|
+| `vinbero.yml` (設定ファイル) | disk | そのまま再ロード |
+| Bridge / VRF デバイスと bridge member (`vrf create`、`vrf bridge-attach` など) | `state.json` (kernel にも残る) | 起動時に **自動 reconcile** |
+| VRF の vrf_id と実行時 AC (`vrf ac-add`) | `state.json` | XDP attach より前に復元 |
+| VRF の ingress policy (`vrf policy`) | `state.json` | XDP attach より前に復元。config が `vrfs.default_deny` か `vrfs.deny_action` を書いていれば config が優先 ([VRF の ingress policy](#vrf-の-ingress-policy)) |
+| 実行時に attach した device (`device attach`) | `state.json` | 起動時に attach し直す。`internal.devices` は config から |
+| 実行時の vrf-bgp binding (`vrf-bgp bind` など) | `state.json` | BGP より前に復元。同じ VRF を config が bind していれば config が優先 |
+| 実行時の locator (`locator create`) | `state.json` | binding の適用と広告より前に復元。同じ名前か prefix の locator を config が宣言していれば config が優先 ([locator](#locator)) |
+| L2 headend の回線 (`hl2 create`) と ESI | `state.json` | VRF table を閉じるかの判断と XDP attach より前に復元 ([L2 headend の回線](#l2-headend-の回線)) |
+| Ethernet Segment (`es create`、`es df-set` / `df-clear`) | `state.json` | 回線より前、XDP attach より前に復元 ([Ethernet Segment](#ethernet-segment)) |
+| cplane plugin の module、SID 名と割り当て | cplane store (有効時) | locator 登録より前に予約を復元。dispatch と grant は再宣言で作り直す |
+| auto-advertise の service SID (End.DT4 / DT6 / DT46、End.DT2U / DT2M) と広告 | binding と locator から作り直す | 起動時に exporter が割り当て直す。値は再起動の前と同じとは限らない ([locator](#locator)) |
+| SID function / aux (`sid create`)、SID owner | `pin_maps` | `locator_ref` で割り当てた SID は、locator の割り当て状態 (使用中の function) が戻らない ([locator](#locator)) |
+| Headend v4 / v6 (`hv4` / `hv6 create`) | `pin_maps` | BGP を有効にした起動では、BGP の applier が書いた entry を全 VRF から消す ([vrf.md](vrf.md#起動時の-bgp-の-entry-の削除)) |
+| BD peer / VLAN table / 静的 FDB (`peer`、`vt`、`fdb create`) | `pin_maps` | FDB は学習でも埋まる。BGP を有効にした起動では、BGP の applier が書いた EVPN の FDB と peer を消す |
+| BGP で受信した経路 (headend、EVPN の FDB と peer、ES の member と DF 選出、SR Policy) | BGP | session が上がって経路を受け直すと書き直す |
+| operator の BGP 広告 (`bgp advertise-*`)、MUP route (`mup create`)、local SR Policy (`sr-policy`) | 戻らない | `pin_maps` の有無にかかわらず、再起動の後に API から入れ直す |
+| 登録済み plugin (`PROG_ARRAY`) | 戻らない (pin しない) | register RPC を再実行 |
+| XDP プログラムの attach | 戻らない (fd とともに消える) | 起動時に `internal.devices` と `state.json` の device に attach し直す |
+| Global stats / per-slot stats | 戻らない (pin しない) | 自然増加で埋まる |
+
+API だけで組んだ L3 tenant (VRF device、AC、device attach、binding、locator、auto-advertise) と、EVPN auto-advertise で組んだ L2 segment (bridge facet、member、AC、回線、binding、locator) は、`pin_maps: false` でも再起動の後に何も入れ直さずに戻ります。`sid create` と `bgp advertise-evpn-*` で手で組んだ L2 segment は、SID が `pin_maps` でだけ残り、BGP 広告はどちらでも残らないので、入れ直しが要ります。
 
 デフォルトは **外部コントローラが source of truth** として振る舞う設計 (`pin_maps: false`)。SRv6 制御状態は API クライアント側で保持します。`pin_maps: true` に切り替えれば kernel 側に BPF マップを残せるので、daemon 単体でステートフル運用できます。
 
 ## 永続化層: `state.json`
 
-`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC、API で作った VRF の BGP binding と L2 headend の回線** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC、API で作った VRF の BGP binding、L2 headend の回線、locator、Ethernet Segment、VRF の ingress policy** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
 
 control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
 に保存されます。store 有効時は `local-sids/state.json` に local SID の名前と address、
@@ -45,7 +56,7 @@ entry を再作成します。aux index と VRF ifindex はその時点で求め
 堅牢性は次の 3 点で担保します。
 
 - 書き込みは atomic です。同一ディレクトリの temp file に書いて fsync してから rename するので、書き込み途中の crash や ENOSPC でも直前の state.json が無傷で残ります。
-- 保存の失敗は RPC エラーとして返ります。device、bridge、VRF の RPC は kernel device とメモリ上の記録を巻き戻さず、次に成功した保存が全量を書き直して収束します。VRF の BGP binding の RPC は何も変えずに失敗します (後述)。
+- 保存の失敗は RPC エラーとして返ります。device、bridge、VRF の RPC は kernel device とメモリ上の記録を巻き戻さず、次に成功した保存が全量を書き直して収束します。VRF の BGP binding、L2 headend の回線、locator、Ethernet Segment、VRF の ingress policy の RPC は何も変えずに失敗します (後述)。
 - boot の reconcile は fail-closed です。state の entry が実体化できない場合 (member NIC の消失、名前を別種の link に取られた等) は、entry 名と修復手順 (デバイスの復旧か entry の削除) を示すエラーで起動を拒否します。stale な ifindex のまま続行すると FDB watcher / EVPN / SID 参照ガードが誤った index で動くためです。parse できない state.json も同様に起動を拒否します (空 state で始めると管理下のデバイスを黙って放棄することになるため)。
 
 VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は次に割り当てる id、`entries` は VRF 名ごとの `vrf_id` と `runtime_acs` です。kernel device を持たない VRF もここに入ります。`config` は、その VRF を起動時の読み込み (config file か、device / bridge の record) が作ったことを示します。API で作った VRF には付きません。
@@ -96,7 +107,8 @@ state.json フォーマットは内部実装扱いで、手編集は非推奨で
 - config が bind している VRF に API で加えた変更 (bind し直し、RT や family の追加と削除、unbind) は、メモリと data plane には反映しますが保存しません。次の起動で config の binding に戻ります
 - 復元は BGP の有無に関係なく行い、BGP session の起動、経路の受信、auto-advertise、plugin の復元より前に終えます。最初に受信した経路から、復元した binding で import 先を決めます
 - binding が名前を挙げる VRF は、config が宣言しなくなっても、その vrf_id のまま残ります
-- 保存した binding の auto-advertise を有効にできない場合 (API で登録した locator は再起動で消えるので、その locator を使う binding がこれにあたります) は、warning を出して起動を続けます。binding は残り、auto-advertise だけが止まります。locator を登録し直してから、同じ内容で `vbctl vrf-bgp bind` を実行すると広告を始めます。config の binding では、これまでどおり起動を止めます
+- binding が `default_locator` に挙げる locator は、API で登録したものも binding より前に戻るので ([locator](#locator))、保存した binding はそのまま auto-advertise を始めます
+- 保存した binding の auto-advertise を有効にできない場合 (挙げる locator が無い: config に負けて捨てた、locator を保存しない版の state.json から起動した、など) は、warning を出して起動を続けます。binding は残り、auto-advertise だけが止まります。locator を登録してから、同じ内容で `vbctl vrf-bgp bind` を実行すると広告を始めます。config の binding では、これまでどおり起動を止めます
 
 binding の RPC は、state.json への書き込みが成功したときだけ成功を返します。書き込みに失敗した RPC は binding を変えません。メモリ、data plane、state.json は直前の状態のままで、エラーには state file を書けなかったことが出ます (`vrf-bgp bind` / `unbind` は VRF ごとの `errors`、それ以外は `internal`)。同じ RPC を繰り返せばやり直せます。bind では、state.json に書いてから経路の import と広告に使い始めます。unbind では、state.json から消してから外します。どちらも、成功を返していない変更が再起動で現れることはありません。bind が新しく作った VRF は、書き込みに失敗しても VRF として残ります。例外として、state.json の rename が済んだ後に directory の fsync だけが失敗した場合は、エラーを返しても file が新しい内容を持つことがあります。次に state.json を書いたときに、メモリの内容にそろいます。
 
@@ -148,7 +160,102 @@ binding と同じく、state.json の rename が済んだ後に directory の fs
 - この版が知らない field を持つ記録、同じ ifindex と VLAN の記録が 2 つある state.json、mode や ESI を解釈できない記録は起動を拒否します
 - この field を知らない版の vinberod は、field を読まずに起動し、次に state.json を書くときに消します。その版に戻す前に state.json を控えておき、回線は作り直してください
 
-1 つの host で複数の vinberod を動かすときは、`settings.state_path` をそれぞれ別にします。同じ file を共有すると、ほかの daemon の回線を自分の interface と照合して消します (examples は daemon ごとに別の file を使います)。
+### locator
+
+`vbctl locator create` (`LocatorCreate`) で登録した locator は `runtime_locators` に、登録した順で保存します。`locator delete` (`--force` を含む) はここから消します。config の `bgp.locators` は保存しません。
+
+```json
+"runtime_locators": [
+  {
+    "name": "LOC1",
+    "prefix": "fd00:200::/48",
+    "block_len": 32,
+    "node_len": 16,
+    "function_len": 16,
+    "argument_len": 64,
+    "behavior": "classic",
+    "function_auto_start": 1,
+    "function_auto_end": 65535
+  }
+]
+```
+
+`prefix` は host bit を落とした形、`behavior` は `classic` か `usid` です。
+
+起動時の扱いは次のとおりです。
+
+- 復元は BGP の有無に関係なく、登録した順に行います。cplane plugin の SID 予約の復元と config の locator の登録の後、BGP の applier、exporter、plugin、session、RPC server の前です。予約の後なので、plugin が持つ function は locator を戻した時点で使用中になります。binding の適用と広告より前なので、auto-advertise の SID、受信した経路の encap source (`bgp.global.source_locator`)、plugin の locator 参照は、最初から戻した locator を使います
+- config が同じ名前の locator を `bgp.locators` で宣言している、または config の locator が同じ prefix を持つ場合は config を使い、保存した locator は捨てて state.json から消します。warning を 1 行出します。後で config から消しても、保存していた locator は戻りません
+- config が宣言する名前の locator を API で作る (BGP を無効にして起動したときなど)、または消す変更は、メモリには反映しますが保存しません。名前は BGP の有無に関係なく config のものです
+- 戻した locator からの割り当ては、起動の後に改めて行います。binding の auto-advertise が作る End.DT4 / DT6 / DT46 と EVPN の End.DT2U / DT2M は、exporter が起動時に割り当て直します。値は割り当ての順で決まるので、再起動の前と同じとは限りません。config の locator も同じです
+- `sid create --locator-ref` で割り当てた SID の entry は `pin_maps` でだけ残り、locator 側の使用中の印は戻りません (config の locator も同じです)。pin した map にそうした SID が残る構成では、再起動の後に自動の割り当て (auto-advertise の SID など) が同じ値を取ることがあります。pin で持ち越す SID は、`function_auto_start` から `function_auto_end` の外の `function` を明示して割り当てると、自動の割り当てと重なりません
+- uSID locator の作成で行う uA の CSID の取り込みは、起動時の復元では行いません (config の locator と同じです)。pin した uA の CSID も、同じく自動の割り当ての範囲の外に置いてください
+
+RPC は、state.json への書き込みが成功したときだけ成功を返します。作成は、locator を登録して uA の CSID を取り込んだ後に保存し、保存に失敗したら登録と取り込みを戻してエラーを返します。source locator の登録で走る経路の書き直しは、保存の成功後にだけ行います。削除は、使用中かどうかの確認の後、locator を消す前に保存します。保存に失敗したら何も消しません。どちらも、同じ RPC を繰り返せばやり直せます。
+
+- `runtime_locators` が無い state.json は、保存した locator が無いものとして読みます
+- この版が知らない field を持つ記録、名前が空・prefix や behavior を解釈できない・bit 長が合わない記録、同じ名前か同じ prefix の記録が 2 つある state.json は起動を拒否します。cplane plugin の SID 予約と layout が合わない記録も起動を拒否します (API の作成なら拒否される値です)
+- この field を知らない版の vinberod は、field を読まずに起動し、次に state.json を書くときに消します。その版に戻す前に state.json を控えておき、locator は config で宣言するか登録し直してください
+
+### Ethernet Segment
+
+`vbctl es create` (`EsCreate`) で作った Ethernet Segment は `runtime_ethernet_segments` に ESI の順で保存します。`es df-set` / `es df-clear` は記録の DF を書き換え、`es delete` はここから消します。
+
+```json
+"runtime_ethernet_segments": [
+  {
+    "esi": "01:00:00:00:00:00:00:00:00:01",
+    "local_attached": true,
+    "redundancy_mode": "ESI_REDUNDANCY_MODE_ALL_ACTIVE",
+    "local_pe_src_addr": "fc00:1::1",
+    "df_pe_src_addr": "fc00:2::2",
+    "rd": "65000:1"
+  }
+]
+```
+
+`df_pe_src_addr` は operator が `es create` / `df-set` / `df-clear` で決めた DF です。BGP の DF 選出が書いた DF は記録しません。`rd` は RT4 の auto-advertise に使う RD で、`esi_map` には無いのでここにだけ残ります。
+
+`esi_map` は pin しないので、Ethernet Segment は `pin_maps` の有無にかかわらず state.json から戻ります。
+
+- 復元は state を読んだ直後、L2 headend の回線の復元の前に行います。VRF table の reconcile、EVPN の掃除、XDP attach、BGP より前です。ESI を持つ回線の最初のフレームから split horizon と DF の判定が効き、BGP の DF 選出は最初に受信した RT4 から local attach を見ます
+- Ethernet Segment の記録は interface を持たないので、照合せずにそのまま戻します。ESI を持つ回線は回線の規則 (ifindex、名前、hardware address の一致) で戻るかどうかが決まり、interface が消えた回線は戻りませんが Ethernet Segment は戻ります。稼働中に interface を消したときも、消えるのは回線だけで Ethernet Segment は残ります
+- BGP を有効にした起動では、session の起動の後に、local attach の Ethernet Segment の DF を選び直し、EVPN auto-advertise が有効で `rd` を持つものの RT4 を広告します (`es create` の後と同じです)
+
+RPC は、`esi_map` と state.json の両方を書けたときだけ成功を返します。
+
+- 作成 (上書きを含む): map に書いてから保存します。保存に失敗したら map を作成前の状態に戻し、ESI ごとのエラーを返します。DF の選び直しと RT4 の広告は保存の成功後に行います
+- 削除: map から消してから保存します。保存に失敗したら entry を書き戻してエラーを返します。RT4 の取り下げは保存の成功後に行います
+- `df-set` / `df-clear`: map の DF を書き換えてから保存します。保存に失敗したら前の DF に戻し、`internal` を返します
+
+`esi_map` は pin しないので、map の書き込みと保存の間で daemon が強制終了すると、次の起動は state.json の内容で始まります。成功を返していない作成は戻らず、成功を返していない削除は取り消されます。
+
+- `runtime_ethernet_segments` が無い state.json は、保存した Ethernet Segment が無いものとして読みます
+- この版が知らない field を持つ記録、ESI (全 0 を含む)、address、`redundancy_mode` を解釈できない記録、同じ ESI の記録が 2 つある state.json は起動を拒否します
+- この field を知らない版の vinberod は、field を読まずに起動し、次に state.json を書くときに消します。その版に戻す前に state.json を控えておき、Ethernet Segment は作り直してください
+
+### VRF の ingress policy
+
+`vbctl vrf policy` (`VrfSetPolicy`) で決めた ingress policy (default-deny と deny action) は `runtime_vrf_policy` に保存します。policy は daemon 全体で 1 つです。
+
+```json
+"runtime_vrf_policy": {"default_deny": true, "deny_action": "drop"}
+```
+
+- config file に `vrfs.default_deny` か `vrfs.deny_action` の key があれば、値が既定と同じでも policy は config のものです。そのとき `vrf policy` の変更はメモリと data plane には反映しますが保存せず、次の起動で config の値に戻ります。保存した policy があれば捨てて state.json から消し、warning を 1 行出します
+- config が policy を書いていなければ、起動時に config の VRF を読んだ後、`ingress_vrf_map` と policy を書く前 (XDP attach より前) に保存した policy を戻します。attach の後の最初のパケットから戻した policy が効きます
+
+RPC は、data plane と state.json の両方を書けたときだけ成功を返します。保存に失敗したら、メモリと data plane を前の policy に戻し、`internal` を返します。
+
+- `runtime_vrf_policy` が無い state.json は、保存した policy が無いものとして読みます (config の値を使います)
+- この版が知らない field を持つ記録、`deny_action` が `drop` / `pass` 以外の記録は起動を拒否します
+- この field を知らない版の vinberod は、field を読まずに起動し、次に state.json を書くときに消します
+
+locator、Ethernet Segment、policy の保存も、binding と同じく、state.json の rename が済んだ後に directory の fsync だけが失敗した場合は、エラーを返しても file が新しい内容を持つことがあります。次に state.json を書いたときに、メモリの内容にそろいます。
+
+### 1 つの host で複数の vinberod
+
+1 つの host で複数の vinberod を動かすときは、`settings.state_path` をそれぞれ別にします。同じ file を共有すると、ほかの daemon の回線を自分の interface と照合して消し、ほかの daemon の locator、Ethernet Segment、policy を自分のものとして戻します (examples は daemon ごとに別の file を使います)。
 
 ## BPF マップ: in-memory vs pinned
 
@@ -314,11 +421,11 @@ Flush はサーバ側で `sid_function_map` を iterate → 1 件ずつ `Delete`
 1. **上流ルーティングで draining** (可能なら)。SID を減らす / BGP で切り離すなど
 2. `vinberod` 停止
 3. (必要なら) `ip link set dev <iface> xdp off` を実行
-4. `vinberod -c vinbero.yml` 再起動 → L2 headend の回線の復元、Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach、API で作った binding の復元 が自動で走る
+4. `vinberod -c vinbero.yml` 再起動 → Ethernet Segment と L2 headend の回線の復元、Bridge/VRF reconcile、vrf_id と実行時 AC と ingress policy の復元、XDP attach、API で作った binding と locator の復元 が自動で走る
 5. SID / Headend を再投入:
    - `pin_maps: false`: **外部コントローラから全部再投入**
    - `pin_maps: true`: RPC で入れたエントリは bpffs から復元されるので再投入不要。BGP を有効にした起動では、BGP の applier が書いたエントリは起動時に消え、経路を受信し直すと戻ります
-   - L2 headend の回線はどちらの場合も `state.json` から戻るので、再投入は不要です
+   - L2 headend の回線、locator、Ethernet Segment はどちらの場合も `state.json` から戻るので、再投入は不要です
 6. **Plugin は常に再登録**が必要 (`vinbero plugin register ...`)
 7. トラフィック監視 (`vinbero stats show`, `stats slot show`) で正常性確認
 

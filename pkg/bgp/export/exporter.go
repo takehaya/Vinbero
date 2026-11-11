@@ -199,7 +199,8 @@ func (e *Exporter) enableBindings() ([]string, error) {
 		if err := e.enableAndWatch(b, false); err != nil {
 			// A binding restored from the state file was accepted by an
 			// earlier run, against what it had then: typically a locator
-			// registered over the API, which a restart does not keep.
+			// that is gone since (one the config now wins over, or a state
+			// file written before locators were saved).
 			// Refusing to start would leave the node down until the state
 			// file is edited, so the binding stays without auto-advertise
 			// until it is bound again. A config binding still fails the

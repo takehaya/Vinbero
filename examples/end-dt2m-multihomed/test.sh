@@ -41,15 +41,32 @@ TESTS_PASSED=0
 TESTS_FAILED=0
 
 cleanup() {
-    rm -f /tmp/vinbero_dt2m_pe*_bum.yaml /tmp/vinbero_dt2m_bum_*.pcap*
+    rm -f /tmp/vinbero_dt2m_pe*_bum.yaml /tmp/vinbero_dt2m_bum_*.pcap* /tmp/vinbero_dt2m_pe1_base.yaml
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         # Guard against PID reuse: only kill if the PID is still our vinberod.
         [ -n "$pid" ] && [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = "vinberod" ] && kill "$pid" 2>/dev/null || true
         [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
+    rm -rf "$PE1_PIN_DIR"
+    umount "$PE1_BPFFS" 2>/dev/null || true
+    rmdir "$PE1_BPFFS" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# PE1 pins its maps, so its SID and BD peers outlive the daemon; Phase E
+# kills it and brings the Ethernet Segment and the L2 headend circuit back
+# from its state file. `ip netns exec` mounts a fresh /sys, so the pins go on
+# a bpffs of their own.
+PE1_BPFFS=/run/vinbero_dt2m_mh_bpffs
+PE1_PIN_DIR=$PE1_BPFFS/pe1
+mkdir -p "$PE1_BPFFS"
+mountpoint -q "$PE1_BPFFS" || mount -t bpf bpf "$PE1_BPFFS"
+rm -rf "$PE1_PIN_DIR"
+sed -e '/^settings:/a\  pin_maps:' \
+    -e '/^settings:/a\    enabled: true' \
+    -e "/^settings:/a\\    path: ${PE1_PIN_DIR}" \
+    "${SCRIPT_DIR}/vinbero_pe1.yaml" > /tmp/vinbero_dt2m_pe1_base.yaml
 
 vbctl_pe1() { ip netns exec "$NS_PE1" "${VINBERO_BIN}" -s "http://${BIND_PE1}" "$@"; }
 vbctl_pe2() { ip netns exec "$NS_PE2" "${VINBERO_BIN}" -s "http://${BIND_PE2}" "$@"; }
@@ -77,7 +94,7 @@ assert_nonzero() {
 # ================================================
 bum_native_prepare "$NS_H1" "$NS_H2" "$NS_PE1" "$NS_PE2" "$NS_PE3" "$NS_P"
 print_info "Launching PE1/PE2/PE3 vinberod in parallel (BUM_MODE=${BUM_MODE})..."
-start_vinbero "$NS_PE1" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe1.yaml" /tmp/vinbero_dt2m_pe1_bum.yaml)" /tmp/vinbero_dt2m_pe1.log
+start_vinbero "$NS_PE1" "$(bum_mode_config /tmp/vinbero_dt2m_pe1_base.yaml /tmp/vinbero_dt2m_pe1_bum.yaml)" /tmp/vinbero_dt2m_pe1.log
 VINBERO_PID_PE1=$VINBERO_LAST_PID
 start_vinbero "$NS_PE2" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe2.yaml" /tmp/vinbero_dt2m_pe2_bum.yaml)" /tmp/vinbero_dt2m_pe2.log
 VINBERO_PID_PE2=$VINBERO_LAST_PID
@@ -284,6 +301,71 @@ if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     assert_nonzero "PE2 BUM_XDP_LOCAL_FLOOD > 0 (DF floods from XDP)" \
         "$(stats_counter vbctl_pe2 BUM_XDP_LOCAL_FLOOD)"
 fi
+
+# ================================================
+# Phase E: PE1 crashes and comes back
+# ================================================
+# Nothing is configured again. ES-1, with the DF set above, and the L2
+# headend circuit come back from PE1's state file; esi_map is not pinned,
+# and the pinned headend_l2_map goes while PE1 is down, so neither can come
+# from anywhere else. The End.DT2M SID and the BD peers come from the pinned
+# maps.
+echo ""
+echo "=========================================="
+echo "Phase E: PE1 killed and started again"
+echo "=========================================="
+kill -KILL "$VINBERO_PID_PE1" 2>/dev/null || true
+wait "$VINBERO_PID_PE1" 2>/dev/null || true
+rm -f "$PE1_PIN_DIR/headend_l2_map"
+start_vinbero "$NS_PE1" "$(bum_mode_config /tmp/vinbero_dt2m_pe1_base.yaml /tmp/vinbero_dt2m_pe1_bum.yaml)" \
+    /tmp/vinbero_dt2m_pe1_restart.log
+VINBERO_PID_PE1=$VINBERO_LAST_PID
+wait_vinbero_ready "$NS_PE1" "$BIND_PE1" 15
+if grep -q "Ethernet Segments restored from the state file" /tmp/vinbero_dt2m_pe1_restart.log &&
+    vbctl_pe1 es list | grep -F "$ESI" | grep -qF "$PE2_SRC"; then
+    print_success "PE1 restored ES-1 with PE2 as its DF"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "PE1 did not restore ES-1 with its DF"
+    vbctl_pe1 es list || true
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+if vbctl_pe1 --json hl2 list | grep -q '"esi": "'"$ESI"'"'; then
+    print_success "PE1 restored its L2 headend circuit on ES-1"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "PE1 did not restore its L2 headend circuit on ES-1"
+    vbctl_pe1 hl2 list || true
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# PE1 is still the non-DF: host2's broadcast reaches host1 through PE2 only.
+TAG="vbbum-mh-restart-df"
+pids=()
+for ifc in mh-h1pe1 mh-h1pe2; do
+    capture_start "$NS_H1" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap" -Q in
+    pids+=("$CAPTURE_PID")
+done
+sleep 1
+bum_marker_send "$NS_H2" mh-h2pe3.100 "$TAG"
+sleep 1
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+assert_eq "after the restart: host1 copies via PE1 (non-DF)" "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-h1pe1.pcap "$TAG")" 0
+assert_eq "after the restart: host1 copies via PE2 (DF)" "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-h1pe2.pcap "$TAG")" 1
+assert_nonzero "after the restart: PE1 NON_DF_DROP > 0" "$(stats_counter vbctl_pe1 NON_DF_DROP)"
+
+# Split horizon still holds: PE1 sends host1's broadcast to PE3 only.
+TAG="vbbum-mh-restart-sh"
+capture_start "$NS_P" mh-ppe1 "/tmp/vinbero_dt2m_bum_mh-ppe1.pcap"
+pid=$CAPTURE_PID
+sleep 1
+bum_marker_send "$NS_H1" "$VLAN_IF_H1" "$TAG"
+sleep 1
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+assert_eq "after the restart: frames on P-PE1 (PE1's copy to PE3 only)" \
+    "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-ppe1.pcap "$TAG")" 1
 
 # ================================================
 # Summary

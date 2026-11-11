@@ -61,6 +61,21 @@ type Server struct {
 	// l2Circuits keeps the L2 headend circuits in the state file; nil keeps
 	// them in the map only.
 	l2Circuits *vinbero.L2Circuits
+	// segments keeps the Ethernet Segments in esi_map and the state file;
+	// nil writes the map only.
+	segments *vinbero.EthernetSegments
+	// locatorStore and vrfPolicyStore save the locators and the VRF policy
+	// set over the API; nil saves nothing.
+	locatorStore   LocatorStore
+	vrfPolicyStore func(vrf.Policy) error
+}
+
+// SetRuntimeStores hands the server what saves the locators, the Ethernet
+// Segments and the VRF policy made over the API. Call before Setup.
+func (s *Server) SetRuntimeStores(locators LocatorStore, segments *vinbero.EthernetSegments, vrfPolicy func(vrf.Policy) error) {
+	s.locatorStore = locators
+	s.segments = segments
+	s.vrfPolicyStore = vrfPolicy
 }
 
 // NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
@@ -229,6 +244,9 @@ func (s *Server) Setup() {
 	// SidFunction service. Built first so the locator handler can hand it
 	// newly added locators to reconcile uA claims against.
 	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
+	if s.locatorStore != nil {
+		sidFunctionServer.SetLocatorStore(s.locatorStore)
+	}
 
 	addLocator, delLocator := s.sourceLocatorHooks(sidFunctionServer.AddLocatorAndClaim, sidFunctionServer.DeleteLocatorGuarded, requestReplay)
 	locatorServer := NewLocatorServer(s.locatorMgr, addLocator, delLocator)
@@ -283,6 +301,9 @@ func (s *Server) Setup() {
 
 	// Ethernet Segment service (RFC 7432 ESI master table)
 	esServer := NewEthernetSegmentServer(s.mapOps, s.esReElectDF, s.evpnES, s.logger)
+	if s.segments != nil {
+		esServer.SetSegments(s.segments)
+	}
 	path, handler = vinberov1connect.NewEthernetSegmentServiceHandler(esServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))
@@ -319,6 +340,9 @@ func (s *Server) Setup() {
 	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu, grantLease)
 	vrfServer.SetLogger(s.logger)
 	vrfServer.SetL2CircuitPorts(s.mapOps.HeadendL2Ports)
+	if s.vrfPolicyStore != nil {
+		vrfServer.SetPolicyStore(s.vrfPolicyStore)
+	}
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

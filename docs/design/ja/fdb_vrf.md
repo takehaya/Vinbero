@@ -111,6 +111,6 @@ VRF device も Bridge も `VrfService` API で、一級 VRF オブジェクト�
 
 VrfBridgeAttach を呼ぶと、FDBWatcherへの登録も同時に行われます。登録の時点で bridge が既に持つ FDB も `fdb_map` に入ります。daemon の起動時は、state の bridge と bridge facet をすべて登録してから FDBWatcher を起動するので、再起動の前に bridge が学習していた MAC も `fdb_map` に戻ります。
 
-`HeadendL2Create` で作った回線 (`headend_l2_map` と ESI) は state ファイルにも保存し、再起動時に戻します。BGP を有効にした起動では、前回の BGP applier が書いた EVPN の FDB entry と peer を XDP attach の前に消し、経路の受信で書き直します。どちらも詳細は [persistence.md](persistence.md#l2-headend-の回線) と [vrf.md](vrf.md#永続化と-boot) を参照してください。削除・detach 時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF の削除はさらに ingress AC、vrf-bgp binding、attach 済み bridge の残存でも拒否します)。
+`HeadendL2Create` で作った回線 (`headend_l2_map` と ESI) は state ファイルにも保存し、再起動時に戻します。`EsCreate` で作った Ethernet Segment (`esi_map`、operator が決めた DF と RT4 の RD を含む) も state ファイルに保存し、`pin_maps` の有無にかかわらず回線より前に戻します ([persistence.md](persistence.md#ethernet-segment))。手で作った BD peer の ESI は `pin_maps` でだけ残り、BGP の RT2 / RT3 / RT4 から作った peer と ES の member は経路の受信で戻ります。BGP を有効にした起動では、前回の BGP applier が書いた EVPN の FDB entry と peer を XDP attach の前に消し、経路の受信で書き直します。どちらも詳細は [persistence.md](persistence.md#l2-headend-の回線) と [vrf.md](vrf.md#永続化と-boot) を参照してください。削除・detach 時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF の削除はさらに ingress AC、vrf-bgp binding、attach 済み bridge の残存でも拒否します)。
 
 API呼び出しの依存関係と利用シーケンスは [api_sequence.md](api_sequence.md) を参照してください。

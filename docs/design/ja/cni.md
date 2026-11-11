@@ -119,7 +119,7 @@ bgp:
 
 vinberod は `--bgp-enabled` を付けて起動します。付けないと `bgp` の設定があっても BGP は動きません。`listen_port` の既定値 `-1` では TCP の listen をしないので、node どうしの iBGP には例のように `179` を指定します。`router_id`、`next_hop`、locator の `prefix` は node ごとに変えます。
 
-network configuration から作った binding は state file に保存され、daemon の再起動後も同じ内容で戻ります ([persistence.md](persistence.md#vrf-の-bgp-binding))。config で宣言した binding も再起動後に残り、どちらでも VRF table に残っている /32 は再び広告されます。host veth の attach と、plugin が足した AC も state file から戻ります。network configuration の `locator` は config の `bgp.locators` で宣言してください。`vbctl locator create` で登録した locator は再起動で消えるので、それを使う binding は locator を登録し直して bind し直すまで広告されません。VRF と binding を config で宣言しておくと、node の設定が config だけで分かります。
+network configuration から作った binding は state file に保存され、daemon の再起動後も同じ内容で戻ります ([persistence.md](persistence.md#vrf-の-bgp-binding))。config で宣言した binding も再起動後に残り、どちらでも VRF table に残っている /32 は再び広告されます。host veth の attach と、plugin が足した AC も state file から戻ります。network configuration の `locator` は config の `bgp.locators` で宣言するか、`vbctl locator create` で登録します。API で登録した locator も state file に保存され、再起動では binding より前に戻るので、それを使う binding は再起動の後もそのまま広告されます ([persistence.md](persistence.md#locator))。VRF と binding と locator を config で宣言しておくと、node の設定が config だけで分かります。
 
 ```yaml
 vrfs:
