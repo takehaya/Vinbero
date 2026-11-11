@@ -205,7 +205,11 @@ echo "[4] pe-osaka's vinberod restarts with its EVPN binding"
 # only a binding importing 65000:100 into evi-100 allows.
 osaka_pid=$(dexec "$PE_OSAKA" cat /var/run/vinberod.pid)
 dexec "$PE_OSAKA" kill -TERM "$osaka_pid"
-osaka_stopped() { ! docker exec "$PE_OSAKA" kill -0 "$osaka_pid"; }
+# start.sh has exited, so nothing reaps the old daemon: a zombie counts as
+# stopped.
+osaka_stopped() {
+    docker exec "$PE_OSAKA" sh -c "[ ! -e /proc/$osaka_pid ] || grep -q '^State:[[:space:]]*Z' /proc/$osaka_pid/status"
+}
 if retry_n 15 osaka_stopped; then
     ok "pe-osaka's vinberod stopped"
 else
@@ -213,10 +217,16 @@ else
 fi
 dexec -d "$PE_OSAKA" sh -c \
     'echo $$ > /var/run/vinberod.pid; exec /usr/local/bin/vinberod --bgp-enabled -c /etc/vinbero/vinbero.yaml >> /var/log/vinberod.log 2>&1'
-if retry_n 30 bash -c "docker exec $PE_OSAKA vbctl locator list"; then
-    ok "pe-osaka's vinberod is back"
+# The new daemon says it restored the binding, so the checks below cannot be
+# answered by the old one.
+osaka_restored() {
+    dexec "$PE_OSAKA" grep -q 'VRF bindings restored from the state file' /var/log/vinberod.log
+}
+if retry_n 30 bash -c "docker exec $PE_OSAKA vbctl locator list" && retry_n 15 osaka_restored; then
+    ok "pe-osaka's vinberod is back and restored the bindings from its state file"
 else
-    ng "pe-osaka's vinberod did not come back"
+    ng "pe-osaka's vinberod did not come back with its bindings"
+    dexec "$PE_OSAKA" tail -30 /var/log/vinberod.log || true
 fi
 osaka_bound() {
     dexec "$PE_OSAKA" vbctl vrf-bgp list 2>/dev/null | grep 'evi-100' | grep -qF 'evpn=[65000:100(import)]'
