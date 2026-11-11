@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/netlinksub"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -477,8 +478,16 @@ type EncapNeighKeeper struct {
 
 	wake chan struct{}
 	// subRoutes subscribes to route, nexthop-object and ip-rule changes
-	// (shared with the BUM devmap sync); tests replace it.
+	// (shared with the BUM devmap sync), subNeighs to neighbour changes and
+	// subLinks to link changes; linkList lists the devices for the carrier
+	// state after the link subscription comes back. Tests replace them.
 	subRoutes func() (*routeSub, error)
+	subNeighs func() (*neighSub, error)
+	subLinks  func() (*linkSub, error)
+	linkList  func() ([]netlink.Link, error)
+	// routeSt, neighSt and linkSt follow the three subscriptions and log
+	// their state changes.
+	routeSt, neighSt, linkSt *netlinksub.State
 
 	// pmu guards what the events ask for; Notify takes only it, so a map
 	// writer never waits for a pass.
@@ -550,7 +559,13 @@ func NewEncapNeighKeeper(mapOps *MapOperations, logger *zap.Logger) *EncapNeighK
 		owned:   map[string]NeighTarget{},
 		warned:  map[string]string{},
 	}
-	k.subRoutes = func() (*routeSub, error) { return subscribeRouteEvents(k.logger, "encap next hops") }
+	k.routeSt = netlinksub.New(k.logger, "encap next hops: routes")
+	k.neighSt = netlinksub.New(k.logger, "encap next hops: neighbours")
+	k.linkSt = netlinksub.New(k.logger, "encap next hops: links")
+	k.subRoutes = func() (*routeSub, error) { return subscribeRouteEvents(k.routeSt) }
+	k.subNeighs = k.subscribeNeighs
+	k.subLinks = k.subscribeLinks
+	k.linkList = netlink.LinkList
 	return k
 }
 
@@ -992,12 +1007,12 @@ func (k *EncapNeighKeeper) subscribe() (*routeSub, *neighSub, *linkSub, error) {
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("subscribe to route updates: %w", err)
 	}
-	neighs, err := k.subscribeNeighs()
+	neighs, err := k.subNeighs()
 	if err != nil {
 		close(routes.done)
 		return nil, nil, nil, err
 	}
-	links, err := k.subscribeLinks()
+	links, err := k.subLinks()
 	if err != nil {
 		close(routes.done)
 		close(neighs.done)
@@ -1014,7 +1029,7 @@ type neighSub struct {
 func (k *EncapNeighKeeper) subscribeNeighs() (*neighSub, error) {
 	s := &neighSub{updates: make(chan netlink.NeighUpdate, 256), done: make(chan struct{})}
 	if err := netlink.NeighSubscribeWithOptions(s.updates, s.done, netlink.NeighSubscribeOptions{
-		ErrorCallback: func(err error) { k.logger.Warn("neighbour subscription failed", zap.Error(err)) },
+		ErrorCallback: k.neighSt.OnError,
 	}); err != nil {
 		close(s.done)
 		return nil, fmt.Errorf("subscribe to neighbour updates: %w", err)
@@ -1030,7 +1045,7 @@ type linkSub struct {
 func (k *EncapNeighKeeper) subscribeLinks() (*linkSub, error) {
 	s := &linkSub{updates: make(chan netlink.LinkUpdate, 256), done: make(chan struct{})}
 	if err := netlink.LinkSubscribeWithOptions(s.updates, s.done, netlink.LinkSubscribeOptions{
-		ErrorCallback: func(err error) { k.logger.Warn("link subscription failed", zap.Error(err)) },
+		ErrorCallback: k.linkSt.OnError,
 	}); err != nil {
 		close(s.done)
 		return nil, fmt.Errorf("subscribe to link updates: %w", err)
@@ -1065,6 +1080,12 @@ func (c carrierState) cameUp(u netlink.LinkUpdate) bool {
 	return up && (!seen || !was)
 }
 
+// watch follows the subscriptions until ctx ends. A subscription that ends
+// is subscribed again after a wait that grows with each failed attempt
+// (netlinksub), while the rest of the watch, the resweep included, goes on.
+// One that comes back resyncs what its events cover: the set is re-resolved
+// (routes), every kept entry is checked (neighbours), or every device up
+// with its carrier counts as having got it back (links).
 func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *neighSub, links *linkSub) {
 	defer func() {
 		// The subscriptions' readers block on a full channel; drained, they
@@ -1101,42 +1122,62 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 		k.setFlag(true, false)
 		pending()
 	}
+	// While a subscription is down its channels are nil, which a select
+	// never picks, and its retry channel fires for the next attempt.
+	var routeRetry, neighRetry, linkRetry <-chan time.Time
+	routesDown := func() {
+		close(routes.done)
+		go drain(routes.routes)
+		routes = nil
+		routeRetry = time.After(k.routeSt.Ended())
+	}
 	for {
+		var (
+			routesC   <-chan netlink.RouteUpdate
+			nexthopsC <-chan struct{}
+			neighsC   <-chan netlink.NeighUpdate
+			linksC    <-chan netlink.LinkUpdate
+		)
+		if routes != nil {
+			routesC, nexthopsC = routes.routes, routes.nexthops
+		}
+		if neighs != nil {
+			neighsC = neighs.updates
+		}
+		if links != nil {
+			linksC = links.updates
+		}
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case _, ok := <-routes.routes:
+		case _, ok := <-routesC:
 			if !ok {
-				if routes = resubscribeRouteEvents(ctx, routes, k.subRoutes, k.logger, "encap next hops"); routes == nil {
-					return
-				}
+				routesDown()
+				continue
 			}
 			reroute()
-		case _, ok := <-routes.nexthops:
+		case _, ok := <-nexthopsC:
 			if !ok {
-				if routes = resubscribeRouteEvents(ctx, routes, k.subRoutes, k.logger, "encap next hops"); routes == nil {
-					return
-				}
+				routesDown()
+				continue
 			}
 			reroute()
-		case u, ok := <-neighs.updates:
+		case <-routeRetry:
+			routeRetry = nil
+			sub, err := k.subRoutes()
+			if err != nil {
+				routeRetry = time.After(k.routeSt.Failed(err))
+				continue
+			}
+			routes = sub
+			k.routeSt.Restored()
+			reroute()
+		case u, ok := <-neighsC:
 			if !ok {
 				close(neighs.done)
 				neighs = nil
-				for neighs == nil {
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(time.Second):
-					}
-					var err error
-					if neighs, err = k.subscribeNeighs(); err != nil {
-						k.logger.Warn("neighbour resubscribe failed; retrying", zap.Error(err))
-					}
-				}
-				k.setFlag(false, true)
-				pending()
+				neighRetry = time.After(k.neighSt.Ended())
 				continue
 			}
 			switch {
@@ -1151,24 +1192,22 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 					pending()
 				}
 			}
-		case u, ok := <-links.updates:
+		case <-neighRetry:
+			neighRetry = nil
+			sub, err := k.subNeighs()
+			if err != nil {
+				neighRetry = time.After(k.neighSt.Failed(err))
+				continue
+			}
+			neighs = sub
+			k.neighSt.Restored()
+			k.setFlag(false, true)
+			pending()
+		case u, ok := <-linksC:
 			if !ok {
-				// Carrier changes may be lost; the kernel's periodic
-				// re-probe of managed entries still covers them.
 				close(links.done)
 				links = nil
-				for links == nil {
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(time.Second):
-					}
-					var err error
-					if links, err = k.subscribeLinks(); err != nil {
-						k.logger.Warn("link resubscribe failed; retrying", zap.Error(err))
-					}
-				}
-				carrier = carrierState{}
+				linkRetry = time.After(k.linkSt.Ended())
 				continue
 			}
 			if carrier.cameUp(u) && k.hasNexthopsOn(int(u.Index)) {
@@ -1177,6 +1216,23 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 				rearm[u.Index] = time.Now().Add(encapNeighCarrierWindow)
 			} else if !carrier[u.Index] {
 				delete(rearm, u.Index) // down again, or gone
+			}
+		case <-linkRetry:
+			linkRetry = nil
+			sub, err := k.subLinks()
+			if err != nil {
+				linkRetry = time.After(k.linkSt.Failed(err))
+				continue
+			}
+			links = sub
+			k.linkSt.Restored()
+			// The event of a carrier that came back while the subscription
+			// was down is lost: every device up with its carrier now counts
+			// as having got it back.
+			carrier = carrierState{}
+			clear(rearm)
+			if k.resyncCarrier(carrier) {
+				pending()
 			}
 		case <-k.wake:
 			pending()
@@ -1191,4 +1247,26 @@ func (k *EncapNeighKeeper) watch(ctx context.Context, routes *routeSub, neighs *
 			}
 		}
 	}
+}
+
+// resyncCarrier records in c the carrier of every device and queues the
+// re-probe of the next hops on each device up with its carrier, as a carrier
+// that came back would. It reports whether one was queued.
+func (k *EncapNeighKeeper) resyncCarrier(c carrierState) bool {
+	links, err := k.linkList()
+	if err != nil {
+		k.logger.Debug("list devices for the carrier state", zap.Error(err))
+		return false
+	}
+	queued := false
+	for _, l := range links {
+		a := l.Attrs()
+		up := a.RawFlags&unix.IFF_UP != 0 && a.RawFlags&unix.IFF_LOWER_UP != 0
+		c[int32(a.Index)] = up
+		if up && k.hasNexthopsOn(a.Index) {
+			k.carrierUp(uint32(a.Index))
+			queued = true
+		}
+	}
+	return queued
 }

@@ -123,7 +123,7 @@ func newEncapNeighEnv(t *testing.T) *encapNeighEnv {
 	if err := netlink.LinkSetNsFd(gwLink, int(peer)); err != nil {
 		t.Fatalf("move the peer: %v", err)
 	}
-	ph, err := netlink.NewHandleAt(peer)
+	ph, err := netlink.NewHandleAt(peer, unix.NETLINK_ROUTE)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,8 +700,7 @@ func TestEncapSweepScale(t *testing.T) {
 // subscribes again, re-resolves its destinations, and keeps reacting to the
 // new subscription's events. Unprivileged: the subscriptions are fakes.
 func TestEncapNeighKeeperResubscribes(t *testing.T) {
-	resubscribeDelay = 10 * time.Millisecond
-	t.Cleanup(func() { resubscribeDelay = time.Second })
+	shortResubscribe(t)
 	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2)}
 	walk := []netip.Addr{netip.MustParseAddr("fc00:1::1")}
 	nt := &fakeNeighTable{entries: map[string]netlink.Neigh{}}

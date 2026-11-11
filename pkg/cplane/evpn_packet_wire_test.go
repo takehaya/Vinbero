@@ -78,12 +78,12 @@ func newEVPNPacketWire(t *testing.T, program *ebpf.Program) *evpnPacketWire {
 		}()
 		fn()
 	}
-	peHandle, err := netlink.NewHandleAt(pe)
+	peHandle, err := netlink.NewHandleAt(pe, unix.NETLINK_ROUTE)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(peHandle.Close)
-	peerHandle, err := netlink.NewHandleAt(peer)
+	peerHandle, err := netlink.NewHandleAt(peer, unix.NETLINK_ROUTE)
 	if err != nil {
 		t.Fatal(err)
 	}

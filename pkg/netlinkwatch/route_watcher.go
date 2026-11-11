@@ -2,13 +2,16 @@ package netlinkwatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"sync"
 
 	"github.com/takehaya/vinbero/pkg/fib"
+	"github.com/takehaya/vinbero/pkg/netlinksub"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -44,8 +47,18 @@ type RouteWatcher struct {
 	// first entry is the sink NewRouteWatcher was built with.
 	sinks      []routeSinkEntry
 	nextSinkID uint64
-	done       chan struct{}
-	wg         sync.WaitGroup
+	// added holds, per table, the prefixes delivered as added and not
+	// removed since, so a resync can remove the ones whose route went away
+	// while the subscription was down. Guarded by mu.
+	added map[uint32]map[netip.Prefix]struct{}
+	// subscribe opens the route event stream and routeList lists a table;
+	// tests replace them.
+	subscribe func(ch chan<- netlink.RouteUpdate, done <-chan struct{}, options netlink.RouteSubscribeOptions) error
+	routeList func(table uint32) ([]netlink.Route, error)
+	// subSt follows the subscription and logs its state changes.
+	subSt *netlinksub.State
+	done  chan struct{}
+	wg    sync.WaitGroup
 }
 
 // routeSinkEntry is one registered sink and the id its removal is keyed by.
@@ -58,10 +71,14 @@ type routeSinkEntry struct {
 // to sink. Further consumers attach with AddSink.
 func NewRouteWatcher(sink RouteSink, logger *zap.Logger) *RouteWatcher {
 	w := &RouteWatcher{
-		logger:  logger.Named("route.watch"),
-		watched: make(map[uint32]map[int]struct{}),
-		done:    make(chan struct{}),
+		logger:    logger.Named("route.watch"),
+		watched:   make(map[uint32]map[int]struct{}),
+		added:     make(map[uint32]map[netip.Prefix]struct{}),
+		subscribe: netlink.RouteSubscribeWithOptions,
+		routeList: listTable,
+		done:      make(chan struct{}),
 	}
+	w.subSt = netlinksub.New(w.logger, "routes")
 	if sink != nil {
 		w.nextSinkID++
 		w.sinks = append(w.sinks, routeSinkEntry{id: w.nextSinkID, sink: sink})
@@ -127,54 +144,141 @@ func (w *RouteWatcher) RegisterTable(table uint32, protocols []string) error {
 func (w *RouteWatcher) UnregisterTable(table uint32) {
 	w.mu.Lock()
 	delete(w.watched, table)
+	delete(w.added, table)
 	w.mu.Unlock()
 }
 
-// Start subscribes to route updates and begins forwarding. ListExisting
-// replays the current routing tables so prefixes present before startup are
-// advertised too, matching FDBWatcher.
+// Start subscribes to route updates in the calling thread's network
+// namespace and begins forwarding. Before the first update it replays the
+// registered tables' existing routes, so prefixes present before startup are
+// advertised too, matching FDBWatcher; the updates that arrived meanwhile
+// follow, so the latest state wins. A subscription that ends (e.g. an ENOBUFS
+// overflow) is subscribed again (netlinksub) and the tables are resynced:
+// their routes are delivered as adds again, and a prefix delivered before
+// whose route is gone now is delivered as removed.
 func (w *RouteWatcher) Start(ctx context.Context) error {
-	updates := make(chan netlink.RouteUpdate, 256)
-	if err := netlink.RouteSubscribeWithOptions(updates, w.done, netlink.RouteSubscribeOptions{
-		ListExisting: true,
-		// A larger socket buffer reduces the chance of an ENOBUFS overflow
-		// during the ListExisting dump or a route-churn burst; ErrorCallback
-		// surfaces any subscription error (including a dump interruption)
-		// instead of letting it pass silently.
-		ReceiveBufferSize: 1 << 20,
-		ErrorCallback: func(err error) {
-			w.logger.Error("netlink route subscription error", zap.Error(err))
-		},
-	}); err != nil {
+	ns, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("route watcher: %w", err)
+	}
+	updates, stop, err := w.subscribeRoutes()
+	if err != nil {
+		_ = ns.Close()
 		return err
 	}
 	w.wg.Go(func() {
-		w.processUpdates(ctx, updates)
+		defer func() { _ = ns.Close() }()
+		w.follow(ctx, ns, updates, stop)
 	})
 	return nil
 }
 
-func (w *RouteWatcher) processUpdates(ctx context.Context, updates <-chan netlink.RouteUpdate) {
+// subscribeRoutes subscribes to route updates in the calling thread's
+// network namespace. Closing stop ends the subscription. The tables are listed with requests of their own: the
+// library's ListExisting would send its request to every other subscriber of
+// the route group (netlinksub).
+func (w *RouteWatcher) subscribeRoutes() (<-chan netlink.RouteUpdate, chan struct{}, error) {
+	updates := make(chan netlink.RouteUpdate, 256)
+	stop := make(chan struct{})
+	if err := w.subscribe(updates, stop, netlink.RouteSubscribeOptions{
+		// A larger socket buffer reduces the chance of an ENOBUFS overflow
+		// during a route-churn burst.
+		ReceiveBufferSize: 1 << 20,
+		ErrorCallback:     w.subSt.OnError,
+	}); err != nil {
+		close(stop)
+		return nil, nil, fmt.Errorf("subscribe to route updates: %w", err)
+	}
+	return updates, stop, nil
+}
+
+// follow resyncs the tables, then forwards the subscription's updates until
+// the watcher stops, subscribing again and resyncing in ns each time the
+// subscription ends.
+func (w *RouteWatcher) follow(ctx context.Context, ns netns.NsHandle, updates <-chan netlink.RouteUpdate, stop chan struct{}) {
+	if err := enterNetns(ns); err != nil {
+		w.logger.Warn("route watcher: cannot enter the network namespace it watches; a resync may list another", zap.Error(err))
+	}
+	quit := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-w.done:
+		}
+		close(quit)
+	}()
+	for {
+		if err := w.resync(); err != nil {
+			w.logger.Warn("list the routes of the redistributed tables; a missed route reaches the sinks with its next update", zap.Error(err))
+		}
+		if !w.processUpdates(ctx, updates) {
+			close(stop)
+			go drain(updates)
+			return
+		}
+		close(stop)
+		if !w.subSt.Again(quit, func() error {
+			var err error
+			updates, stop, err = w.subscribeRoutes()
+			return err
+		}) {
+			return
+		}
+	}
+}
+
+// resync delivers every redistributed route of the watched tables as added,
+// and as removed each prefix delivered as added whose route is gone.
+func (w *RouteWatcher) resync() error {
+	w.mu.RLock()
+	tables := make(map[uint32]map[int]struct{}, len(w.watched))
+	for t, p := range w.watched {
+		tables[t] = p
+	}
+	w.mu.RUnlock()
+	var errs []error
+	for table, protos := range tables {
+		routes, err := w.routeList(table)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("table %d: %w", table, err))
+			continue
+		}
+		present := map[netip.Prefix]struct{}{}
+		for i := range routes {
+			if p, ok := redistributed(protos, int(routes[i].Protocol), routes[i].Dst); ok {
+				present[p] = struct{}{}
+			}
+		}
+		w.mu.RLock()
+		var gone []netip.Prefix
+		for p := range w.added[table] {
+			if _, ok := present[p]; !ok {
+				gone = append(gone, p)
+			}
+		}
+		w.mu.RUnlock()
+		for p := range present {
+			w.send(table, p, true)
+		}
+		for _, p := range gone {
+			w.send(table, p, false)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// processUpdates forwards updates until the subscription ends (true) or the
+// watcher stops (false).
+func (w *RouteWatcher) processUpdates(ctx context.Context, updates <-chan netlink.RouteUpdate) bool {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-w.done:
-			return
+			return false
 		case update, ok := <-updates:
 			if !ok {
-				// A clean Stop() closes w.done first, so reaching here with
-				// w.done still open means the netlink socket closed the channel
-				// on its own (e.g. an ENOBUFS overflow). Log loudly: route
-				// changes are no longer observed, so advertised routes can
-				// silently go stale until the daemon restarts.
-				select {
-				case <-w.done:
-				default:
-					w.logger.Error("netlink route update channel closed unexpectedly; " +
-						"auto-advertise is no longer tracking route changes")
-				}
-				return
+				return true
 			}
 			w.handleRouteUpdate(update)
 		}
@@ -202,26 +306,47 @@ func (w *RouteWatcher) handleRouteUpdate(u netlink.RouteUpdate) {
 // (handleRouteUpdate) and the replay path (DumpTable) so the filter contract
 // lives in one place.
 func (w *RouteWatcher) deliver(table uint32, protos map[int]struct{}, proto int, dst *net.IPNet, added bool) {
-	if _, allow := protos[proto]; !allow {
+	prefix, ok := redistributed(protos, proto, dst)
+	if !ok {
 		return
+	}
+	w.send(table, prefix, added)
+}
+
+// redistributed returns the prefix of a route the protocol allowlist
+// passes.
+func redistributed(protos map[int]struct{}, proto int, dst *net.IPNet) (netip.Prefix, bool) {
+	if _, allow := protos[proto]; !allow {
+		return netip.Prefix{}, false
 	}
 	// A nil destination is the default route / a route with no prefix; nothing
 	// specific to advertise.
 	if dst == nil {
-		return
+		return netip.Prefix{}, false
 	}
-	prefix, ok := fib.IPNetToPrefix(dst)
-	if !ok {
-		return
-	}
+	return fib.IPNetToPrefix(dst)
+}
+
+// send records the change in added and forwards it to every registered sink.
+func (w *RouteWatcher) send(table uint32, prefix netip.Prefix, added bool) {
 	// Copy the sink list so delivery runs without holding w.mu: a sink may
 	// call back into the watcher (RegisterTable / DumpTable).
-	w.mu.RLock()
+	w.mu.Lock()
+	if _, watched := w.watched[table]; watched {
+		if added {
+			if w.added[table] == nil {
+				w.added[table] = map[netip.Prefix]struct{}{}
+			}
+			w.added[table][prefix] = struct{}{}
+		} else {
+			delete(w.added[table], prefix)
+		}
+	}
 	sinks := make([]RouteSink, 0, len(w.sinks))
 	for _, e := range w.sinks {
 		sinks = append(sinks, e.sink)
 	}
-	w.mu.RUnlock()
+	w.mu.Unlock()
 	for _, sink := range sinks {
 		sink.OnRoute(table, prefix, added)
 	}
@@ -238,7 +363,7 @@ func (w *RouteWatcher) Stop() {
 }
 
 // DumpTable replays a registered table's existing routes through the sink as
-// adds. The initial ListExisting replay in Start only covers tables registered
+// adds. The replay of the existing routes in Start only covers tables registered
 // before Start; a table registered later (e.g. a VRF bound at runtime over RPC)
 // needs this to pick up routes already present. Routes are filtered by the same
 // protocol allowlist RegisterTable recorded for the table.
@@ -249,8 +374,7 @@ func (w *RouteWatcher) DumpTable(table uint32) error {
 	if !watched {
 		return fmt.Errorf("table %d is not registered", table)
 	}
-	routes, err := netlink.RouteListFiltered(unix.AF_UNSPEC,
-		&netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+	routes, err := w.routeList(table)
 	if err != nil {
 		return fmt.Errorf("list routes in table %d: %w", table, err)
 	}
@@ -259,4 +383,9 @@ func (w *RouteWatcher) DumpTable(table uint32) error {
 		w.deliver(table, protos, int(r.Protocol), r.Dst, true)
 	}
 	return nil
+}
+
+// listTable lists the routes of a table, both families.
+func listTable(table uint32) ([]netlink.Route, error) {
+	return netlink.RouteListFiltered(unix.AF_UNSPEC, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
 }

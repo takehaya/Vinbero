@@ -119,12 +119,12 @@ func setupWireRig(t *testing.T, prog *ebpf.Program, vrxCIDR string, neighIP net.
 		t.Fatalf("move vinj -> outerNs: %v", err)
 	}
 
-	peH, err := netlink.NewHandleAt(peNs)
+	peH, err := netlink.NewHandleAt(peNs, unix.NETLINK_ROUTE)
 	if err != nil {
 		t.Fatalf("NewHandleAt peNs: %v", err)
 	}
 	t.Cleanup(peH.Close)
-	outerH, err := netlink.NewHandleAt(outerNs)
+	outerH, err := netlink.NewHandleAt(outerNs, unix.NETLINK_ROUTE)
 	if err != nil {
 		t.Fatalf("NewHandleAt outerNs: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/takehaya/vinbero/pkg/netlinksub"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
@@ -22,21 +23,26 @@ var linkSweepInterval = time.Minute
 // can name any more, so no RPC could remove them, and their saved circuits
 // with them. A rename or a new hardware address of an interface with saved
 // circuits is recorded, so the next start still restores them. It watches the network
-// namespace of the calling thread. A subscription that fails (e.g. a
-// receive buffer overflow) is opened again, and every (re)subscription
-// starts with a sweep over the current interfaces, so a deletion missed in
-// between is still caught; the same sweep runs periodically and retries a
-// removal that failed. Close stops it.
+// namespace of the calling thread. A subscription that ends (e.g. a
+// receive buffer overflow) is opened again after a wait that grows with each
+// failed attempt (netlinksub), and every (re)subscription starts with a
+// sweep over the current interfaces, so a deletion missed in between is
+// still caught; the same sweep runs periodically and retries a removal that
+// failed. Close stops it.
 func (v *Vinbero) WatchDevices() error {
 	ns, err := netns.Get()
 	if err != nil {
 		return fmt.Errorf("watch devices: %w", err)
 	}
-	h, err := netlink.NewHandleAt(ns)
+	// Only the route family: a handle opened with no family list opens a
+	// socket of every family the library knows, and opening an XFRM socket
+	// makes the kernel load xfrm_user.
+	h, err := netlink.NewHandleAt(ns, unix.NETLINK_ROUTE)
 	if err != nil {
 		_ = ns.Close()
 		return fmt.Errorf("watch devices: %w", err)
 	}
+	st := netlinksub.New(v.logger, "device watch: links")
 	done := make(chan struct{})
 	stopped := make(chan struct{})
 	v.devMu.Lock()
@@ -45,46 +51,69 @@ func (v *Vinbero) WatchDevices() error {
 	go func() {
 		defer close(stopped)
 		defer func() { h.Close(); _ = ns.Close() }()
+		updates, sub, err := subscribeLinks(ns, st)
 		for {
-			v.watchOnce(ns, h, done)
-			select {
-			case <-done:
+			var d time.Duration
+			if err == nil {
+				if !v.watchOnce(h, updates, sub, done) {
+					return
+				}
+				d = st.Ended()
+			} else {
+				d = st.Failed(err)
+			}
+			if !netlinksub.Wait(done, d) {
 				return
-			case <-time.After(time.Second):
+			}
+			if updates, sub, err = subscribeLinks(ns, st); err == nil {
+				st.Restored()
 			}
 		}
 	}()
 	return nil
 }
 
-// watchOnce runs one subscription until it fails or done is closed.
-func (v *Vinbero) watchOnce(ns netns.NsHandle, h *netlink.Handle, done <-chan struct{}) {
+// subscribeLinks subscribes to link events in ns. Closing sub ends the
+// subscription.
+func subscribeLinks(ns netns.NsHandle, st *netlinksub.State) (<-chan netlink.LinkUpdate, chan struct{}, error) {
 	updates := make(chan netlink.LinkUpdate, 256)
 	sub := make(chan struct{})
-	defer close(sub)
 	err := netlink.LinkSubscribeWithOptions(updates, sub, netlink.LinkSubscribeOptions{
 		Namespace:         &ns,
 		ReceiveBufferSize: 1 << 20,
-		ErrorCallback: func(err error) {
-			v.logger.Warn("device watch: link subscription error", zap.Error(err))
-		},
+		ErrorCallback:     st.OnError,
 	})
 	if err != nil {
-		v.logger.Warn("device watch: subscribe to link events", zap.Error(err))
-		return
+		close(sub)
+		return nil, nil, fmt.Errorf("subscribe to link events: %w", err)
 	}
+	return updates, sub, nil
+}
+
+// watchOnce runs one subscription until it ends (true) or done is closed
+// (false), and closes it.
+func (v *Vinbero) watchOnce(h *netlink.Handle, updates <-chan netlink.LinkUpdate, sub chan struct{}, done <-chan struct{}) bool {
+	defer func() {
+		close(sub)
+		// The subscription's reader may block on a full channel; drained,
+		// it sees the closed socket and ends.
+		go func() {
+			for range updates {
+			}
+		}()
+	}()
 	v.sweepLinks(h)
 	sweep := time.NewTicker(linkSweepInterval)
 	defer sweep.Stop()
 	for {
 		select {
 		case <-done:
-			return
+			return false
 		case <-sweep.C:
 			v.sweepLinks(h)
 		case u, ok := <-updates:
 			if !ok {
-				return // the subscription failed; resubscribe
+				return true // the subscription ended; subscribe again
 			}
 			if u.Family == unix.AF_BRIDGE {
 				// A port leaving a bridge also sends RTM_DELLINK (family

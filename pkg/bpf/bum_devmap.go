@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/takehaya/vinbero/pkg/netlinksub"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 	"go.uber.org/zap"
@@ -122,6 +123,8 @@ type BumDevmapSync struct {
 	resync     uint64
 	resyncPoll time.Duration
 	retryPoll  time.Duration // see bumExcludedRetry
+	// routeSt follows the watch's subscription (WatchRoutes).
+	routeSt *netlinksub.State
 }
 
 // NewBumDevmapSync binds the sync to a loaded collection. modeOf returns the
@@ -153,6 +156,7 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 
 		resyncPoll: bumUplinkResyncPoll,
 		retryPoll:  bumExcludedRetry,
+		routeSt:    netlinksub.New(logger, "xdp BUM: routes"),
 	}
 }
 
@@ -802,22 +806,23 @@ type routeSub struct {
 }
 
 func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
-	return subscribeRouteEvents(s.logger, "xdp BUM")
+	if s.routeSt == nil {
+		s.routeSt = netlinksub.New(s.logger, "xdp BUM: routes")
+	}
+	return subscribeRouteEvents(s.routeSt)
 }
 
 // subscribeRouteEvents subscribes to route updates, nexthop-object updates
 // and IPv6 rule updates (see routeSub). The BUM devmap sync and the
-// encapsulation next-hop keeper share it; label prefixes their log lines.
-func subscribeRouteEvents(logger *zap.Logger, label string) (*routeSub, error) {
+// encapsulation next-hop keeper share it; st gets the subscriptions' errors.
+func subscribeRouteEvents(st *netlinksub.State) (*routeSub, error) {
 	r := &routeSub{
 		routes:   make(chan netlink.RouteUpdate, 256),
 		nexthops: make(chan struct{}, 1),
 		done:     make(chan struct{}),
 	}
 	err := netlink.RouteSubscribeWithOptions(r.routes, r.done, netlink.RouteSubscribeOptions{
-		ErrorCallback: func(err error) {
-			logger.Warn(label+": route subscription failed", zap.Error(err))
-		},
+		ErrorCallback:     st.OnError,
 		ReceiveBufferSize: 1 << 20, // a full table load must not overflow it
 	})
 	if err != nil {
@@ -834,7 +839,7 @@ func subscribeRouteEvents(logger *zap.Logger, label string) (*routeSub, error) {
 		return nil, fmt.Errorf("subscribe to nexthop updates: %w", err)
 	}
 	if err := nh.SetReceiveBufferSize(1<<20, false); err != nil {
-		logger.Debug(label+": cannot grow the nexthop socket's buffer", zap.Error(err))
+		st.OnError(fmt.Errorf("grow the nexthop socket's buffer: %w", err))
 	}
 	go func() {
 		<-r.done
@@ -847,7 +852,7 @@ func subscribeRouteEvents(logger *zap.Logger, label string) (*routeSub, error) {
 				select {
 				case <-r.done:
 				default:
-					logger.Warn(label+": nexthop subscription failed", zap.Error(err))
+					st.OnError(fmt.Errorf("nexthop subscription: %w", err))
 				}
 				return
 			}
@@ -860,29 +865,6 @@ func subscribeRouteEvents(logger *zap.Logger, label string) (*routeSub, error) {
 		}
 	}()
 	return r, nil
-}
-
-// resubscribeDelay is the wait before each resubscribe attempt.
-var resubscribeDelay = time.Second
-
-// resubscribeRouteEvents replaces a subscription that ended (typically
-// ENOBUFS: the kernel dropped notifications), retrying every second. It
-// returns nil when ctx ends first. Updates may have been lost, so the caller
-// treats a new subscription as "everything may have changed".
-func resubscribeRouteEvents(ctx context.Context, old *routeSub, subscribe func() (*routeSub, error), logger *zap.Logger, label string) *routeSub {
-	close(old.done)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(resubscribeDelay):
-		}
-		sub, err := subscribe()
-		if err == nil {
-			return sub
-		}
-		logger.Warn(label+": route resubscribe failed; retrying", zap.Error(err))
-	}
 }
 
 // routeSyncMaxDelay caps how long a steady stream of route updates can
@@ -971,42 +953,57 @@ func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce
 		schedule(wait)
 	}
 	// The subscription ended (typically ENOBUFS: the kernel dropped
-	// notifications). Updates may be lost, so subscribe again and rebuild
-	// everything. False when ctx ended first.
-	resubscribe := func() bool {
-		if sub = resubscribeRouteEvents(ctx, sub, s.subscribeRoutes, s.logger, "xdp BUM"); sub == nil {
-			return false
-		}
-		first = time.Time{}
-		schedule(0)
-		return true
+	// notifications). It is subscribed again after a wait (netlinksub)
+	// while the polls go on, and as updates may be lost, everything is
+	// rebuilt once it is back.
+	var again <-chan time.Time
+	ended := func() {
+		close(sub.done)
+		go drain(sub.routes)
+		sub = nil
+		again = time.After(s.routeSt.Ended())
 	}
 	defer func() {
 		timer.Stop()
 		if sub != nil {
 			close(sub.done)
+			go drain(sub.routes)
 		}
 	}()
 	for {
+		var (
+			routesC   <-chan netlink.RouteUpdate
+			nexthopsC <-chan struct{}
+		)
+		if sub != nil {
+			routesC, nexthopsC = sub.routes, sub.nexthops
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case _, ok := <-sub.routes:
+		case _, ok := <-routesC:
 			if !ok {
-				if !resubscribe() {
-					return
-				}
+				ended()
 				continue
 			}
 			pending()
-		case _, ok := <-sub.nexthops:
+		case _, ok := <-nexthopsC:
 			if !ok {
-				if !resubscribe() {
-					return
-				}
+				ended()
 				continue
 			}
 			pending()
+		case <-again:
+			again = nil
+			next, err := s.subscribeRoutes()
+			if err != nil {
+				again = time.After(s.routeSt.Failed(err))
+				continue
+			}
+			sub = next
+			s.routeSt.Restored()
+			first = time.Time{}
+			schedule(0)
 		case <-resync.C:
 			if s.uplinkResyncRose() {
 				pending()
