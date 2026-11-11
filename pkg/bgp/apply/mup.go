@@ -849,9 +849,13 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) bool {
 		// old entry is still there.
 		a.rememberMUPOwnedCleanup(mupRecoveryKey{st.instance, endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)})
 	}
+	// The session has moved; a release still owed is reported as a failed
+	// write so the tracked pass runs again to pay it.
+	moved := true
 	if moveGate {
 		if !a.releaseMUPGate(st.gateVRF, dp.gatePrefix, gateOwner, dp.deleteGate) {
 			a.oweMUPGateRelease(mupGateKey{vrf: st.gateVRF, prefix: dp.gatePrefix})
+			moved = false
 		}
 		st.gateVRF = newGate
 	}
@@ -860,7 +864,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) bool {
 	a.logger.Info("MUP T2ST uplink re-keyed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 		zap.Uint32("from_vrf_id", old), zap.Uint32("vrf_id", inst))
-	return true
+	return moved
 }
 
 // mupVRFForRoute resolves the VRF a MUP session belongs to: the id of the
@@ -1002,8 +1006,27 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated in applyMUPT2ST
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
 	gateOwner := bpf.OwnerBGPMUPGate(a.localASN)
+	sid := a.resolveDirectSID(r)
+	if sid == "" {
+		if (st.installedSID != "" || st.gateHeld) && !a.uninstallMUPT2ST(st) {
+			// The uplink entry or the gate is still in the data plane, and
+			// forwards towards the SID that no longer resolves. The state is
+			// kept, so the next reconcile retries the removal.
+			return a.mupFailed()
+		}
+		// Log the deferral only on the transition into it (see reconcileMUPT1ST).
+		if !st.deferLogged {
+			a.logger.Info("MUP T2ST uplink deferred (no direct SID yet)",
+				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID))
+			st.deferLogged = true
+		}
+		return true
+	}
+	st.deferLogged = false
 	// A move to another VRF that failed earlier is retried here, so the
-	// tracked pass converges on the VRF the bindings name.
+	// tracked pass converges on the VRF the bindings name. It runs only
+	// once the SID resolves: an unresolvable session is removed from where
+	// it is, above, whether or not it could move.
 	if id, accepted := a.mupVRFForRoute(st.fam, r); accepted && id != st.instance {
 		if st.installedSID != "" {
 			if !a.rekeyMUPT2ST(st, id) {
@@ -1022,23 +1045,6 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 		st.gateHeld = false
 	}
 
-	sid := a.resolveDirectSID(r)
-	if sid == "" {
-		if (st.installedSID != "" || st.gateHeld) && !a.uninstallMUPT2ST(st) {
-			// The uplink entry or the gate is still in the data plane, and
-			// forwards towards the SID that no longer resolves. The state is
-			// kept, so the next reconcile retries the removal.
-			return a.mupFailed()
-		}
-		// Log the deferral only on the transition into it (see reconcileMUPT1ST).
-		if !st.deferLogged {
-			a.logger.Info("MUP T2ST uplink deferred (no direct SID yet)",
-				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID))
-			st.deferLogged = true
-		}
-		return true
-	}
-	st.deferLogged = false
 	src, ok := a.mupEncapSource(st, "endpoint", r.Endpoint)
 	if !ok {
 		// Waiting for the source locator is not a failed write.
