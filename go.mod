@@ -56,4 +56,4 @@ require (
 // tag tracks the fork's mup-t1st-source-optional-v4.11.0 branch on top of
 // the upstream v4.11.0 release. If the patch lands in upstream gobgp the
 // replace directive can be dropped.
-replace github.com/osrg/gobgp/v4 => github.com/takehaya/gobgp/v4 v4.0.0-20261111074807-607030bc762f
+replace github.com/osrg/gobgp/v4 => github.com/takehaya/gobgp/v4 v4.11.0-mup-draft01
