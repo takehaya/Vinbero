@@ -40,19 +40,12 @@ mv "$cni_path/vinbero-cni" "$cni_path/vinbero"
 
 declare -A pids=()
 cleanup() {
-    local rc=$? sockets="" ns
+    local rc=$?
     trap - EXIT
-    # Taken while the daemons still hold them; printed after the daemons stop.
-    if ((rc != 0)); then
-        for ns in "$PE1" "$PE2"; do
-            sockets+="--- BGP sockets in $ns"$'\n'
-            sockets+=$(ip netns exec "$ns" ss -tno '( sport = :179 or dport = :179 )' 2>&1)$'\n' || true
-        done
-    fi
     for node in "${!pids[@]}"; do kill -TERM "${pids[$node]}" 2>/dev/null || true; done
     for node in "${!pids[@]}"; do wait "${pids[$node]}" 2>/dev/null || true; done
     if ((rc != 0)); then
-        printf '%s' "$sockets"
+        if [[ -e "$work/bgp-sockets.txt" ]]; then cat "$work/bgp-sockets.txt"; fi
         # The BGP session events (peer up and down, connections closed
         # unused) start at the top of a log, where the tail below cuts.
         for log in "$work"/*.log; do echo "--- BGP peer events in $log"; grep -a 'Topic=Peer' "$log" || true; done
@@ -92,7 +85,17 @@ check_not() {
 }
 eventually() {
     local desc=$1; shift
-    if wait_for "$desc" "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi
+    if wait_for "$desc" "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); bgp_sockets; fi
+}
+# bgp_sockets: keep the TCP/179 sockets of both PEs at the first timeout;
+# cleanup prints them if the test fails.
+bgp_sockets() {
+    local ns
+    [[ -e "$work/bgp-sockets.txt" ]] && return 0
+    for ns in "$PE1" "$PE2"; do
+        echo "--- BGP sockets in $ns at the first timeout"
+        ip netns exec "$ns" ss -tno '( sport = :179 or dport = :179 )' 2>&1 || true
+    done > "$work/bgp-sockets.txt"
 }
 
 # netconf <node> [tenant]: PE1's network configuration carries the BGP
