@@ -91,11 +91,12 @@ func waitSessionEstablished(t *testing.T, pe2 *gobgp.Session, pe1 *gobgpsrv.BgpS
 				return false
 			}
 		}
-		up := false
+		up, n := true, 0
 		err = pe1.ListPeer(ctx, &gobgpapi.ListPeerRequest{}, func(p *gobgpapi.Peer) {
-			up = p.GetState().GetSessionState() == gobgpapi.PeerState_SESSION_STATE_ESTABLISHED
+			n++
+			up = up && p.GetState().GetSessionState() == gobgpapi.PeerState_SESSION_STATE_ESTABLISHED
 		})
-		return err == nil && up
+		return err == nil && n > 0 && up
 	})
 }
 
